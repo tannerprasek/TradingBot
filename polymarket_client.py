@@ -1,6 +1,7 @@
 """
 Polymarket CLOB Client Wrapper
 """
+import json
 import logging
 import time
 from typing import Optional, Dict, List, Any
@@ -133,7 +134,17 @@ class PolymarketClient:
             markets = []
             for m in data:
                 # Skip markets without CLOB token IDs
-                clob_token_ids = m.get("clobTokenIds", [])
+                clob_token_ids_raw = m.get("clobTokenIds", [])
+
+                # Handle JSON string format from API
+                if isinstance(clob_token_ids_raw, str):
+                    try:
+                        clob_token_ids = json.loads(clob_token_ids_raw)
+                    except json.JSONDecodeError:
+                        continue
+                else:
+                    clob_token_ids = clob_token_ids_raw
+
                 if not clob_token_ids or len(clob_token_ids) < 2:
                     continue
 
@@ -164,13 +175,14 @@ class PolymarketClient:
         try:
             book = self._clob_client.get_order_book(token_id)
 
+            # Handle OrderBookSummary object from py-clob-client
             bids = [
-                OrderBookLevel(float(b["price"]), float(b["size"]))
-                for b in book.get("bids", [])
+                OrderBookLevel(float(b.price), float(b.size))
+                for b in (book.bids or [])
             ]
             asks = [
-                OrderBookLevel(float(a["price"]), float(a["size"]))
-                for a in book.get("asks", [])
+                OrderBookLevel(float(a.price), float(a.size))
+                for a in (book.asks or [])
             ]
 
             # Sort bids descending, asks ascending
