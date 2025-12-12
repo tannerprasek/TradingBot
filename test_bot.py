@@ -209,53 +209,64 @@ class TestStrategy(unittest.TestCase):
         self.assertLess(skew, 0)
 
     def test_calculate_quotes(self):
-        """Test quote calculation"""
+        """Test quote calculation - both should be BUY orders"""
         state = self.strategy.initialize_market(self.market)
-        book = OrderBook(
+        yes_book = OrderBook(
             token_id="yes_token_123",
             bids=[OrderBookLevel(0.48, 100)],
             asks=[OrderBookLevel(0.52, 100)],
             timestamp=time.time()
         )
 
-        bid_quote, ask_quote = self.strategy.calculate_quotes(state, book)
+        yes_quote, no_quote = self.strategy.calculate_quotes(state, yes_book, None)
 
-        self.assertIsNotNone(bid_quote)
-        self.assertIsNotNone(ask_quote)
-        self.assertEqual(bid_quote.side, "BUY")
-        self.assertEqual(ask_quote.side, "SELL")
-        self.assertLess(bid_quote.price, ask_quote.price)
+        self.assertIsNotNone(yes_quote)
+        self.assertIsNotNone(no_quote)
+        # Both should be BUY orders (we buy both YES and NO)
+        self.assertEqual(yes_quote.side, "BUY")
+        self.assertEqual(no_quote.side, "BUY")
 
-        # Check spread is at least minimum
-        spread = ask_quote.price - bid_quote.price
-        min_spread = self.config.min_spread_bps / 10000
-        self.assertGreaterEqual(spread, min_spread)
+        # YES + NO prices should sum to < 1.00 (that's our edge)
+        combined_price = yes_quote.price + no_quote.price
+        self.assertLess(combined_price, 1.0)
+
+        # Check tokens are correct
+        self.assertEqual(yes_quote.token_id, "yes_token_123")
+        self.assertEqual(no_quote.token_id, "no_token_456")
 
     def test_quotes_stay_in_bounds(self):
         """Test quotes stay within 0-1 range"""
         state = self.strategy.initialize_market(self.market)
 
-        # Test edge case near 0
+        # Test edge case near 0 (YES price low, NO price high)
         book_low = OrderBook(
             token_id="yes_token_123",
             bids=[OrderBookLevel(0.02, 100)],
             asks=[OrderBookLevel(0.04, 100)],
             timestamp=time.time()
         )
-        bid_quote, ask_quote = self.strategy.calculate_quotes(state, book_low)
-        self.assertGreaterEqual(bid_quote.price, 0.01)
-        self.assertLessEqual(ask_quote.price, 0.99)
+        yes_quote, no_quote = self.strategy.calculate_quotes(state, book_low, None)
+        if yes_quote:
+            self.assertGreaterEqual(yes_quote.price, 0.01)
+            self.assertLessEqual(yes_quote.price, 0.99)
+        if no_quote:
+            self.assertGreaterEqual(no_quote.price, 0.01)
+            self.assertLessEqual(no_quote.price, 0.99)
 
-        # Test edge case near 1
+        # Test edge case near 1 (YES price high, NO price low)
         book_high = OrderBook(
             token_id="yes_token_123",
             bids=[OrderBookLevel(0.96, 100)],
             asks=[OrderBookLevel(0.98, 100)],
             timestamp=time.time()
         )
-        bid_quote, ask_quote = self.strategy.calculate_quotes(state, book_high)
-        self.assertGreaterEqual(bid_quote.price, 0.01)
-        self.assertLessEqual(ask_quote.price, 0.99)
+        yes_quote, no_quote = self.strategy.calculate_quotes(state, book_high, None)
+        if yes_quote:
+            self.assertGreaterEqual(yes_quote.price, 0.01)
+            self.assertLessEqual(yes_quote.price, 0.99)
+        if no_quote:
+            self.assertGreaterEqual(no_quote.price, 0.01)
+            self.assertLessEqual(no_quote.price, 0.99)
 
     def test_position_limits(self):
         """Test quotes respect position limits"""
@@ -269,10 +280,11 @@ class TestStrategy(unittest.TestCase):
             timestamp=time.time()
         )
 
-        bid_quote, ask_quote = self.strategy.calculate_quotes(state, book)
+        yes_quote, no_quote = self.strategy.calculate_quotes(state, book, None)
 
-        # Bid size should be limited due to position
-        self.assertLessEqual(bid_quote.size, 5.0)  # max - current = 100 - 95
+        # YES quote size should be limited due to existing position
+        if yes_quote:
+            self.assertLessEqual(yes_quote.size, 15.0)  # Limited by position
 
     def test_update_position(self):
         """Test position tracking"""

@@ -122,94 +122,91 @@ class MarketMakingStrategy:
     def calculate_quotes(
         self,
         state: StrategyState,
-        order_book: OrderBook
+        yes_book: OrderBook,
+        no_book: Optional[OrderBook]
     ) -> Tuple[Optional[Quote], Optional[Quote]]:
         """
-        Calculate bid and ask quotes for a market.
-        Returns (bid_quote, ask_quote).
+        Calculate BUY quotes for YES and NO tokens.
+        In prediction markets: YES + NO = 1.00
+        Profit if we buy both at prices summing to < 1.00
+
+        Returns (yes_quote, no_quote) - both are BUY orders.
         """
-        fair_value = self.calculate_fair_value(order_book)
-        if fair_value is None:
-            logger.warning(f"Cannot calculate fair value for {order_book.token_id}")
+        yes_fair = self.calculate_fair_value(yes_book)
+        if yes_fair is None:
+            logger.warning(f"Cannot calculate fair value for YES token")
             return None, None
 
         # Update last mid price
-        state.last_mid_price = fair_value
+        state.last_mid_price = yes_fair
 
-        # Calculate spread in price terms
+        # Calculate our bid prices
+        # We want: yes_bid + no_bid < 1.00 (that's our edge)
         target_spread = self.config.target_spread_bps / 10000
-        half_spread = target_spread / 2
 
-        # Apply inventory skew
+        # Bid below fair value to capture spread
+        yes_bid_price = yes_fair - (target_spread / 2)
+        no_bid_price = (1.0 - yes_fair) - (target_spread / 2)
+
+        # Apply inventory skew - if we're long YES, lower YES bid, raise NO bid
         skew = self.calculate_inventory_skew(state)
+        yes_bid_price -= skew
+        no_bid_price += skew
 
-        # Calculate raw prices
-        bid_price = fair_value - half_spread - skew
-        ask_price = fair_value + half_spread - skew
+        # Ensure prices are valid (0.01 to 0.99)
+        yes_bid_price = max(0.01, min(0.99, yes_bid_price))
+        no_bid_price = max(0.01, min(0.99, no_bid_price))
 
-        # Ensure prices are valid for prediction markets (0-1 range)
-        bid_price = max(0.01, min(0.99, bid_price))
-        ask_price = max(0.01, min(0.99, ask_price))
+        # Check that combined price < 1.00 (otherwise no edge)
+        combined_price = yes_bid_price + no_bid_price
+        if combined_price >= 1.0:
+            logger.debug(f"No edge: YES {yes_bid_price:.4f} + NO {no_bid_price:.4f} = {combined_price:.4f} >= 1.00")
+            return None, None
 
-        # Ensure minimum spread
-        min_spread = self.config.min_spread_bps / 10000
-        if ask_price - bid_price < min_spread:
-            # Widen spread symmetrically
-            mid = (ask_price + bid_price) / 2
-            bid_price = mid - min_spread / 2
-            ask_price = mid + min_spread / 2
-
-        # Calculate order sizes based on inventory and capital limits
-        # Note: size is in SHARES, order_value = price * size
-        max_pos = self.config.max_position_size
+        edge = 1.0 - combined_price
+        logger.debug(f"Edge: {edge:.4f} (YES {yes_bid_price:.4f} + NO {no_bid_price:.4f} = {combined_price:.4f})")
 
         # Check available capital
         available_capital = self.get_available_capital()
-        if available_capital < 1.0:
+        if available_capital < 2.0:  # Need at least $1 for each side
             logger.warning(f"Max capital reached (${self.config.max_capital:.2f}), skipping new orders")
             return None, None
 
         # Polymarket minimum order value is $1
         MIN_ORDER_VALUE = 1.0
 
-        # Convert max_bet_size (dollars) to shares at current prices
-        max_bid_shares = self.config.max_bet_size / bid_price if bid_price > 0 else 0
-        max_ask_shares = self.config.max_bet_size / ask_price if ask_price > 0 else 0
+        # Split capital between YES and NO
+        capital_per_side = min(self.config.max_bet_size, available_capital / 2)
 
-        # Minimum shares needed for $1 order value
-        min_bid_shares = MIN_ORDER_VALUE / bid_price if bid_price > 0 else 0
-        min_ask_shares = MIN_ORDER_VALUE / ask_price if ask_price > 0 else 0
+        # Convert to shares
+        yes_shares = capital_per_side / yes_bid_price if yes_bid_price > 0 else 0
+        no_shares = capital_per_side / no_bid_price if no_bid_price > 0 else 0
 
-        # Reduce size if approaching position limits
-        remaining_long = max_pos - state.position_yes
-        remaining_short = max_pos - state.position_no
+        # Minimum shares for $1 order
+        min_yes_shares = MIN_ORDER_VALUE / yes_bid_price if yes_bid_price > 0 else 0
+        min_no_shares = MIN_ORDER_VALUE / no_bid_price if no_bid_price > 0 else 0
 
-        # Also limit by available capital (convert to shares)
-        capital_limited_shares = available_capital / bid_price if bid_price > 0 else 0
+        # Position limits
+        max_pos = self.config.max_position_size
+        yes_shares = min(yes_shares, max_pos - state.position_yes)
+        no_shares = min(no_shares, max_pos - state.position_no)
 
-        bid_size = min(max_bid_shares, remaining_long, capital_limited_shares)
-        ask_size = min(max_ask_shares, remaining_short)
-
-        # Ensure size meets minimum $1 order value, or skip
-        bid_quote = Quote(
-            token_id=order_book.token_id,
+        # Create quotes if they meet minimums
+        yes_quote = Quote(
+            token_id=state.yes_token_id,
             side="BUY",
-            price=round(bid_price, 4),
-            size=round(max(bid_size, min_bid_shares), 2)
-        ) if bid_size >= min_bid_shares else None
+            price=round(yes_bid_price, 4),
+            size=round(max(yes_shares, min_yes_shares), 2)
+        ) if yes_shares >= min_yes_shares else None
 
-        # SELL orders require owning tokens - only place if we have inventory
-        can_sell = state.position_yes > 0
-        sell_size = min(ask_size, state.position_yes) if can_sell else 0
+        no_quote = Quote(
+            token_id=state.no_token_id,
+            side="BUY",
+            price=round(no_bid_price, 4),
+            size=round(max(no_shares, min_no_shares), 2)
+        ) if no_shares >= min_no_shares and state.no_token_id else None
 
-        ask_quote = Quote(
-            token_id=order_book.token_id,
-            side="SELL",
-            price=round(ask_price, 4),
-            size=round(max(sell_size, min_ask_shares), 2)
-        ) if can_sell and sell_size >= min_ask_shares else None
-
-        return bid_quote, ask_quote
+        return yes_quote, no_quote
 
     def should_requote(
         self,
@@ -238,8 +235,8 @@ class MarketMakingStrategy:
         no_book: Optional[OrderBook]
     ) -> List[Quote]:
         """
-        Evaluate a market and return quotes to place.
-        For simplicity, we only quote the YES token (NO is the complement).
+        Evaluate a market and return BUY quotes for both YES and NO tokens.
+        Profit comes from buying both when YES_price + NO_price < 1.00.
         """
         quotes = []
 
@@ -247,12 +244,12 @@ class MarketMakingStrategy:
             logger.warning(f"No order book for YES token in {state.market.question[:30]}")
             return quotes
 
-        bid_quote, ask_quote = self.calculate_quotes(state, yes_book)
+        yes_quote, no_quote = self.calculate_quotes(state, yes_book, no_book)
 
-        if bid_quote:
-            quotes.append(bid_quote)
-        if ask_quote:
-            quotes.append(ask_quote)
+        if yes_quote:
+            quotes.append(yes_quote)
+        if no_quote:
+            quotes.append(no_quote)
 
         return quotes
 
