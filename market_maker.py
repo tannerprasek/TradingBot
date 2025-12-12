@@ -162,20 +162,28 @@ class MarketMakerBot:
                 logger.error(f"Error processing market {condition_id}: {e}")
 
     def print_status(self):
-        """Print current status"""
+        """Print current status with P&L"""
         logger.info("=" * 60)
         logger.info("MARKET MAKER STATUS")
         logger.info("=" * 60)
+
+        # Get aggregate P&L
+        pnl = self.strategy.get_total_pnl()
+        logger.info(f">>> TOTAL P&L: ${pnl['total_pnl']:.2f} (Realized: ${pnl['realized_pnl']:.2f}, Unrealized: ${pnl['unrealized_pnl']:.2f})")
+        logger.info(f">>> Trades: {pnl['num_trades']} | Est. Spread Captured: ${pnl['spread_captured']:.2f}")
+        logger.info("-" * 60)
+
         logger.info(f"Active orders: {len(self.active_orders)}")
         logger.info(f"Dry run mode: {self.config.dry_run}")
 
         for state in self.strategy.states.values():
             summary = self.strategy.get_market_summary(state)
+            pnl_str = f"P&L: ${summary['total_pnl']:.2f}" if summary['num_trades'] > 0 else ""
             logger.info(
                 f"  {summary['market']}: "
-                f"pos_yes={summary['position_yes']:.2f}, "
-                f"pos_no={summary['position_no']:.2f}, "
-                f"mid={summary['last_mid']}"
+                f"pos={summary['position_yes']:.1f}, "
+                f"mid={summary['last_mid']:.4f if summary['last_mid'] else 'N/A'}, "
+                f"trades={summary['num_trades']} {pnl_str}"
             )
         logger.info("=" * 60)
 

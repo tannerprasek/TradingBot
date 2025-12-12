@@ -41,7 +41,12 @@ class StrategyState:
     active_bids: List[str] = field(default_factory=list)
     active_asks: List[str] = field(default_factory=list)
     last_mid_price: Optional[float] = None
-    total_pnl: float = 0.0
+    # P&L tracking
+    realized_pnl: float = 0.0
+    total_bought: float = 0.0  # Total $ spent buying
+    total_sold: float = 0.0    # Total $ received selling
+    num_trades: int = 0
+    spread_captured: float = 0.0  # Estimated spread captured
 
 
 class MarketMakingStrategy:
@@ -234,30 +239,79 @@ class MarketMakingStrategy:
         size: float,
         price: float
     ):
-        """Update position after a fill"""
+        """Update position and P&L after a fill"""
+        trade_value = size * price
+        state.num_trades += 1
+
         if token_id == state.yes_token_id:
             if side == "BUY":
                 state.position_yes += size
+                state.total_bought += trade_value
             else:
                 state.position_yes -= size
+                state.total_sold += trade_value
         elif token_id == state.no_token_id:
             if side == "BUY":
                 state.position_no += size
+                state.total_bought += trade_value
             else:
                 state.position_no -= size
+                state.total_sold += trade_value
+
+        # Calculate realized P&L (simplified: sold - bought when flat)
+        state.realized_pnl = state.total_sold - state.total_bought
+
+        # Estimate spread captured (half spread per round trip)
+        if state.num_trades >= 2:
+            avg_spread = self.config.target_spread_bps / 10000
+            round_trips = state.num_trades // 2
+            avg_trade_size = (state.total_bought + state.total_sold) / state.num_trades
+            state.spread_captured = round_trips * avg_spread * avg_trade_size
 
         logger.info(
-            f"Position update: YES={state.position_yes:.2f}, "
-            f"NO={state.position_no:.2f}"
+            f"FILL: {side} {size:.2f} @ {price:.4f} = ${trade_value:.2f} | "
+            f"P&L: ${state.realized_pnl:.2f} | Trades: {state.num_trades}"
         )
 
     def get_market_summary(self, state: StrategyState) -> Dict:
         """Get summary of market state"""
+        # Calculate unrealized P&L
+        unrealized = 0.0
+        if state.last_mid_price and state.position_yes > 0:
+            unrealized = state.position_yes * state.last_mid_price - state.total_bought
+
         return {
             "market": state.market.question[:50],
             "position_yes": state.position_yes,
             "position_no": state.position_no,
             "net_position": state.position_yes - state.position_no,
             "last_mid": state.last_mid_price,
-            "active_orders": len(state.active_bids) + len(state.active_asks)
+            "active_orders": len(state.active_bids) + len(state.active_asks),
+            "realized_pnl": state.realized_pnl,
+            "unrealized_pnl": unrealized,
+            "total_pnl": state.realized_pnl + unrealized,
+            "num_trades": state.num_trades,
+            "spread_captured": state.spread_captured
+        }
+
+    def get_total_pnl(self) -> Dict:
+        """Get aggregate P&L across all markets"""
+        total_realized = 0.0
+        total_unrealized = 0.0
+        total_trades = 0
+        total_spread = 0.0
+
+        for state in self.states.values():
+            summary = self.get_market_summary(state)
+            total_realized += summary["realized_pnl"]
+            total_unrealized += summary["unrealized_pnl"]
+            total_trades += summary["num_trades"]
+            total_spread += summary["spread_captured"]
+
+        return {
+            "realized_pnl": total_realized,
+            "unrealized_pnl": total_unrealized,
+            "total_pnl": total_realized + total_unrealized,
+            "num_trades": total_trades,
+            "spread_captured": total_spread
         }
