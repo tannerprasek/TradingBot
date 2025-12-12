@@ -159,15 +159,22 @@ class MarketMakingStrategy:
             bid_price = mid - min_spread / 2
             ask_price = mid + min_spread / 2
 
-        # Calculate order sizes based on inventory
+        # Calculate order sizes based on inventory and capital limits
         base_size = self.config.max_bet_size
         max_pos = self.config.max_position_size
+
+        # Check available capital
+        available_capital = self.get_available_capital()
+        if available_capital < 0.1:
+            logger.warning(f"Max capital reached (${self.config.max_capital:.2f}), skipping new orders")
+            return None, None
 
         # Reduce size if approaching position limits
         remaining_long = max_pos - state.position_yes
         remaining_short = max_pos - state.position_no
 
-        bid_size = min(base_size, max(0.1, remaining_long))
+        # Also limit by available capital
+        bid_size = min(base_size, max(0.1, remaining_long), available_capital)
         ask_size = min(base_size, max(0.1, remaining_short))
 
         bid_quote = Quote(
@@ -315,3 +322,17 @@ class MarketMakingStrategy:
             "num_trades": total_trades,
             "spread_captured": total_spread
         }
+
+    def get_total_capital_at_risk(self) -> float:
+        """Calculate total capital currently at risk across all positions"""
+        total = 0.0
+        for state in self.states.values():
+            # Capital at risk = total bought that hasn't been sold yet
+            total += state.total_bought - state.total_sold
+        return max(0.0, total)
+
+    def get_available_capital(self) -> float:
+        """Calculate remaining capital available for new positions"""
+        used = self.get_total_capital_at_risk()
+        available = self.config.max_capital - used
+        return max(0.0, available)

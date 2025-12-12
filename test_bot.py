@@ -21,6 +21,7 @@ class TestConfig(unittest.TestCase):
             wallet_address="0x1234567890abcdef",
             signature_type=0,
             max_bet_size=-10,
+            max_capital=100.0,
             market_ids=[],
             dry_run=True
         )
@@ -34,6 +35,7 @@ class TestConfig(unittest.TestCase):
             wallet_address="0x1234567890abcdef",
             signature_type=0,
             max_bet_size=10.0,
+            max_capital=100.0,
             market_ids=[],
             dry_run=True
         )
@@ -46,6 +48,7 @@ class TestConfig(unittest.TestCase):
             wallet_address="0x1234567890abcdef",
             signature_type=5,
             max_bet_size=10.0,
+            max_capital=100.0,
             market_ids=[],
             dry_run=True
         )
@@ -116,6 +119,7 @@ class TestStrategy(unittest.TestCase):
             wallet_address="0x1234567890abcdef",
             signature_type=0,
             max_bet_size=10.0,
+            max_capital=100.0,
             market_ids=[],
             dry_run=True,
             min_spread_bps=50,
@@ -329,6 +333,7 @@ class TestMarketMakerIntegration(unittest.TestCase):
             wallet_address="0x1234567890abcdef",
             signature_type=0,
             max_bet_size=10.0,
+            max_capital=100.0,
             market_ids=[],
             dry_run=True
         )

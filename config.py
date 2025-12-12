@@ -18,6 +18,7 @@ class Config:
 
     # Trading Configuration
     max_bet_size: float  # Max size per order in USDC
+    max_capital: float  # Max total capital at risk across all positions
 
     # Market Selection
     market_ids: List[str]  # Specific markets to trade, empty = auto-select
@@ -61,6 +62,7 @@ class Config:
             wallet_address=wallet_address,
             signature_type=int(os.getenv("SIGNATURE_TYPE", "0")),
             max_bet_size=float(os.getenv("MAX_BET_SIZE", "10.0")),
+            max_capital=float(os.getenv("MAX_CAPITAL", "100.0")),
             market_ids=market_ids,
             dry_run=os.getenv("DRY_RUN", "true").lower() == "true",
         )
@@ -69,6 +71,10 @@ class Config:
         """Validate configuration"""
         if self.max_bet_size <= 0:
             raise ValueError("MAX_BET_SIZE must be positive")
+        if self.max_capital <= 0:
+            raise ValueError("MAX_CAPITAL must be positive")
+        if self.max_bet_size > self.max_capital:
+            raise ValueError("MAX_BET_SIZE cannot exceed MAX_CAPITAL")
         if self.signature_type not in [0, 1, 2]:
             raise ValueError("SIGNATURE_TYPE must be 0, 1, or 2")
         if not self.wallet_address.startswith("0x"):

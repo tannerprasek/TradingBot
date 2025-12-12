@@ -167,8 +167,12 @@ class MarketMakerBot:
         logger.info("MARKET MAKER STATUS")
         logger.info("=" * 60)
 
-        # Get aggregate P&L
+        # Get aggregate P&L and capital usage
         pnl = self.strategy.get_total_pnl()
+        capital_used = self.strategy.get_total_capital_at_risk()
+        capital_available = self.strategy.get_available_capital()
+
+        logger.info(f">>> CAPITAL: ${capital_used:.2f} / ${self.config.max_capital:.2f} used (${capital_available:.2f} available)")
         logger.info(f">>> TOTAL P&L: ${pnl['total_pnl']:.2f} (Realized: ${pnl['realized_pnl']:.2f}, Unrealized: ${pnl['unrealized_pnl']:.2f})")
         logger.info(f">>> Trades: {pnl['num_trades']} | Est. Spread Captured: ${pnl['spread_captured']:.2f}")
         logger.info("-" * 60)

@@ -66,6 +66,12 @@ Configuration:
     )
 
     parser.add_argument(
+        "--max-capital",
+        type=float,
+        help="Maximum total capital at risk in USDC (default: 100)"
+    )
+
+    parser.add_argument(
         "--env",
         type=str,
         default=".env",
@@ -139,6 +145,10 @@ def main():
             config.max_bet_size = args.max_bet
             logger.info(f"Max bet size set to ${args.max_bet}")
 
+        if args.max_capital:
+            config.max_capital = args.max_capital
+            logger.info(f"Max capital set to ${args.max_capital}")
+
         if args.markets:
             config.market_ids = [m.strip() for m in args.markets.split(",")]
             logger.info(f"Trading specific markets: {config.market_ids}")
@@ -159,6 +169,7 @@ def main():
         logger.info(f"Configuration:")
         logger.info(f"  Wallet: {config.wallet_address[:10]}...{config.wallet_address[-6:]}")
         logger.info(f"  Max Bet Size: ${config.max_bet_size}")
+        logger.info(f"  Max Capital: ${config.max_capital}")
         logger.info(f"  Dry Run: {config.dry_run}")
         logger.info(f"  Target Spread: {config.target_spread_bps} bps")
         logger.info(f"  Refresh Interval: {config.order_refresh_seconds}s")
