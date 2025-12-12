@@ -198,12 +198,16 @@ class MarketMakingStrategy:
             size=round(max(bid_size, min_bid_shares), 2)
         ) if bid_size >= min_bid_shares else None
 
+        # SELL orders require owning tokens - only place if we have inventory
+        can_sell = state.position_yes > 0
+        sell_size = min(ask_size, state.position_yes) if can_sell else 0
+
         ask_quote = Quote(
             token_id=order_book.token_id,
             side="SELL",
             price=round(ask_price, 4),
-            size=round(max(ask_size, min_ask_shares), 2)
-        ) if ask_size >= min_ask_shares else None
+            size=round(max(sell_size, min_ask_shares), 2)
+        ) if can_sell and sell_size >= min_ask_shares else None
 
         return bid_quote, ask_quote
 
