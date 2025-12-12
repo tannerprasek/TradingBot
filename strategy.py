@@ -160,36 +160,50 @@ class MarketMakingStrategy:
             ask_price = mid + min_spread / 2
 
         # Calculate order sizes based on inventory and capital limits
-        base_size = self.config.max_bet_size
+        # Note: size is in SHARES, order_value = price * size
         max_pos = self.config.max_position_size
 
         # Check available capital
         available_capital = self.get_available_capital()
-        if available_capital < 0.1:
+        if available_capital < 1.0:
             logger.warning(f"Max capital reached (${self.config.max_capital:.2f}), skipping new orders")
             return None, None
+
+        # Polymarket minimum order value is $1
+        MIN_ORDER_VALUE = 1.0
+
+        # Convert max_bet_size (dollars) to shares at current prices
+        max_bid_shares = self.config.max_bet_size / bid_price if bid_price > 0 else 0
+        max_ask_shares = self.config.max_bet_size / ask_price if ask_price > 0 else 0
+
+        # Minimum shares needed for $1 order value
+        min_bid_shares = MIN_ORDER_VALUE / bid_price if bid_price > 0 else 0
+        min_ask_shares = MIN_ORDER_VALUE / ask_price if ask_price > 0 else 0
 
         # Reduce size if approaching position limits
         remaining_long = max_pos - state.position_yes
         remaining_short = max_pos - state.position_no
 
-        # Also limit by available capital
-        bid_size = min(base_size, max(0.1, remaining_long), available_capital)
-        ask_size = min(base_size, max(0.1, remaining_short))
+        # Also limit by available capital (convert to shares)
+        capital_limited_shares = available_capital / bid_price if bid_price > 0 else 0
 
+        bid_size = min(max_bid_shares, remaining_long, capital_limited_shares)
+        ask_size = min(max_ask_shares, remaining_short)
+
+        # Ensure size meets minimum $1 order value, or skip
         bid_quote = Quote(
             token_id=order_book.token_id,
             side="BUY",
             price=round(bid_price, 4),
-            size=round(bid_size, 2)
-        ) if bid_size > 0 else None
+            size=round(max(bid_size, min_bid_shares), 2)
+        ) if bid_size >= min_bid_shares else None
 
         ask_quote = Quote(
             token_id=order_book.token_id,
             side="SELL",
             price=round(ask_price, 4),
-            size=round(ask_size, 2)
-        ) if ask_size > 0 else None
+            size=round(max(ask_size, min_ask_shares), 2)
+        ) if ask_size >= min_ask_shares else None
 
         return bid_quote, ask_quote
 
