@@ -27,7 +27,7 @@ HTML_NAME = "factorbook.html"
 PILL_CSS = """
 .badge, .spike-chip {
   display: inline-block;
-  font: 650 10px/1.15 ui-sans-serif, system-ui, sans-serif;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
   letter-spacing: 0.04em;
   padding: 2px 6px;
   margin: 0 3px 3px 0;
@@ -35,7 +35,7 @@ PILL_CSS = """
   border: 1px solid #6b7280;
   color: #d1d5db;
   background: #111827;
-  text-transform: uppercase;
+  text-transform: none;
   vertical-align: middle;
 }
 .badge.si-crowded, .spike-chip.si-crowded { color: #f59e0b; border-color: #f59e0b; }
@@ -184,7 +184,7 @@ def render_html(
     :root {{ color-scheme: dark; }}
     body {{
       margin: 0; padding: 24px;
-      font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
+      font: 14px/1.4 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
       background: #0b0f14; color: #e5e7eb;
     }}
     h1 {{ font-size: 18px; font-weight: 650; margin: 0 0 6px; }}
