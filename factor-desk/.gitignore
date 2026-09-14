@@ -6,6 +6,8 @@ __pycache__/
 digest_db.json
 options_abnormal.json
 options_pulse*.json
+dapi_enrichment.json
+dapi_enrichment.json.tmp
 clean/*.csv
 .dapi*
 *.png

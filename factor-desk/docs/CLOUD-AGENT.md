@@ -20,6 +20,16 @@ Regenerate the dashboard HTML via `desk_dash` / `write_dash`. Do not hand-edit o
 - **Refresh on-demand only** (no background polling loop)
 - **No credentials** in repo, env samples, or commits
 
+Skew / IV summary (`attach_skew`, `skew_25d_proxy`) is **additive**. Do not change the v2 mix.
+
+## DAPI enrich
+
+Nine pointer layers in `dapi_enrich.py` (no news). Refresh stage after options pulse (~50–60%). Query/body `intraday=1` is optional and default off.
+
+See [DAPI-ENRICH.md](DAPI-ENRICH.md) for field candidates, chip thresholds, and Desktop copy steps.
+
+Never invent Bloomberg numbers. Null + reason. Capacity → skip enrich, continue Refresh.
+
 ## Secrets and dumps
 
-No Bloomberg secrets. No csv/json dumps. Those paths are gitignored (see `factor-desk/.gitignore`).
+No Bloomberg secrets. No csv/json dumps (`dapi_enrichment.json`, `options_abnormal.json`, …). Those paths are gitignored (see `factor-desk/.gitignore`).

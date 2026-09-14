@@ -26,18 +26,24 @@ See [docs/CLOUD-AGENT.md](docs/CLOUD-AGENT.md) and [STRUCTURE.md](STRUCTURE.md).
 
 ```
 factor-desk/
-  add_server.py          # sidecar HTTP on :8765
-  desk_dash.py           # dashboard assembly
+  dapi_enrich.py         # DAPI enrichment pack (9 layers, no news)
+  add_server.py          # sidecar HTTP on :8765 — Refresh + intraday=1
+  desk_dash.py           # dashboard assembly + enrich pills
   write_dash.py          # write factorbook.html
-  pull_options_pulse.py  # options pulse + score v2
-  momentum_screen.py
+  pull_options_pulse.py  # options pulse + score v2 + skew
+  momentum_screen.py     # MOM rows + enrich attach
   early_warning.py
   clean_ingest.py
   ingest_cov.py
   dapi_keepalive.py
   troughing.py
+  docs/DAPI-ENRICH.md
   docs/
   scripts/
+  tests/
 ```
 
-Stubs are marked `# TODO: sync from Desktop factorbook` until the desktop tree is copied in.
+Refresh: `prices → options pulse → dapi_enrich (~50–60%) → rebuild`.
+Optional: `GET/POST /refresh?intraday=1` (default off). See [docs/DAPI-ENRICH.md](docs/DAPI-ENRICH.md).
+
+Desktop copies `dapi_enrich.py` into `C:\Users\MLP\Desktop\factorbook` and merges the thin hooks. Remaining ingest/troughing modules stay Desktop-owned until synced.
