@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.csv
+*.xlsx
+digest_db.json
+options_abnormal.json
+options_pulse*.json
+clean/*.csv
+.dapi*
+*.png
+factorbook_desktop_latest.html
+factorbook.html
