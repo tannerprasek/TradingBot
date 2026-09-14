@@ -28,6 +28,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `docs/OPTIONS-PULSE.md` | Options pulse notes |
 | `docs/DAILY-PIPE.md` | Daily pipeline notes |
 | `README-pull.md` | Pull / refresh notes |
+| `DEPLOY-HOOKS.md` | Minimal patches for live Desktop modules |
 
 ## Scripts
 
