@@ -196,6 +196,7 @@ def strip_js() -> str:
 (function () {
   var STRIP_ID = "gics-filter-strip";
   var selected = "";
+  var builtKey = null;
   var LABEL = {
     "Energy": "EN", "Materials": "MAT", "Industrials": "IND",
     "Consumer Discretionary": "DISC", "Consumer Staples": "STAP",
@@ -242,6 +243,7 @@ def strip_js() -> str:
       var el = nodes[i];
       if (isChrome(el)) continue;
       if (el.closest && el.closest("#gics-filter-strip")) continue;
+      if (out.indexOf(el) >= 0) continue;
       out.push(el);
     }
     return out;
@@ -308,7 +310,12 @@ def strip_js() -> str:
 
   function apply() {
     var map = db();
-    renderChips(uniqueSectors(map));
+    var sectors = uniqueSectors(map);
+    var key = sectors.join("|");
+    if (builtKey !== key) {
+      renderChips(sectors);
+      builtKey = key;
+    }
     var cards = cardNodes();
     for (var i = 0; i < cards.length; i++) {
       var el = cards[i];
