@@ -172,6 +172,17 @@ FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     "turnover": ("EQY_TURNOVER", "TURNOVER"),
     # 9. Beta
     "beta": ("BETA_ADJ_OVERRIDABLE", "BETA_PRIMES", "EQY_BETA", "EQY_RAW_BETA"),
+    # 10. GICS (names only — never invent a ticker→sector map)
+    "gics_sector_name": ("GICS_SECTOR_NAME", "GICS_SECTOR"),
+    "gics_industry_group_name": ("GICS_INDUSTRY_GROUP_NAME", "GICS_INDUSTRY_GROUP"),
+    "gics_industry_name": ("GICS_INDUSTRY_NAME", "GICS_INDUSTRY"),
+    "gics_sub_industry_name": ("GICS_SUB_INDUSTRY_NAME", "GICS_SUB_INDUSTRY"),
+    # 11. Horizon returns (Bloomberg CHG_PCT_* is percent units)
+    "ret_1d": ("CHG_PCT_1D", "PX_CHG_PCT_1D", "1D_PCT_CHG"),
+    "ret_1w": ("CHG_PCT_5D", "CHG_PCT_1W", "1WK_PCT_CHG", "PX_PCT_CHG_5D"),
+    "ret_1m": ("CHG_PCT_1M", "1MO_PCT_CHG", "PX_PCT_CHG_1M"),
+    "ret_3m": ("CHG_PCT_3M", "3MO_PCT_CHG", "PX_PCT_CHG_3M"),
+    "ret_ytd": ("CHG_PCT_YTD", "YTD_PCT_CHG", "PX_YTD_PCT_CHG"),
 }
 
 # Equity-only packs pulled on the name. Option-contract fields stay separate.
@@ -200,6 +211,17 @@ EQUITY_PACK_KEYS = (
 INTRADAY_PACK_KEYS = ("session_volume", "vwap", "turnover")
 
 OPTION_PACK_KEYS = ("opt_delta", "opt_iv", "opt_volume", "opt_oi")
+
+# Pulled by sectors.py (separate Refresh stage) so the 9-layer pointer pack
+# stays the same size. First-success names; no invented classifications.
+GICS_PACK_KEYS = (
+    "gics_sector_name",
+    "gics_industry_group_name",
+    "gics_industry_name",
+    "gics_sub_industry_name",
+)
+
+RETURN_PACK_KEYS = ("ret_1d", "ret_1w", "ret_1m", "ret_3m", "ret_ytd")
 
 # Optional local equity → CDS/bond yellow-key map. Empty by default so we never
 # pretend a mapped ticker has an OAS we did not pull. Desktop may extend.
@@ -270,6 +292,31 @@ def as_float(value: Any) -> float | None:
     return out
 
 
+def as_str(value: Any) -> str | None:
+    """Text field helper (GICS names). Never maps a code to a name."""
+    if is_na(value):
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        if value.is_integer():
+            return str(int(value))
+        text = str(value).strip()
+        return text or None
+    if isinstance(value, int):
+        return str(value)
+    text = str(value).strip()
+    if not text or text.upper() in NA_STRINGS:
+        return None
+    return text
+
+
 def as_date(value: Any) -> date | None:
     if is_na(value):
         return None
@@ -327,9 +374,17 @@ def first_success(
             if parsed is None:
                 continue
             return parsed, mnemonic, None
+        if as_type == "str":
+            parsed = as_str(value)
+            if parsed is None:
+                continue
+            return parsed, mnemonic, None
         parsed = as_float(value)
         if parsed is None:
             continue
+        if as_type == "pct":
+            # Bloomberg CHG_PCT_* is percent units (2.5 → 2.5%).
+            return parsed / 100.0, mnemonic, None
         return parsed, mnemonic, None
     attempted = FIELD_CANDIDATES.get(key, ())
     if not attempted:
@@ -877,6 +932,15 @@ def build_name_record(
         "watch_hint": None,
         "intraday": None,
         "skew": None,
+        "gics_sector_name": None,
+        "gics_industry_group_name": None,
+        "gics_industry_name": None,
+        "gics_sub_industry_name": None,
+        "ret_1d": None,
+        "ret_1w": None,
+        "ret_1m": None,
+        "ret_3m": None,
+        "ret_ytd": None,
         "fields_used": used,
         "null_reasons": reasons,
         "enrich_pills": [],
@@ -994,6 +1058,28 @@ def build_name_record(
         rec["intraday"] = None
 
     rec["skew"] = summarize_skew(options_chain) if options_chain is not None else None
+
+    # GICS / horizon returns — parsed when present in this raw row (sectors
+    # stage requests them). Missing stays None; never invent a classification.
+    for gics_key in GICS_PACK_KEYS:
+        _put(rec, used, reasons, gics_key, raw, gics_key, as_type="str")
+        val = rec.get(gics_key)
+        if isinstance(val, str) and val.isdigit() and len(val) <= 8:
+            rec[gics_key] = None
+            reasons[gics_key] = "code_only_no_name"
+    for ret_key in RETURN_PACK_KEYS:
+        value, field, reason = first_success(raw, ret_key, as_type="pct")
+        rec[ret_key] = value
+        if field:
+            used[ret_key] = field
+        if reason:
+            reasons[ret_key] = reason
+        ctx_val = as_float(px_ctx_row.get(ret_key))
+        if ctx_val is not None:
+            rec[ret_key] = ctx_val
+            used[ret_key] = "prices_ctx"
+            reasons.pop(ret_key, None)
+
     rec["enrich_pills"] = build_enrich_pills(rec)
     return rec
 

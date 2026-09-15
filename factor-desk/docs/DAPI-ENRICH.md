@@ -6,7 +6,8 @@ Refresh pipeline (live desk)::
 
     prices (pull_blpapi_live)
       → options pulse (pull_options_pulse, full book)
-      → **dapi_enrich**          ← new stage ~50–60%
+      → **dapi_enrich**          ← ~50–60%
+      → **sectors**              ← ~60–65% GICS + early trend (`sectors.json`)
       → rebuild (run_v0 / write_dash / desk_dash)
 
 Output: `dapi_enrichment.json` next to `options_abnormal.json`::
@@ -74,6 +75,10 @@ Status: `GET /status` → `{pct, stage, busy, last, intraday}`.
 | 8 Intraday | `session_volume`, `vwap`, `turnover` | `VOLUME`/`PX_VOLUME`, `EQY_WEIGHTED_AVG_PX`/`VWAP`, `EQY_TURNOVER`/`TURNOVER` | only if `intraday=1` |
 | 9 Beta / residual | `beta` | **`BETA_ADJ_OVERRIDABLE`** then `BETA_PRIMES` then `EQY_BETA` then `EQY_RAW_BETA` | winner in `beta_field` |
 | | `residual_20d` | `r_stock_20d − β × r_mkt_20d` if both 20d returns are in `prices_ctx` (mkt default `SPY US Equity`) | else **beta-only** — no extra hist pull |
+| 10 GICS (sectors stage) | `gics_sector_name` | `GICS_SECTOR_NAME`, `GICS_SECTOR` | numeric code → not a name |
+| | `gics_industry_name` | `GICS_INDUSTRY_NAME`, `GICS_INDUSTRY` | |
+| | `gics_sub_industry_name` | `GICS_SUB_INDUSTRY_NAME`, `GICS_SUB_INDUSTRY` | |
+| 11 Horizon returns (sectors stage) | `ret_1d` / `ret_1w` / `ret_1m` / `ret_ytd` | `CHG_PCT_1D` / `CHG_PCT_5D` / `CHG_PCT_1M` / `CHG_PCT_YTD` (percent units) | overlay `prices_ctx` decimals when present |
 
 `meta.fields_attempted` / `fields_resolved` / `fields_failed` list what this run saw. `meta.skips` logs chunk / capacity / session skips.
 

@@ -1,8 +1,8 @@
 # Desktop merge hooks (live tree)
 
-Copy `dapi_enrich.py` next to the live `add_server.py` at `C:\Users\MLP\Desktop\factorbook`. **Do not replace** the live `add_server.py` / `desk_dash.py` / `momentum_screen.py` / `pull_options_pulse.py`. Paste only the blocks below.
+Copy `dapi_enrich.py` and `sectors.py` next to the live `add_server.py` at `C:\Users\MLP\Desktop\factorbook`. **Do not replace** the live `add_server.py` / `desk_dash.py` / `momentum_screen.py` / `pull_options_pulse.py`. Paste only the blocks below.
 
-Writes `dapi_enrichment.json` beside `options_abnormal.json`. Missing file is fine. Capacity (`BLOOMBERG_LIMIT`) must not abort Refresh.
+Writes `dapi_enrichment.json` and `sectors.json` beside `options_abnormal.json`. Missing files are fine. Capacity (`BLOOMBERG_LIMIT`) must not abort Refresh.
 
 ---
 
@@ -163,3 +163,52 @@ name_rec["skew_25d_proxy"] = _skew.get("skew_25d_proxy")
 If Refresh already passes `options_by_name` into `enrich_book`, this drill summary is optional (enrich also stores `skew` per name). Keep it for the options view.
 
 Function used: `dapi_enrich.summarize_skew`.
+
+---
+
+## 5) Sectors tab (`sectors.py`)
+
+Copy `sectors.py` into the live factorbook folder. Do **not** rewrite FLAGS / WATCH / MOM / OPTIONS.
+
+### `add_server.py` — after dapi_enrich, before rebuild (progress ~60–65%)
+
+```python
+import sectors
+
+# tickers, prices_ctx, enrich `book` already in hand from run_dapi_enrich_stage
+try:
+    if progress:
+        progress(60, "sectors")
+    sectors.run_sectors_stage(
+        tickers,
+        prices_ctx=prices_ctx if isinstance(prices_ctx, dict) else None,
+        enrich_book=book,
+        root=Path(r"C:\Users\MLP\Desktop\factorbook"),
+        progress_cb=(lambda frac, stage: progress(int(frac * 100), stage)) if progress else None,
+    )
+except Exception:
+    logging.getLogger("add_server").exception("sectors non-fatal")
+    if progress:
+        progress(65, "sectors failed")
+# --- then existing rebuild: run_v0 / write_dash / desk_dash ---
+```
+
+Optional sidecar read for the HTML (file:// dashboards cannot fetch local JSON):
+
+```python
+# in do_GET, path /sectors or /sectors.json
+payload = sectors.load_sectors() or sectors.empty_book(reason="missing")
+# write JSON response, same CORS as /status
+```
+
+### `desk_dash.py` / live `factorbook.html`
+
+1. Add a **Sectors** nav button next to Home / Momentum / Options (`data-tab="sectors"`).
+2. Add `<section id="tab-sectors">` using `sectors.panel_markup(book)`.
+3. Embed the book: `sectors.embed_json("sectors-db", book)` then `<script>` + `sectors.tab_js()`.
+4. Include `sectors.tab_css()` in the existing dark-desk stylesheet.
+
+`write_dash` / `desk_dash.assemble_and_write` already load `sectors.json` when this cloud `desk_dash.py` is the one writing HTML. If Desktop keeps its own writer, paste the four steps above; keep existing FLAGS/WATCH/MOM/OPTIONS markup untouched.
+
+Functions used: `sectors.run_sectors_stage`, `sectors.load_sectors`, `sectors.embed_json`, `sectors.panel_markup`, `sectors.tab_css`, `sectors.tab_js`.
+
