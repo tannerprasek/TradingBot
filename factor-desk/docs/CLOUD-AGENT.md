@@ -30,6 +30,10 @@ See [DAPI-ENRICH.md](DAPI-ENRICH.md) for field candidates, chip thresholds, and 
 
 Never invent Bloomberg numbers. Null + reason. Capacity → skip enrich, continue Refresh.
 
+## GICS sector chips
+
+Home filter-strip chips (G1–G12 language). Read `gics_sector_name` from enrichment. Do **not** add a Sectors tab, `sectors.json`, or a GICS pull on Refresh. Optional one-shot: `python dapi_enrich.py --gics-once`. See [GICS-FILTER.md](GICS-FILTER.md).
+
 ## Secrets and dumps
 
 No Bloomberg secrets. No csv/json dumps (`dapi_enrichment.json`, `options_abnormal.json`, …). Those paths are gitignored (see `factor-desk/.gitignore`).

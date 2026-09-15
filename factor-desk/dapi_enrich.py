@@ -14,6 +14,8 @@ Public API
 - ``load_enrichment(path=None) -> dict | None``
 - ``build_enrich_pills(rec) -> list[dict]``
 - ``attach_card_fields(card, rec) -> dict``
+- ``fill_gics_sectors(book=None, session=None, ...) -> dict``  (one-shot; not Refresh)
+- ``parse_gics_sector_name(value) -> (name, reason)``
 
 Output: ``dapi_enrichment.json`` next to ``options_abnormal.json``.
 """
@@ -35,6 +37,7 @@ LOG = logging.getLogger("dapi_enrich")
 
 ENRICH_FILENAME = "dapi_enrichment.json"
 OPTIONS_ABNORMAL_FILENAME = "options_abnormal.json"
+GICS_CACHE_FILENAME = "gics_sectors.json"
 
 # ---------------------------------------------------------------------------
 # Thresholds (document in docs/DAPI-ENRICH.md). Pointers only — not signals.
@@ -172,6 +175,9 @@ FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     "turnover": ("EQY_TURNOVER", "TURNOVER"),
     # 9. Beta
     "beta": ("BETA_ADJ_OVERRIDABLE", "BETA_PRIMES", "EQY_BETA", "EQY_RAW_BETA"),
+    # GICS sector name for home filter chips. NOT in EQUITY_PACK_KEYS — Refresh
+    # must not pull this on every run. One-shot: fill_gics_sectors / --gics-once.
+    "gics_sector_name": ("GICS_SECTOR_NAME", "GICS_SECTOR"),
 }
 
 # Equity-only packs pulled on the name. Option-contract fields stay separate.
@@ -201,6 +207,9 @@ INTRADAY_PACK_KEYS = ("session_volume", "vwap", "turnover")
 
 OPTION_PACK_KEYS = ("opt_delta", "opt_iv", "opt_volume", "opt_oi")
 
+# One-shot / cache only. Never appended to the Refresh equity pack.
+GICS_PACK_KEYS = ("gics_sector_name",)
+
 # Optional local equity → CDS/bond yellow-key map. Empty by default so we never
 # pretend a mapped ticker has an OAS we did not pull. Desktop may extend.
 EQUITY_CREDIT_TICKERS: dict[str, dict[str, str]] = {}
@@ -214,6 +223,7 @@ CARD_FIELDS = (
     "beta",
     "credit",
     "enrich_pills",
+    "gics_sector_name",
 )
 
 
@@ -270,6 +280,42 @@ def as_float(value: Any) -> float | None:
     return out
 
 
+def as_str(value: Any) -> str | None:
+    """Text field helper (GICS names). Never maps a code to a name."""
+    if is_na(value):
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        if value.is_integer():
+            return str(int(value))
+        text = str(value).strip()
+        return text or None
+    if isinstance(value, int):
+        return str(value)
+    text = str(value).strip()
+    if not text or text.upper() in NA_STRINGS:
+        return None
+    return text
+
+
+def parse_gics_sector_name(value: Any) -> tuple[str | None, str | None]:
+    """Return ``(name, null_reason)``. Numeric GICS codes are not names."""
+    text = as_str(value)
+    if text is None:
+        return None, "no_gics_name"
+    compact = text.replace(" ", "")
+    if compact.isdigit() and len(compact) <= 8:
+        return None, "code_only_no_name"
+    return text, None
+
+
 def as_date(value: Any) -> date | None:
     if is_na(value):
         return None
@@ -324,6 +370,11 @@ def first_success(
             continue
         if as_type == "date":
             parsed = as_date(value)
+            if parsed is None:
+                continue
+            return parsed, mnemonic, None
+        if as_type == "str":
+            parsed = as_str(value)
             if parsed is None:
                 continue
             return parsed, mnemonic, None
@@ -877,6 +928,7 @@ def build_name_record(
         "watch_hint": None,
         "intraday": None,
         "skew": None,
+        "gics_sector_name": None,
         "fields_used": used,
         "null_reasons": reasons,
         "enrich_pills": [],
@@ -994,6 +1046,20 @@ def build_name_record(
         rec["intraday"] = None
 
     rec["skew"] = summarize_skew(options_chain) if options_chain is not None else None
+
+    # GICS sector name — parse only when a candidate is already on this row
+    # (one-shot fill or a prior cache merge). Refresh equity pack does not
+    # request these fields, so empty raw does not spam null_reasons.
+    rec["gics_sector_name"] = None
+    gics_mnemonics = FIELD_CANDIDATES.get("gics_sector_name", ())
+    if raw and any(m in raw for m in gics_mnemonics):
+        _put(rec, used, reasons, "gics_sector_name", raw, "gics_sector_name", as_type="str")
+        name, extra = parse_gics_sector_name(rec.get("gics_sector_name"))
+        rec["gics_sector_name"] = name
+        if extra and name is None:
+            reasons["gics_sector_name"] = extra
+            used.pop("gics_sector_name", None)
+
     rec["enrich_pills"] = build_enrich_pills(rec)
     return rec
 
@@ -1049,6 +1115,8 @@ def attach_card_fields(card: MutableMapping[str, Any], rec: Mapping[str, Any] | 
     card["credit"] = rec.get("credit")
     pills = rec.get("enrich_pills")
     card["enrich_pills"] = list(pills) if isinstance(pills, list) else []
+    name, _reason = parse_gics_sector_name(rec.get("gics_sector_name"))
+    card["gics_sector_name"] = name
     return card
 
 
@@ -1083,6 +1151,274 @@ def write_enrichment(book: Mapping[str, Any], path: Path | str | None = None) ->
     tmp.write_text(text + "\n", encoding="utf-8")
     os.replace(tmp, p)
     return p
+
+
+def default_gics_cache_path(root: Path | None = None) -> Path:
+    base = Path(root) if root is not None else HERE
+    return base / GICS_CACHE_FILENAME
+
+
+def load_gics_cache(path: Path | str | None = None, root: Path | None = None) -> dict[str, Any] | None:
+    p = Path(path) if path is not None else default_gics_cache_path(root)
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        LOG.warning("could not read %s: %s", p, exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def write_gics_cache(cache: Mapping[str, Any], path: Path | str | None = None, root: Path | None = None) -> Path:
+    p = Path(path) if path is not None else default_gics_cache_path(root)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    text = json.dumps(cache, indent=2, default=str)
+    tmp.write_text(text + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+    return p
+
+
+def gics_from_cache(cache: Mapping[str, Any] | None, ticker: str) -> str | None:
+    if not cache:
+        return None
+    names = cache.get("names") if isinstance(cache, Mapping) else None
+    blob: Mapping[str, Any]
+    if isinstance(names, dict):
+        blob = names
+    else:
+        blob = cache
+    raw = blob.get(ticker) or blob.get(name_key(ticker))
+    if isinstance(raw, Mapping):
+        raw = raw.get("gics_sector_name") or raw.get("sector")
+    name, _reason = parse_gics_sector_name(raw)
+    return name
+
+
+def merge_cached_gics(
+    rec: MutableMapping[str, Any],
+    ticker: str,
+    prev_book: Mapping[str, Any] | None,
+    cache: Mapping[str, Any] | None,
+) -> MutableMapping[str, Any]:
+    """Keep a previously resolved sector across Refresh (no GICS pull)."""
+    current, _reason = parse_gics_sector_name(rec.get("gics_sector_name"))
+    if current:
+        rec["gics_sector_name"] = current
+        return rec
+    prev = lookup_name(prev_book, ticker) if prev_book else None
+    name = None
+    source = None
+    if prev:
+        name, _reason = parse_gics_sector_name(prev.get("gics_sector_name"))
+        if name:
+            source = "prev_enrichment"
+    if not name:
+        name = gics_from_cache(cache, ticker)
+        if name:
+            source = "gics_cache"
+    rec["gics_sector_name"] = name
+    if name:
+        used = rec.setdefault("fields_used", {})
+        if isinstance(used, dict) and "gics_sector_name" not in used:
+            used["gics_sector_name"] = source or "gics_cache"
+        reasons = rec.get("null_reasons")
+        if isinstance(reasons, dict):
+            reasons.pop("gics_sector_name", None)
+    return rec
+
+
+def cache_from_book(book: Mapping[str, Any] | None) -> dict[str, Any]:
+    names_out: dict[str, str] = {}
+    names = (book or {}).get("names") if isinstance(book, Mapping) else None
+    if isinstance(names, dict):
+        for ticker, rec in names.items():
+            if not isinstance(rec, Mapping):
+                continue
+            name, _reason = parse_gics_sector_name(rec.get("gics_sector_name"))
+            if name:
+                names_out[ticker] = name
+    return {
+        "asof": (book or {}).get("asof") if isinstance(book, Mapping) else None,
+        "source": "gics_cache",
+        "names": names_out,
+        "meta": {"n": len(names_out)},
+    }
+
+
+def fill_gics_sectors(
+    book: Mapping[str, Any] | None = None,
+    session: Any | None = None,
+    *,
+    tickers: Sequence[str] | None = None,
+    root: Path | None = None,
+    out_path: Path | str | None = None,
+    cache_path: Path | str | None = None,
+    write: bool = True,
+    only_missing: bool = True,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    progress_cb: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """One-shot GICS sector fill. Not part of Refresh.
+
+    Pulls ``GICS_SECTOR_NAME`` (then ``GICS_SECTOR``) for names missing a
+    sector. Writes ``gics_sectors.json`` and stamps ``dapi_enrichment.json``.
+    Does not invent a ticker→sector map. Capacity degrades like enrich.
+    """
+    root = Path(root) if root is not None else HERE
+    dest = Path(out_path) if out_path is not None else default_out_path(root)
+    working: dict[str, Any]
+    if book is None:
+        loaded = load_enrichment(dest)
+        working = dict(loaded) if loaded else {"asof": _now_iso(), "names": {}, "meta": {}}
+    else:
+        working = {
+            "asof": book.get("asof") or _now_iso(),
+            "names": dict(book.get("names") or {}),
+            "meta": dict(book.get("meta") or {}),
+        }
+        working["names"] = {
+            k: (dict(v) if isinstance(v, Mapping) else {"ticker": k})
+            for k, v in working["names"].items()
+        }
+
+    cache = load_gics_cache(cache_path, root=root)
+    names: dict[str, Any] = working.setdefault("names", {})
+    if not isinstance(names, dict):
+        names = {}
+        working["names"] = names
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    src_tickers = list(tickers) if tickers else list(names.keys())
+    if not src_tickers:
+        src_tickers = discover_tickers(root)
+    for t in src_tickers:
+        k = name_key(str(t))
+        if k and k not in seen:
+            seen.add(k)
+            ordered.append(k)
+            names.setdefault(k, {"ticker": k})
+
+    for t in ordered:
+        rec = names.get(t) or {}
+        if not isinstance(rec, dict):
+            rec = {"ticker": t}
+            names[t] = rec
+        have, _reason = parse_gics_sector_name(rec.get("gics_sector_name"))
+        if not have:
+            have = gics_from_cache(cache, t)
+            if have:
+                rec["gics_sector_name"] = have
+
+    need = []
+    for t in ordered:
+        rec = names.get(t) or {}
+        have, _reason = parse_gics_sector_name(rec.get("gics_sector_name") if isinstance(rec, Mapping) else None)
+        if only_missing and have:
+            continue
+        need.append(t)
+
+    meta = working.setdefault("meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
+        working["meta"] = meta
+    gics_meta: dict[str, Any] = {
+        "gics_once": True,
+        "gics_requested": len(need),
+        "gics_skips": [],
+        "gics_capacity_skipped": False,
+    }
+
+    wrapped = wrap_session(session)
+    if need and wrapped is None:
+        try:
+            wrapped = open_dapi_session()
+        except CapacityError as exc:
+            gics_meta["gics_capacity_skipped"] = True
+            gics_meta["gics_skips"].append(f"capacity:{exc.reason}")
+            wrapped = None
+
+    if need and wrapped is None:
+        gics_meta["gics_skips"].append("no_dapi_session")
+        LOG.info("gics-once: no DAPI session — cache existing names only")
+    elif need:
+        if progress_cb:
+            progress_cb(0.10, "gics_once")
+        fields = flatten_candidates(GICS_PACK_KEYS)
+        try:
+            rows, skips, capacity_hit = batch_refdata(
+                wrapped,
+                need,
+                fields,
+                chunk_size=chunk_size,
+                progress_cb=progress_cb,
+                progress_lo=0.10,
+                progress_hi=0.90,
+            )
+            gics_meta["gics_skips"].extend(skips)
+            gics_meta["gics_capacity_skipped"] = bool(capacity_hit)
+        except CapacityError as exc:
+            rows, skips, capacity_hit = {}, [f"capacity:{exc.reason}"], True
+            gics_meta["gics_skips"].append(f"capacity:{exc.reason}")
+            gics_meta["gics_capacity_skipped"] = True
+            LOG.warning("gics-once skipped (capacity): %s", exc.reason)
+        for t in need:
+            rec = names.get(t)
+            if not isinstance(rec, dict):
+                rec = {"ticker": t}
+                names[t] = rec
+            raw = rows.get(t) or {}
+            value, field, reason = first_success(raw, "gics_sector_name", as_type="str")
+            name, extra = parse_gics_sector_name(value)
+            used = rec.setdefault("fields_used", {})
+            reasons = rec.setdefault("null_reasons", {})
+            if not isinstance(used, dict):
+                used = {}
+                rec["fields_used"] = used
+            if not isinstance(reasons, dict):
+                reasons = {}
+                rec["null_reasons"] = reasons
+            if name:
+                rec["gics_sector_name"] = name
+                if field:
+                    used["gics_sector_name"] = field
+                reasons.pop("gics_sector_name", None)
+            else:
+                if not parse_gics_sector_name(rec.get("gics_sector_name"))[0]:
+                    rec["gics_sector_name"] = None
+                    reasons["gics_sector_name"] = extra or reason or "no_gics_name"
+
+    filled = sum(
+        1
+        for rec in names.values()
+        if isinstance(rec, Mapping) and parse_gics_sector_name(rec.get("gics_sector_name"))[0]
+    )
+    gics_meta["gics_filled"] = filled
+    meta["gics_once"] = gics_meta
+
+    cache_blob = cache_from_book(working)
+    cache_blob["source"] = "dapi_gics_once"
+    cache_blob["meta"] = {
+        "n": len(cache_blob.get("names") or {}),
+        "capacity_skipped": gics_meta["gics_capacity_skipped"],
+        "skips": list(gics_meta["gics_skips"]),
+        "requested": gics_meta["gics_requested"],
+    }
+
+    if write:
+        write_enrichment(working, dest)
+        write_gics_cache(cache_blob, cache_path, root=root)
+        LOG.info(
+            "gics-once wrote %s names with sector (%s requested)",
+            cache_blob["meta"]["n"],
+            gics_meta["gics_requested"],
+        )
+    if progress_cb:
+        progress_cb(1.0, "gics_once done")
+    return working
 
 
 def _chains_for(ticker: str, options_by_name: Mapping[str, Any] | None) -> list[Mapping[str, Any]] | None:
@@ -1154,6 +1490,10 @@ def enrich_book(
         if t not in seen:
             seen.add(t)
             ordered.append(t)
+
+    dest = Path(out_path) if out_path is not None else default_out_path(root)
+    prev_book = load_enrichment(dest) if dest.is_file() else None
+    gics_cache = load_gics_cache(root=root)
 
     meta: dict[str, Any] = {
         "intraday": bool(intraday),
@@ -1245,7 +1585,7 @@ def enrich_book(
     book_names: dict[str, Any] = {}
     for t in ordered:
         raw = rows.get(t) or {}
-        book_names[t] = build_name_record(
+        rec = build_name_record(
             t,
             raw,
             prices_ctx=prices_ctx,
@@ -1254,6 +1594,8 @@ def enrich_book(
             intraday=intraday,
             asof=asof_date,
         )
+        merge_cached_gics(rec, t, prev_book, gics_cache)
+        book_names[t] = rec
 
     book = {
         "asof": asof_iso,
@@ -1261,7 +1603,6 @@ def enrich_book(
         "meta": meta,
     }
     if write:
-        dest = Path(out_path) if out_path is not None else default_out_path(root)
         write_enrichment(book, dest)
         meta["path"] = str(dest)
         LOG.info("wrote %s (%s names)", dest, len(book_names))
@@ -1346,6 +1687,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--universe", default="", help="Path to ticker list")
     p.add_argument("--intraday", action="store_true", help="Also pull session volume vs ADV")
     p.add_argument("--dry-run", action="store_true", help="No DAPI; write null book + reasons")
+    p.add_argument(
+        "--gics-once",
+        action="store_true",
+        help="One-shot GICS sector fill (not Refresh). Writes gics_sectors.json.",
+    )
     p.add_argument("--out", default="", help="Output JSON path")
     p.add_argument("--root", default="", help="Desk root (default: this folder)")
     p.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
@@ -1373,6 +1719,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             session = None
 
     out = Path(args.out) if args.out else default_out_path(root)
+    if args.gics_once:
+        book = fill_gics_sectors(
+            session=session,
+            tickers=tickers,
+            root=root,
+            out_path=out,
+            write=True,
+        )
+        gics_meta = (book.get("meta") or {}).get("gics_once") or {}
+        print(
+            json.dumps(
+                {
+                    "asof": book.get("asof"),
+                    "n": len(book.get("names") or {}),
+                    "path": str(out),
+                    "gics_once": True,
+                    "gics_filled": gics_meta.get("gics_filled"),
+                    "gics_requested": gics_meta.get("gics_requested"),
+                    "gics_capacity_skipped": gics_meta.get("gics_capacity_skipped"),
+                    "gics_skips": gics_meta.get("gics_skips"),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
     book = enrich_book(
         tickers,
         session,
