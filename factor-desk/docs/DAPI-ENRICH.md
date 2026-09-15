@@ -101,9 +101,11 @@ Implied vol for the IV chip = `iv_mid` if present, else mean(call, put) hist IV,
 
 `desk_dash.attach_enrichment` and `momentum_screen.attach_enrichment` set:
 
-`si_ratio`, `vol_regime`, `liq`, `inst_pct`, `event_days`, `beta`, `credit`, `enrich_pills`
+`si_ratio`, `vol_regime`, `liq`, `inst_pct`, `event_days`, `beta`, `credit`, `enrich_pills`, `gics_sector_name`
 
 MOM rows also get `residual_20d`, `watch_hint`, `beta_field` when the name exists in the book.
+
+GICS chips are a **filter strip**, not an enrich layer. Refresh does not pull `GICS_SECTOR_NAME`. See [GICS-FILTER.md](GICS-FILTER.md).
 
 ## Options score v2 (unchanged)
 
