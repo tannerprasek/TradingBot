@@ -158,6 +158,16 @@ class AggregationTests(unittest.TestCase):
         tiny_top, tiny_bot = sectors.top_bottom(tech[:2], k=3)
         self.assertTrue(tiny_top)
         self.assertEqual(tiny_bot, [])
+        five = tech + [
+            {**tech[0], "ticker": "T4 US Equity", "short": "T4", "trend_score": 40.0},
+            {**tech[0], "ticker": "T5 US Equity", "short": "T5", "trend_score": 10.0},
+        ]
+        top3, bot2 = sectors.top_bottom(five, k=3)
+        self.assertEqual(len(top3), 3)
+        self.assertEqual(len(bot2), 2)
+        top_t = {m["ticker"] for m in top3}
+        bot_t = {m["ticker"] for m in bot2}
+        self.assertFalse(top_t & bot_t)
 
     def test_nvda_early_vs_msft_lagging(self) -> None:
         by = {s["short"]: s["trend_score"] for s in self.snaps}

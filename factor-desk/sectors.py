@@ -324,10 +324,11 @@ def top_bottom(members: Sequence[Mapping[str, Any]], k: int = TOP_K) -> tuple[li
     if n <= k:
         return [member_payload(m) for m in ranked], []
     if n < 2 * k:
-        mid = max(1, n // 2)
-        top = ranked[:mid]
-        bottom = list(reversed(ranked[mid:]))
-        return [member_payload(m) for m in top], [member_payload(m) for m in bottom]
+        top_n = (n + 1) // 2
+        return (
+            [member_payload(m) for m in ranked[:top_n]],
+            [member_payload(m) for m in reversed(ranked[top_n:])],
+        )
     return (
         [member_payload(m) for m in ranked[:k]],
         [member_payload(m) for m in reversed(ranked[-k:])],
