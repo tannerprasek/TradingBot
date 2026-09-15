@@ -5,7 +5,7 @@ On-demand refresh only. No background polling. No credentials in this tree.
 Pipeline:
 
 ```
-prices → options pulse → dapi_enrich (~50–60%) → rebuild / write_dash
+prices → options pulse → dapi_enrich (~50–60%) → sectors (~60–65%) → rebuild / write_dash
 ```
 
 Sidecar `:8765` (`add_server.py`):
@@ -16,6 +16,7 @@ Sidecar `:8765` (`add_server.py`):
 | `GET /status` | `{pct, stage, busy, last, intraday}` |
 | `GET /refresh` | start Refresh |
 | `POST /refresh` | start Refresh (JSON body) |
+| `GET /sectors.json` | latest `sectors.json` (empty book if missing) |
 
 Optional flag (default **off**):
 

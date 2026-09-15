@@ -19,6 +19,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import dapi_enrich  # noqa: E402
+import sectors  # noqa: E402
 
 LOG = logging.getLogger("desk_dash")
 HTML_NAME = "factorbook.html"
@@ -57,6 +58,11 @@ PILL_CSS = """
 def load_enrichment(root: Path | None = None) -> dict[str, Any] | None:
     base = Path(root) if root is not None else HERE
     return dapi_enrich.load_enrichment(base / dapi_enrich.ENRICH_FILENAME)
+
+
+def load_sectors(root: Path | None = None) -> dict[str, Any] | None:
+    base = Path(root) if root is not None else HERE
+    return sectors.load_sectors(base / sectors.SECTORS_FILENAME)
 
 
 def attach_enrichment(
@@ -136,6 +142,9 @@ def render_html(
     cards: list[Mapping[str, Any]] | None = None,
     *,
     book: Mapping[str, Any] | None = None,
+    sectors_book: Mapping[str, Any] | None = None,
+    mom_rows: list[Mapping[str, Any]] | None = None,
+    options_book: Mapping[str, Any] | None = None,
     title: str = "Factor Desk",
 ) -> str:
     book = book if book is not None else load_enrichment()
@@ -175,6 +184,13 @@ def render_html(
     asof = html.escape(str((book or {}).get("asof") or ""))
     meta = (book or {}).get("meta") if isinstance(book, Mapping) else {}
     intra = bool((meta or {}).get("intraday")) if isinstance(meta, Mapping) else False
+    sec = sectors_book if sectors_book is not None else load_sectors()
+    mom_n = len(mom_rows or [])
+    opt_n = 0
+    if isinstance(options_book, Mapping):
+        names = options_book.get("names")
+        if isinstance(names, dict):
+            opt_n = len(names)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -188,7 +204,7 @@ def render_html(
       background: #0b0f14; color: #e5e7eb;
     }}
     h1 {{ font-size: 18px; font-weight: 650; margin: 0 0 6px; }}
-    .meta {{ color: #9ca3af; font-size: 12px; margin-bottom: 18px; }}
+    .meta {{ color: #9ca3af; font-size: 12px; margin-bottom: 8px; }}
     .grid {{
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -212,15 +228,37 @@ def render_html(
     dd {{ margin: 0; font-variant-numeric: tabular-nums; }}
     .empty {{ color: #9ca3af; }}
     {PILL_CSS}
+    {sectors.tab_css()}
   </style>
 </head>
 <body>
   <h1>{html.escape(title)}</h1>
   <p class="meta">asof {asof or "—"} · enrich pills only · no news · no earnings calendar · intraday={"on" if intra else "off"}</p>
-  {empty}
-  <div class="grid">
-    {"".join(rows)}
-  </div>
+  <nav class="topnav" role="tablist">
+    <button type="button" class="nav-btn active" data-tab="home">Home</button>
+    <button type="button" class="nav-btn" data-tab="mom">Momentum</button>
+    <button type="button" class="nav-btn" data-tab="opt">Options</button>
+    <button type="button" class="nav-btn" data-tab="sectors">Sectors</button>
+  </nav>
+  <section class="tab-panel active" id="tab-home">
+    {empty}
+    <div class="grid">
+      {"".join(rows)}
+    </div>
+  </section>
+  <section class="tab-panel" id="tab-mom">
+    <p class="note">Momentum screen is Desktop-owned. This tab does not rewrite FLAGS / WATCH / MOM — enrich chips attach via <code>momentum_screen.attach_enrichment</code>. Rows here: {mom_n}.</p>
+  </section>
+  <section class="tab-panel" id="tab-opt">
+    <p class="note">Options pulse on-demand only. Score v2 is unchanged (15C+15P, UI top 20×2). Skew is additive. Names in pulse book: {opt_n}.</p>
+  </section>
+  <section class="tab-panel" id="tab-sectors">
+    {sectors.panel_markup(sec)}
+  </section>
+  {sectors.embed_json("sectors-db", sec)}
+  <script>
+  {sectors.tab_js()}
+  </script>
 </body>
 </html>
 """
@@ -232,12 +270,15 @@ def assemble_and_write(
     root: Path | None = None,
     cards: list[Mapping[str, Any]] | None = None,
     book: Mapping[str, Any] | None = None,
+    sectors_book: Mapping[str, Any] | None = None,
 ) -> Path:
     base = Path(root) if root is not None else HERE
     dest = Path(path) if path is not None else base / HTML_NAME
     if book is None:
         book = load_enrichment(base)
-    text = render_html(cards, book=book)
+    if sectors_book is None:
+        sectors_book = load_sectors(base)
+    text = render_html(cards, book=book, sectors_book=sectors_book)
     dest.write_text(text, encoding="utf-8")
     LOG.info("wrote %s", dest)
     return dest

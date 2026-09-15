@@ -2,7 +2,7 @@
 
 Refresh pipeline (matches live desk)::
 
-    prices → options pulse → dapi_enrich (~50–60%) → rebuild / write_dash
+    prices → options pulse → dapi_enrich (~50–60%) → sectors (~60–65%) → rebuild / write_dash
 
 Intraday (default off)::
 
@@ -34,6 +34,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import dapi_enrich  # noqa: E402
+import sectors  # noqa: E402
 
 LOG = logging.getLogger("add_server")
 HOST = "127.0.0.1"
@@ -200,6 +201,35 @@ def run_dapi_enrich_stage(
         }
 
 
+def run_sectors_stage(
+    tickers: list[str],
+    *,
+    prices_ctx: dict[str, Any] | None = None,
+    enrich_book: dict[str, Any] | None = None,
+    progress_cb: Callable[[float, str], None] | None = None,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """SECTORS HOOK — Refresh stage ~60–65%. GICS + early trend. Never raises."""
+    cb = progress_cb or _progress_cb
+    try:
+        return sectors.run_sectors_stage(
+            tickers,
+            prices_ctx=prices_ctx,
+            enrich_book=enrich_book,
+            progress_cb=cb,
+            root=root,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("sectors stage non-fatal: %s", exc)
+        cb(0.65, "sectors failed")
+        book = sectors.empty_book(reason=f"sectors_error:{exc}")
+        try:
+            sectors.write_sectors(book, sectors.default_out_path(root))
+        except OSError:
+            pass
+        return book
+
+
 def run_rebuild_stage(progress_cb: Callable[[float, str], None], root: Path | None = None) -> str | None:
     progress_cb(0.65, "rebuild")
     _, err_v0 = _try_call("run_v0", ("run", "main"), root=root)
@@ -244,14 +274,25 @@ def run_refresh(
         progress_cb=cb,
         root=root,
     )
+    sectors_book = run_sectors_stage(
+        names,
+        prices_ctx=prices_ctx if isinstance(prices_ctx, dict) else None,
+        enrich_book=book,
+        progress_cb=cb,
+        root=root,
+    )
     rebuild_err = run_rebuild_stage(cb, root=root)
     return {
         "ok": True,
         "n": len(book.get("names") or {}),
         "intraday": bool(intraday),
         "enrich_path": str(dapi_enrich.default_out_path(root)),
+        "sectors_path": str(sectors.default_out_path(root)),
+        "n_sectors": len(sectors_book.get("sectors") or []),
+        "n_sub_industries": len(sectors_book.get("sub_industries") or []),
         "capacity_skipped": bool((book.get("meta") or {}).get("capacity_skipped")),
-        "skips": list((book.get("meta") or {}).get("skips") or []),
+        "skips": list((book.get("meta") or {}).get("skips") or [])
+        + list((sectors_book.get("meta") or {}).get("skips") or []),
         "price_err": price_err,
         "opt_err": opt_err,
         "rebuild_err": rebuild_err,
@@ -310,6 +351,13 @@ class DeskHandler(BaseHTTPRequestHandler):
             return
         if path == "/refresh":
             self._start_refresh(query, None)
+            return
+        if path in ("/sectors", "/sectors.json"):
+            payload = sectors.load_sectors(HERE / sectors.SECTORS_FILENAME)
+            if payload is None:
+                self._json(200, sectors.empty_book(reason="missing"))
+                return
+            self._json(200, payload)
             return
         self._json(404, {"ok": False, "error": "not_found", "path": path})
 

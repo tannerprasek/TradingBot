@@ -30,6 +30,10 @@ See [DAPI-ENRICH.md](DAPI-ENRICH.md) for field candidates, chip thresholds, and 
 
 Never invent Bloomberg numbers. Null + reason. Capacity → skip enrich, continue Refresh.
 
+## Sectors
+
+GICS sector / sub-industry lists + early trend score (`sectors.py`). Refresh stage after enrich (~60–65%). Do not invent ticker→sector maps. See [SECTORS.md](SECTORS.md). Do not rewrite FLAGS / WATCH / MOM / OPTIONS.
+
 ## Secrets and dumps
 
-No Bloomberg secrets. No csv/json dumps (`dapi_enrichment.json`, `options_abnormal.json`, …). Those paths are gitignored (see `factor-desk/.gitignore`).
+No Bloomberg secrets. No csv/json dumps (`dapi_enrichment.json`, `sectors.json`, `options_abnormal.json`, …). Those paths are gitignored (see `factor-desk/.gitignore`).

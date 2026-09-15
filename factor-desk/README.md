@@ -20,15 +20,16 @@ Sidecar: `add_server.py` on port **8765**.
 - **No Bloomberg secrets.** Do not commit credentials or DAPI tokens.
 - **No csv/json dumps.** Data products stay local / gitignored.
 
-See [docs/CLOUD-AGENT.md](docs/CLOUD-AGENT.md) and [STRUCTURE.md](STRUCTURE.md).
+See [docs/CLOUD-AGENT.md](docs/CLOUD-AGENT.md), [docs/SECTORS.md](docs/SECTORS.md), and [STRUCTURE.md](STRUCTURE.md).
 
 ## Layout
 
 ```
 factor-desk/
   dapi_enrich.py         # DAPI enrichment pack (9 layers, no news)
+  sectors.py             # GICS sector / sub-industry + early trend score
   add_server.py          # sidecar HTTP on :8765 — Refresh + intraday=1
-  desk_dash.py           # dashboard assembly + enrich pills
+  desk_dash.py           # dashboard assembly + enrich pills + Sectors tab
   write_dash.py          # write factorbook.html
   pull_options_pulse.py  # options pulse + score v2 + skew
   momentum_screen.py     # MOM rows + enrich attach
@@ -43,7 +44,7 @@ factor-desk/
   tests/
 ```
 
-Refresh: `prices → options pulse → dapi_enrich (~50–60%) → rebuild`.
+Refresh: `prices → options pulse → dapi_enrich (~50–60%) → sectors (~60–65%) → rebuild`.
 Optional: `GET/POST /refresh?intraday=1` (default off). See [docs/DAPI-ENRICH.md](docs/DAPI-ENRICH.md).
 
-Desktop copies `dapi_enrich.py` into `C:\Users\MLP\Desktop\factorbook` and merges the thin hooks. Remaining ingest/troughing modules stay Desktop-owned until synced.
+Desktop copies `dapi_enrich.py` + `sectors.py` into `C:\Users\MLP\Desktop\factorbook` and merges the thin hooks. Remaining ingest/troughing modules stay Desktop-owned until synced.

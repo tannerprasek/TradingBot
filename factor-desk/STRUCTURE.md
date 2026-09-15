@@ -1,14 +1,15 @@
 # Factor Desk — expected modules
 
-Until a dedicated repo exists, this folder is the cloud source of truth. Desktop live tree: `C:\Users\MLP\Desktop\factorbook`. Drop in `dapi_enrich.py` plus the thin Refresh/card hooks; do not rewrite FLAGS/WATCH/MOM.
+Until a dedicated repo exists, this folder is the cloud source of truth. Desktop live tree: `C:\Users\MLP\Desktop\factorbook`. Drop in `dapi_enrich.py` / `sectors.py` plus the thin Refresh/card hooks; do not rewrite FLAGS/WATCH/MOM.
 
 ## Python (repo root of this folder)
 
 | Module | Role |
 | --- | --- |
 | `dapi_enrich.py` | DAPI enrichment pack (9 layers, chips, JSON) |
+| `sectors.py` | GICS sector / sub-industry book + early trend score |
 | `add_server.py` | Sidecar HTTP server on `:8765` (Refresh + `intraday=1`) |
-| `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills |
+| `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills + Sectors tab |
 | `write_dash.py` | Write generated `factorbook.html` |
 | `pull_options_pulse.py` | Options pulse pull + score v2 + skew summary |
 | `momentum_screen.py` | Momentum screen + enrich attach |
@@ -25,6 +26,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `README.md` | Folder source-of-truth + desktop deploy |
 | `docs/CLOUD-AGENT.md` | Cloud edit / score / UI rules |
 | `docs/DAPI-ENRICH.md` | Field packs, chips, Refresh `intraday=1` |
+| `docs/SECTORS.md` | Early trend score, GICS aggregation, DAPI fields |
 | `docs/OPTIONS-PULSE.md` | Options pulse notes |
 | `docs/DAILY-PIPE.md` | Daily pipeline notes |
 | `README-pull.md` | Pull / refresh notes |
@@ -40,4 +42,4 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 
 ## Generated / local (gitignored)
 
-`factorbook.html`, `factorbook_desktop_latest.html`, `*.csv`, `*.xlsx`, `*.png`, `digest_db.json`, `options_abnormal.json`, `options_pulse*.json`, `dapi_enrichment.json`, `clean/*.csv`, `.dapi*`, `.venv/`.
+`factorbook.html`, `factorbook_desktop_latest.html`, `*.csv`, `*.xlsx`, `*.png`, `digest_db.json`, `options_abnormal.json`, `options_pulse*.json`, `dapi_enrichment.json`, `sectors.json`, `clean/*.csv`, `.dapi*`, `.venv/`.
