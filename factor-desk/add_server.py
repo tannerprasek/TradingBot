@@ -244,6 +244,8 @@ def run_refresh(
         progress_cb=cb,
         root=root,
     )
+    # GICS sector chips read gics_sector_name from the enrich file / gics_sectors.json
+    # cache. Do NOT add a sectors Refresh stage here.
     rebuild_err = run_rebuild_stage(cb, root=root)
     return {
         "ok": True,
@@ -311,6 +313,9 @@ class DeskHandler(BaseHTTPRequestHandler):
         if path == "/refresh":
             self._start_refresh(query, None)
             return
+        if path in ("/gics-fill", "/gics_once", "/gics-once"):
+            self._start_gics_fill(query, None)
+            return
         self._json(404, {"ok": False, "error": "not_found", "path": path})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -320,6 +325,9 @@ class DeskHandler(BaseHTTPRequestHandler):
         body = _read_json_body(self)
         if path == "/refresh":
             self._start_refresh(query, body)
+            return
+        if path in ("/gics-fill", "/gics_once", "/gics-once"):
+            self._start_gics_fill(query, body)
             return
         self._json(404, {"ok": False, "error": "not_found", "path": path})
 
@@ -365,6 +373,58 @@ class DeskHandler(BaseHTTPRequestHandler):
         threading.Thread(target=worker, name="factor-desk-refresh", daemon=True).start()
         self._json(202, {"ok": True, "accepted": True, "intraday": intraday, "n_tickers": len(tickers)})
 
+    def _start_gics_fill(self, query: dict[str, list[str]], body: Any) -> None:
+        """Optional one-shot. Not invoked from /refresh."""
+        with _STATE_LOCK:
+            if _STATE["busy"]:
+                self._json(409, {"ok": False, "error": "busy", "status": dict(_STATE)})
+                return
+            _STATE["busy"] = True
+            _STATE["error"] = None
+            _STATE["pct"] = 0
+            _STATE["stage"] = "gics_once"
+
+        tickers: list[str] = []
+        if isinstance(body, dict) and body.get("tickers"):
+            raw = body["tickers"]
+            tickers = raw if isinstance(raw, list) else str(raw).split(",")
+            tickers = [t.strip() for t in tickers if str(t).strip()]
+        if query.get("tickers"):
+            tickers.extend(t.strip() for t in query["tickers"][0].split(",") if t.strip())
+
+        def worker() -> None:
+            try:
+                book = dapi_enrich.fill_gics_sectors(
+                    tickers=tickers or None,
+                    progress_cb=_progress_cb,
+                )
+                gics_meta = (book.get("meta") or {}).get("gics_once") or {}
+                result = {
+                    "ok": True,
+                    "gics_once": True,
+                    "n": len(book.get("names") or {}),
+                    "gics_filled": gics_meta.get("gics_filled"),
+                    "gics_requested": gics_meta.get("gics_requested"),
+                    "gics_capacity_skipped": gics_meta.get("gics_capacity_skipped"),
+                }
+                with _STATE_LOCK:
+                    _STATE["last"] = result
+                    _STATE["error"] = None
+                    _STATE["stage"] = "done"
+                    _STATE["pct"] = 100
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("gics-once failed")
+                with _STATE_LOCK:
+                    _STATE["error"] = str(exc)
+                    _STATE["stage"] = "error"
+                    _STATE["last"] = {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+            finally:
+                with _STATE_LOCK:
+                    _STATE["busy"] = False
+
+        threading.Thread(target=worker, name="factor-desk-gics-once", daemon=True).start()
+        self._json(202, {"ok": True, "accepted": True, "gics_once": True, "n_tickers": len(tickers)})
+
 
 def serve(host: str = HOST, port: int = PORT) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -386,8 +446,32 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=PORT)
     p.add_argument("--once", action="store_true", help="Run one Refresh on stdout and exit")
     p.add_argument("--intraday", action="store_true")
+    p.add_argument(
+        "--gics-once",
+        action="store_true",
+        help="One-shot GICS sector fill (not Refresh) and exit",
+    )
     p.add_argument("--tickers", default="")
     args = p.parse_args(argv)
+    if args.gics_once:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+        tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
+        book = dapi_enrich.fill_gics_sectors(tickers=tickers or None)
+        gics_meta = (book.get("meta") or {}).get("gics_once") or {}
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "gics_once": True,
+                    "n": len(book.get("names") or {}),
+                    "gics_filled": gics_meta.get("gics_filled"),
+                    "gics_requested": gics_meta.get("gics_requested"),
+                },
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
     if args.once:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
         tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]

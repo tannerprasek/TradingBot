@@ -93,7 +93,7 @@ After the card dict exists, before HTML. Safe if `dapi_enrichment.json` is missi
 _book = dapi_enrich.load_enrichment()  # None if file absent
 _rec = dapi_enrich.lookup_name(_book, card.get("ticker") or card.get("name") or "")
 dapi_enrich.attach_card_fields(card, _rec)
-# card now has: si_ratio, vol_regime, liq, inst_pct, event_days, beta, credit, enrich_pills
+# card now has: si_ratio, vol_regime, liq, inst_pct, event_days, beta, credit, enrich_pills, gics_sector_name
 ```
 
 ### Pills on the card (same language as `.badge` / `.spike-chip`)
@@ -112,6 +112,13 @@ def enrich_pills_html(pills):
 Insert `enrich_pills_html(card.get("enrich_pills"))` next to existing troughing / OPT SPIKE chips.
 
 Functions used: `dapi_enrich.load_enrichment`, `dapi_enrich.lookup_name`, `dapi_enrich.attach_card_fields`.
+Optional: `gics_filter.overlay_sector` (fills `gics_sector_name` from enrich or `gics_sectors.json` cache).
+
+On each card `<article>` (or FLAGS/WATCH/MOM/OUTLIERS/OPTIONS row), add:
+
+```html
+data-gics-sector="{{ card.gics_sector_name or '' }}"
+```
 
 ---
 
@@ -163,3 +170,103 @@ name_rec["skew_25d_proxy"] = _skew.get("skew_25d_proxy")
 If Refresh already passes `options_by_name` into `enrich_book`, this drill summary is optional (enrich also stores `skew` per name). Keep it for the options view.
 
 Function used: `dapi_enrich.summarize_skew`.
+
+---
+
+## 5) GICS sector chips (filter strip only)
+
+**Do not** add a Sectors tab, `sectors.py`, `sectors.json`, or a Refresh stage. Copy `gics_filter.py` next to live `dapi_enrich.py`. Copy the updated `dapi_enrich.py` (GICS parse / `--gics-once` / cache). Paste the blocks below into live `desk_dash.py` / `factorbook.html`.
+
+### `desk_dash.py`
+
+```python
+import gics_filter
+
+# after attach_card_fields(card, _rec)
+gics_filter.overlay_sector(card, _rec, cache=dapi_enrich.load_gics_cache())
+```
+
+When emitting each card/row, set `data-ticker` (already present) and `data-gics-sector`:
+
+```python
+sector = card.get("gics_sector_name") or ""
+# <article class="card" data-ticker="..." data-gics-sector="{sector}">
+```
+
+In the **existing top filter strip** (next to G1–G12 / tags), add an empty host — JS fills chips:
+
+```html
+<span id="gics-filter-strip" class="filter-strip gics-chips" role="toolbar" aria-label="GICS sector filter"></span>
+```
+
+Embed the ticker→sector map once per rebuild (from enrich / cache, not a hardcoded map):
+
+```python
+# after cards are attached
+db = gics_filter.sector_db(cards)  # or gics_filter.sector_db(book)
+html += gics_filter.embed_db(db)
+html += "<script>\n" + gics_filter.strip_js() + "\n</script>"
+```
+
+Add `gics_filter.strip_css()` to the existing dark-desk stylesheet (or paste the CSS below).
+
+Functions used: `gics_filter.overlay_sector`, `gics_filter.sector_db`, `gics_filter.embed_db`, `gics_filter.strip_css`, `gics_filter.strip_js`.
+
+### live `factorbook.html` — CSS (paste with other G-chip rules)
+
+```css
+.filter-strip, .gics-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 10px;
+  vertical-align: middle;
+}
+.filter-chip, .gchip {
+  display: inline-block;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  margin: 0;
+  border-radius: 3px;
+  border: 1px solid #6b7280;
+  color: #d1d5db;
+  background: #111827;
+  text-transform: none;
+  vertical-align: middle;
+  cursor: pointer;
+}
+.filter-chip:hover, .gchip:hover { border-color: #9ca3af; color: #f3f4f6; }
+.filter-chip.active, .gchip.active {
+  color: #93c5fd;
+  border-color: #60a5fa;
+  background: #1e3a5f;
+}
+.filter-chip[data-gics-chip=""] { letter-spacing: 0.06em; }
+.gics-hid { display: none !important; }
+```
+
+### live `factorbook.html` — JS
+
+Paste `gics_filter.strip_js()` before `</body>` (or copy `gics_filter.py` and emit it from `desk_dash`). The script only toggles `.gics-hid` on cards/rows. It does not change Momentum Up/Down, Outliers, Options, Refresh, or FLAGS/WATCH selection.
+
+Host: `#gics-filter-strip` inside the existing filter row. Map: `<script type="application/json" id="gics-sector-db">{...}</script>` ticker → `gics_sector_name`.
+
+### Optional one-shot DAPI (not Refresh)
+
+If `gics_sector_name` is missing on the book, run **once**:
+
+```
+python dapi_enrich.py --gics-once
+```
+
+Optional sidecar (do **not** call from `run_refresh_live`):
+
+```python
+# GET/POST /gics-fill  — paste only as a separate handler
+dapi_enrich.fill_gics_sectors(tickers=tickers or None, root=Path(r"C:\Users\MLP\Desktop\factorbook"))
+```
+
+Writes gitignored `gics_sectors.json` and stamps `dapi_enrichment.json`. Refresh continues to skip GICS fields so this does not become a second full-book pull.
+
