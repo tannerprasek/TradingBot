@@ -26,6 +26,7 @@ import chart_marks  # noqa: E402
 import breakout  # noqa: E402
 import book_delta  # noqa: E402
 import desk_hitch  # noqa: E402
+import paper_trade  # noqa: E402
 
 LOG = logging.getLogger("desk_dash")
 HTML_NAME = "factorbook.html"
@@ -180,7 +181,8 @@ def attach_enrichment(
     series_by_ticker: Mapping[str, list] | None = None,
 ) -> MutableMapping[str, Any]:
     """Attach ``si_ratio``, ``vol_regime``, ``liq``, ``inst_pct``, ``event_days``,
-    ``beta``, ``credit``, ``enrich_pills``, ``gics_sector_name``, mom streak.
+    ``beta``, ``credit``, ``enrich_pills``, ``gics_sector_name``, mom streak,
+    paper-trade mark (``px_last`` / ``fd_paper_mark``).
     Missing enrich file → nulls + empty pills.
     """
     if rec is None and book is not None:
@@ -192,7 +194,8 @@ def attach_enrichment(
         rec = None
     dapi_enrich.attach_card_fields(card, rec)
     gics_filter.overlay_sector(card, rec, cache=cache, book=book)
-    return mom_streak.attach_card(card, hist=hist, series_by_ticker=series_by_ticker)
+    mom_streak.attach_card(card, hist=hist, series_by_ticker=series_by_ticker)
+    return paper_trade.attach_mark(card, rec)
 
 
 def attach_all(
@@ -231,7 +234,10 @@ def attach_all(
 
 
 def _article_html(card: Mapping[str, Any], cache: Mapping[str, Any] | None = None) -> str:
-    ticker = html.escape(str(mom_streak.card_ticker(card) or card.get("ticker") or card.get("name") or ""))
+    raw = str(mom_streak.card_ticker(card) or card.get("ticker") or card.get("name") or "")
+    short = mom_streak._short(raw) or raw
+    ticker = html.escape(raw)
+    t_attr = html.escape(short)
     pills = pills_html(card.get("enrich_pills"))
     sector = gics_filter.sector_of(card, cache) or ""
     sector_attr = html.escape(sector, quote=True)
@@ -239,8 +245,11 @@ def _article_html(card: Mapping[str, Any], cache: Mapping[str, Any] | None = Non
     if score is None:
         score, _src = mom_streak.resolve_card_score(card)
     spark = chart_marks.render_svg(card)
+    mark, _why = paper_trade.resolve_mark(card)
+    mark_attr = html.escape(f"{mark:.6g}" if mark is not None else "", quote=True)
+    paper = paper_trade.chrome_host_html(card)
     return f"""
-            <article class="card" data-t="{ticker}" data-ticker="{ticker}" data-gics-sector="{sector_attr}">
+            <article class="card" data-t="{t_attr}" data-ticker="{ticker}" data-gics-sector="{sector_attr}" data-px-last="{mark_attr}">
               <header>
                 <h2>{ticker}</h2>
                 <div class="pills">{pills}</div>
@@ -256,6 +265,7 @@ def _article_html(card: Mapping[str, Any], cache: Mapping[str, Any] | None = Non
                 <div><dt>credit</dt><dd>{_fmt(card.get("credit"))}</dd></div>
                 <div><dt>mom_score</dt><dd>{_fmt(score, 0 if isinstance(score, int) else 2)}</dd></div>
               </dl>
+              {paper}
             </article>
             """
 
@@ -301,6 +311,7 @@ def cards_from_enrichment(book: Mapping[str, Any] | None) -> list[dict[str, Any]
             "mom_score": rec.get("mom_score"),
             "tag_triggers": rec.get("tag_triggers") or rec.get("tags"),
             "px_series": rec.get("px_series") or rec.get("prices") or rec.get("closes"),
+            "px_last": rec.get("px_last") or rec.get("PX_LAST") or rec.get("last") or rec.get("price"),
         }
         cards.append(card)
     return cards
@@ -674,6 +685,7 @@ def render_html(
     streak_map = mom_streak.streak_db(cards, hist=hist)
     chart_map = chart_marks.chart_db(cards)
     hitch_map = desk_hitch.hitch_db(cards, hitch_index)
+    paper_book = paper_trade.load_book(root=root)
     gics_note = ""
     if rows and not sectors:
         gics_note = (
@@ -724,6 +736,7 @@ def render_html(
     {breakout.strip_css()}
     {book_delta.strip_css()}
     {desk_hitch.strip_css()}
+    {paper_trade.strip_css()}
   </style>
 </head>
 <body>
@@ -744,6 +757,7 @@ def render_html(
   {breakout.embed_db(ranked)}
   {book_delta.embed_db(delta)}
   {desk_hitch.embed_db(hitch_map)}
+  {paper_trade.embed_db(paper_book)}
   <script>
   {gics_filter.strip_js()}
   </script>
@@ -762,6 +776,7 @@ def render_html(
     html_text = breakout.ensure_embedded(html_text, ranked)
     html_text = book_delta.ensure_embedded(html_text, delta)
     html_text = desk_hitch.ensure_embedded(html_text, hitch_map)
+    html_text = paper_trade.ensure_embedded(html_text, paper_book)
     return _ensure_options_refresh_ui(html_text)
 
 
@@ -796,6 +811,7 @@ def write_combined(
     )
     delta = book_delta.diff_snapshots(book_delta.load_snapshot(root=base), snap)
     hitch_map = desk_hitch.hitch_db(cards, hitch_index)
+    paper_book = paper_trade.load_book(root=base)
 
     existing = ""
     if html is not None:
@@ -830,6 +846,7 @@ def write_combined(
     text = breakout.ensure_embedded(text, ranked)
     text = book_delta.ensure_embedded(text, delta)
     text = desk_hitch.ensure_embedded(text, hitch_map)
+    text = paper_trade.ensure_embedded(text, paper_book)
     dest.write_text(text, encoding="utf-8")
     try:
         book_delta.write_snapshot(snap, root=base)
