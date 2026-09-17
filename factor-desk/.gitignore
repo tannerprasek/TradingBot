@@ -8,6 +8,10 @@ options_abnormal.json
 options_pulse*.json
 dapi_enrichment.json
 dapi_enrichment.json.tmp
+gics_sectors.json
+gics_sectors.json.tmp
+mom_score_hist.json
+mom_score_hist.json.tmp
 clean/*.csv
 .dapi*
 *.png

@@ -1,6 +1,16 @@
 # Options Pulse
 
-Score v2, 15C+15P, UI top 20×2, on-demand refresh. No name cap (`DEFAULT_MAX_NAMES = 0`).
+Score v2, 15C+15P, UI top 20×2, on-demand **Options Refresh** (not every main Refresh). No name cap (`DEFAULT_MAX_NAMES = 0`).
+
+Main Refresh is `prices → dapi_enrich → rebuild`. Options pulse runs only from:
+
+```
+GET/POST /options-refresh
+GET/POST /refresh?options=1
+POST     /api/refresh_live  {"options": 1}
+```
+
+Then rebuild so the Options tab / OPT SPIKE / abnormal scores update. Progress `/status` uses `kind=options`.
 
 ```
 0.5 * mean(top-3 log1p(vol/avg20))

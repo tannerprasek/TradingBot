@@ -7,9 +7,12 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | Module | Role |
 | --- | --- |
 | `dapi_enrich.py` | DAPI enrichment pack (9 layers, chips, JSON) |
+| `gics_filter.py` | GICS sector chip filter (pure logic + strip CSS/JS; `ensure_embedded`) |
+| `mom_streak.py` | Home momentum rank streak vs 5 (tags + hist + span) |
+| `chart_marks.py` | Chart tag-trigger polish + streak begin/end overlay |
 | `add_server.py` | Sidecar HTTP server on `:8765` (Refresh + `intraday=1`) |
-| `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills |
-| `write_dash.py` | Write generated `factorbook.html` |
+| `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills + `write_combined` |
+| `write_dash.py` | Write generated `factorbook.html` via `write_combined` |
 | `pull_options_pulse.py` | Options pulse pull + score v2 + skew summary |
 | `momentum_screen.py` | Momentum screen + enrich attach |
 | `early_warning.py` | Early-warning signals |
@@ -25,6 +28,8 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `README.md` | Folder source-of-truth + desktop deploy |
 | `docs/CLOUD-AGENT.md` | Cloud edit / score / UI rules |
 | `docs/DAPI-ENRICH.md` | Field packs, chips, Refresh `intraday=1` |
+| `docs/GICS-FILTER.md` | GICS sector chips (no Sectors tab / no Refresh stage) |
+| `docs/MOM-STREAK.md` | Momentum score vs 5 streak tag |
 | `docs/OPTIONS-PULSE.md` | Options pulse notes |
 | `docs/DAILY-PIPE.md` | Daily pipeline notes |
 | `README-pull.md` | Pull / refresh notes |
@@ -40,4 +45,4 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 
 ## Generated / local (gitignored)
 
-`factorbook.html`, `factorbook_desktop_latest.html`, `*.csv`, `*.xlsx`, `*.png`, `digest_db.json`, `options_abnormal.json`, `options_pulse*.json`, `dapi_enrichment.json`, `clean/*.csv`, `.dapi*`, `.venv/`.
+`factorbook.html`, `factorbook_desktop_latest.html`, `*.csv`, `*.xlsx`, `*.png`, `digest_db.json`, `options_abnormal.json`, `options_pulse*.json`, `dapi_enrichment.json`, `gics_sectors.json`, `mom_score_hist.json`, `clean/*.csv`, `.dapi*`, `.venv/`.

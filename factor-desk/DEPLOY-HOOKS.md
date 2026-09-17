@@ -29,11 +29,11 @@ elif isinstance(body, dict) and "intraday" in body:
 
 Also: `GET /refresh?intraday=1` and `POST /refresh` `{"intraday": 1}`.
 
-### Call site — after options pulse, inside `run_refresh_live`
+### Call site — inside `run_refresh_live` (prices → enrich → rebuild)
 
-Progress **~50–60%**. After `pull_options_pulse` (full book), **before** `run_v0` / `write_dash` / `desk_dash`.
+Main **Refresh** does **not** run the full-book options pulse. Skip / gate `pull_options_pulse` on that path. Progress **~50–60%** is still `dapi_enrich`, after prices, **before** `run_v0` / `write_dash` / `desk_dash`.
 
-Pass the live Bloomberg session if you already have one (`session=`). Otherwise `dapi_enrich.open_dapi_session()` reuses `dapi_keepalive.get_session` / `ensure_session` / `session`.
+Pass the live Bloomberg session if you already have one (`session=`). Otherwise `dapi_enrich.open_dapi_session()` reuses `dapi_keepalive.get_session` / `ensure_session` / `session`. `options_by_name` may be `None` on main Refresh (skew stays whatever the last Options Refresh wrote).
 
 ```python
 # --- dapi_enrich stage (50–60%) ---
@@ -93,7 +93,7 @@ After the card dict exists, before HTML. Safe if `dapi_enrichment.json` is missi
 _book = dapi_enrich.load_enrichment()  # None if file absent
 _rec = dapi_enrich.lookup_name(_book, card.get("ticker") or card.get("name") or "")
 dapi_enrich.attach_card_fields(card, _rec)
-# card now has: si_ratio, vol_regime, liq, inst_pct, event_days, beta, credit, enrich_pills
+# card now has: si_ratio, vol_regime, liq, inst_pct, event_days, beta, credit, enrich_pills, gics_sector_name
 ```
 
 ### Pills on the card (same language as `.badge` / `.spike-chip`)
@@ -112,6 +112,13 @@ def enrich_pills_html(pills):
 Insert `enrich_pills_html(card.get("enrich_pills"))` next to existing troughing / OPT SPIKE chips.
 
 Functions used: `dapi_enrich.load_enrichment`, `dapi_enrich.lookup_name`, `dapi_enrich.attach_card_fields`.
+Optional: `gics_filter.overlay_sector` (fills `gics_sector_name` from enrich or `gics_sectors.json` cache).
+
+On each card `<article>` (or FLAGS/WATCH/MOM/OUTLIERS/OPTIONS row), add:
+
+```html
+data-gics-sector="{{ card.gics_sector_name or '' }}"
+```
 
 ---
 
@@ -163,3 +170,227 @@ name_rec["skew_25d_proxy"] = _skew.get("skew_25d_proxy")
 If Refresh already passes `options_by_name` into `enrich_book`, this drill summary is optional (enrich also stores `skew` per name). Keep it for the options view.
 
 Function used: `dapi_enrich.summarize_skew`.
+
+---
+
+## 5) GICS sector chips (filter strip only)
+
+**Do not** add a Sectors tab, `sectors.py`, `sectors.json`, or a Refresh stage. Copy `gics_filter.py` next to live `dapi_enrich.py`. Copy the updated `dapi_enrich.py` (GICS parse / `--gics-once` / cache). Paste the blocks below into live `desk_dash.py` / `factorbook.html`.
+
+### `desk_dash.py`
+
+```python
+import gics_filter
+
+# after attach_card_fields(card, _rec)
+gics_filter.overlay_sector(card, _rec, cache=dapi_enrich.load_gics_cache())
+```
+
+When emitting each card/row, set `data-t` **and** `data-ticker` (already present) and `data-gics-sector`:
+
+```python
+sector = card.get("gics_sector_name") or ""
+# <article class="card" data-t="..." data-ticker="..." data-gics-sector="{sector}">
+```
+
+In the **existing top filter strip** (next to G1–G12 / tags), add an empty host — JS fills chips:
+
+```html
+<span id="gics-filter-strip" class="filter-strip gics-chips" role="toolbar" aria-label="GICS sector filter"></span>
+```
+
+**Every HTML write** (end of live `write_combined` / `write_dash`) must re-embed a **filled** map + strip JS. Host/CSS surviving is not enough — `#gics-sector-db` and `STRIP_ID` were getting wiped.
+
+```python
+# after the combined HTML string exists, BEFORE dest.write_text
+db = json.loads(desk_dash._gics_sector_db_json(book=book, cards=cards, cache=dapi_enrich.load_gics_cache(), root=root))
+# or: db = gics_filter.filled_sector_db(cards, cache=..., book=book)
+if "__GICS_SECTOR_DB__" in html:
+    html = html.replace("__GICS_SECTOR_DB__", json.dumps(db, separators=(",", ":")))
+html = gics_filter.ensure_embedded(html, db)
+```
+
+If live `factorbook.html` is already ~2.7MB with Refresh / Momentum Up / Momentum Down / Outliers / Options, **patch that file**. Do not replace it with the cloud skinny grid.
+
+Functions used: `gics_filter.overlay_sector`, `gics_filter.filled_sector_db`, `gics_filter.ensure_embedded`, `gics_filter.strip_css`, `gics_filter.strip_js`, `desk_dash._gics_sector_db_json`, `desk_dash.write_combined`.
+
+### live `factorbook.html` — CSS (paste with other G-chip rules)
+
+```css
+.filter-strip, .gics-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 10px;
+  vertical-align: middle;
+}
+.filter-chip, .gchip {
+  display: inline-block;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  margin: 0;
+  border-radius: 3px;
+  border: 1px solid #6b7280;
+  color: #d1d5db;
+  background: #111827;
+  text-transform: none;
+  vertical-align: middle;
+  cursor: pointer;
+}
+.filter-chip:hover, .gchip:hover { border-color: #9ca3af; color: #f3f4f6; }
+.filter-chip.active, .gchip.active {
+  color: #93c5fd;
+  border-color: #60a5fa;
+  background: #1e3a5f;
+}
+.filter-chip[data-gics-chip=""] { letter-spacing: 0.06em; }
+.gics-hid { display: none !important; }
+```
+
+### live `factorbook.html` — JS
+
+Paste `gics_filter.strip_js()` before `</body>` (or copy `gics_filter.py` and emit it from `desk_dash`). The script only toggles `.gics-hid` on cards/rows. It does not change Momentum Up/Down, Outliers, Options, Refresh, or FLAGS/WATCH selection.
+
+Host: `#gics-filter-strip` inside the existing filter row. Map: `<script type="application/json" id="gics-sector-db">{...}</script>` ticker → `gics_sector_name`.
+
+### Optional one-shot DAPI (not Refresh)
+
+If `gics_sector_name` is missing on the book, run **once**:
+
+```
+python dapi_enrich.py --gics-once
+```
+
+Optional sidecar (do **not** call from `run_refresh_live`):
+
+```python
+# GET/POST /gics-fill  — paste only as a separate handler
+dapi_enrich.fill_gics_sectors(tickers=tickers or None, root=Path(r"C:\Users\MLP\Desktop\factorbook"))
+```
+
+Writes gitignored `gics_sectors.json` and stamps `dapi_enrichment.json`. Refresh continues to skip GICS fields so this does not become a second full-book pull.
+
+---
+
+## 6) Momentum streak tag + `write_combined`
+
+Copy `mom_streak.py` next to live `desk_dash.py`. Do **not** change options score v2 or FLAGS/WATCH/MOM ranking.
+
+### After each MOM / FLAGS / WATCH card exists
+
+```python
+import mom_streak
+
+mom_streak.attach_card(card)  # uses card["mom_score"] if present; else hist / prices
+# card now has mom_score, mom_streak, mom_streak_side, mom_streak_label
+# and a .badge.spike-chip pill (↑12d>5 / ↓8d<5 / =5)
+```
+
+Score is the home UP/DOWN rank (`mom_score` first). Threshold is literal **5**. Exactly 5 → streak 0, tag `=5`. See `docs/MOM-STREAK.md`.
+
+### End of live `write_combined` / `write_dash.write`
+
+Same tail as GICS — always re-embed, and **never clobber** a ~2.7MB live file:
+
+```python
+html = gics_filter.ensure_embedded(html, db)
+html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
+# then write factorbook.html
+```
+
+Cards should keep `data-t` (and `data-ticker`) so both GICS chips and streak tags resolve after a Refresh write.
+
+### CoS deploy checklist (Desktop `C:\Users\MLP\Desktop\factorbook`)
+
+| Copy into Desktop | Notes |
+| --- | --- |
+| `mom_streak.py` | new |
+| `gics_filter.py` | replace with this version (`ensure_embedded`, `data-t`) |
+| `desk_dash.py` hooks | `write_combined` tail + `_gics_sector_db_json`; do not replace FLAGS/WATCH/MOM |
+| `write_dash.py` | `write()` → `desk_dash.write_combined` |
+| `momentum_screen.py` hook | `mom_streak.attach_card(row)` after enrich attach |
+| `dapi_enrich.py` | already has `gics_sector_name` parse / cache |
+| `docs/MOM-STREAK.md`, `docs/GICS-FILTER.md` | optional, for the desk |
+
+Do **not** copy generated `factorbook.html`, `dapi_enrichment.json`, `gics_sectors.json`, `mom_score_hist.json`. After drop-in, run Refresh once and confirm GICS chips + streak tags are still in the HTML source (`#gics-sector-db` filled, `STRIP_ID` present, `↑`/`↓`/`=5` pills).
+
+---
+
+## 7) Options Refresh button (Desktop, no CoS)
+
+Main **Refresh** = prices + enrich + rebuild. Full-book options pulse is **manual only**.
+
+### `add_server.py` — skip options on Refresh; add Options Refresh routes
+
+In live `run_refresh_live`, do **not** call `pull_options_pulse` unless `options=1`. Smallest paste: treat query/body `options=1` (and `POST /options-refresh`) as pulse + rebuild, not prices/enrich.
+
+```python
+# query/body flag; default OFF
+options = False
+if query and "options" in query:
+    options = dapi_enrich.parse_intraday_flag(query.get("options", [""])[0])
+elif isinstance(body, dict) and "options" in body:
+    options = dapi_enrich.parse_intraday_flag(body.get("options"))
+
+# GET/POST /options-refresh  (also /api/options_refresh)
+# GET/POST /refresh?options=1
+# POST     /api/refresh_live  {"options": 1}
+if options or path in ("/options-refresh", "/options_refresh", "/api/options_refresh", "/api/options-refresh"):
+    # reuse your existing progress / busy lock (label stages with "options · …")
+    set_progress(5, "options start")
+    pull_options_pulse.run_pulse(tickers=tickers or None, progress_cb=...)  # full book
+    # then the same rebuild you already use: run_v0 / write_dash / desk_dash
+    # so Options tab / OPT SPIKE / abnormal scores refresh
+```
+
+Status JSON should include `kind` (`refresh` | `options`) and `options` (bool) so the progress bar can say it is an options run.
+
+### `desk_dash.py` / live `factorbook.html` — button beside Refresh
+
+Do **not** add `"Options Refresh"` to live-nav detection (that would make a patch look like a full replace). Always inject the button next to `#refresh`:
+
+```html
+<button type="button" id="options-refresh" class="nav-btn options-refresh" data-sidecar-options-refresh="1">Options Refresh</button>
+<div id="sidecar-progress" class="sidecar-progress" hidden>
+  <span id="sidecar-progress-label" class="sidecar-progress-label">idle</span>
+  <div class="sidecar-progress-track"><div id="sidecar-progress-bar" class="sidecar-progress-bar"></div></div>
+</div>
+```
+
+`write_combined` already calls `desk_dash._ensure_options_refresh_ui`. If you are not swapping `desk_dash.py`, paste that helper + `sidecar_js()` before `</body>`, and bind **only** `#options-refresh` (leave live `#refresh` alone unless it has `data-sidecar-refresh=1`).
+
+Button talks to `http://127.0.0.1:8765` like Refresh. Restart the sidecar after the paste.
+
+### Desktop checklist
+
+| Copy / paste | Notes |
+| --- | --- |
+| Skip `pull_options_pulse` on main Refresh | prices → enrich → rebuild |
+| `/options-refresh` + `options=1` on `/api/refresh_live` | pulse + rebuild; progress `kind=options` |
+| `#options-refresh` beside Refresh | `desk_dash._ensure_options_refresh_ui` / `sidecar_js` |
+| Restart `:8765` | no CoS; local sidecar only |
+
+---
+
+## 8) Chart tag-trigger polish + streak bounds
+
+Copy `chart_marks.py` next to live `desk_dash.py`. End of live `write_combined`:
+
+```python
+import chart_marks
+
+html = gics_filter.ensure_embedded(html, db)
+html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
+html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
+# _ensure_options_refresh_ui(html)  # keep Options Refresh on Refresh rewrites
+```
+
+Overlay JS polishes existing `.tag-label` / `[data-tag-trigger]` / `.chart-anno` captions (cluster + collapse) and draws streak start/end diamonds from `#fd-chart-db`. It does not replace the live price series or change score v2.
+
+Also copy `mom_streak.py` (now has `streak_span` / `mom_streak_start` / `mom_streak_end`).
+
+
+
+

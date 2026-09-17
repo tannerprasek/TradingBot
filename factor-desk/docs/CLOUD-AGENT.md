@@ -24,11 +24,21 @@ Skew / IV summary (`attach_skew`, `skew_25d_proxy`) is **additive**. Do not chan
 
 ## DAPI enrich
 
-Nine pointer layers in `dapi_enrich.py` (no news). Refresh stage after options pulse (~50–60%). Query/body `intraday=1` is optional and default off.
+Nine pointer layers in `dapi_enrich.py` (no news). Refresh stage after prices (~50–60%). Full-book options pulse is a separate Options Refresh button. Query/body `intraday=1` is optional and default off.
 
 See [DAPI-ENRICH.md](DAPI-ENRICH.md) for field candidates, chip thresholds, and Desktop copy steps.
 
 Never invent Bloomberg numbers. Null + reason. Capacity → skip enrich, continue Refresh.
+
+## GICS sector chips
+
+Home filter-strip chips (G1–G12 language). Read `gics_sector_name` from enrichment. Do **not** add a Sectors tab, `sectors.json`, or a GICS pull on Refresh. Optional one-shot: `python dapi_enrich.py --gics-once`.
+
+`write_dash` / `desk_dash.write_combined` must call `gics_filter.ensure_embedded` so `#gics-sector-db` + strip JS (`STRIP_ID`) survive every HTML write. Live ~2.7MB factorbook with Refresh / Momentum Up / Down / Outliers / Options is **patched**, never replaced by the skinny grid. See [GICS-FILTER.md](GICS-FILTER.md).
+
+## Momentum streak tag
+
+Home UP/DOWN cards: consecutive trading-day streak of the card momentum rank vs **5**. Fields `mom_score` / `momentum_score` first; else on-disk hist / prices 13-window count (0–13). Exactly 5 → streak 0, tag `=5`. Chart overlay marks streak start and open end without burying the price series; existing tag-trigger labels are clustered. See [MOM-STREAK.md](MOM-STREAK.md).
 
 ## Secrets and dumps
 

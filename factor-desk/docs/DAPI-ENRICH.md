@@ -5,9 +5,13 @@ Nine pointer layers. **No news / headline feed. No earnings calendar UI. No EDGA
 Refresh pipeline (live desk)::
 
     prices (pull_blpapi_live)
-      → options pulse (pull_options_pulse, full book)
-      → **dapi_enrich**          ← new stage ~50–60%
+      → **dapi_enrich**          ← ~50–60%
       → rebuild (run_v0 / write_dash / desk_dash)
+
+Manual **Options Refresh** (full-book pulse, then the same rebuild)::
+
+    options pulse (pull_options_pulse)
+      → rebuild
 
 Output: `dapi_enrichment.json` next to `options_abnormal.json`::
 
@@ -20,7 +24,7 @@ Cards still render when the file is missing. One field or one name failing does 
 Canonical live tree: `C:\Users\MLP\Desktop\factorbook`
 
 1. Copy `dapi_enrich.py` into that folder.
-2. Merge the **ENRICH HOOK** in `add_server.py` (`run_dapi_enrich_stage`, `parse_intraday`) into the live sidecar after options pulse, progress **50–60%**.
+2. Merge the **ENRICH HOOK** in `add_server.py` (`run_dapi_enrich_stage`, `parse_intraday`) into the live sidecar after prices (options pulse is a separate Options Refresh), progress **50–60%**.
 3. Call `desk_dash.attach_enrichment` / `momentum_screen.attach_enrichment` on existing cards (fields listed below).
 4. Options path: `pull_options_pulse.attach_skew` — additive; **do not change score v2**.
 5. Keep `dapi_enrichment.json` gitignored (already in `factor-desk/.gitignore`).
@@ -101,9 +105,11 @@ Implied vol for the IV chip = `iv_mid` if present, else mean(call, put) hist IV,
 
 `desk_dash.attach_enrichment` and `momentum_screen.attach_enrichment` set:
 
-`si_ratio`, `vol_regime`, `liq`, `inst_pct`, `event_days`, `beta`, `credit`, `enrich_pills`
+`si_ratio`, `vol_regime`, `liq`, `inst_pct`, `event_days`, `beta`, `credit`, `enrich_pills`, `gics_sector_name`, plus mom streak fields (`mom_score`, `mom_streak`, `mom_streak_label`) when a home rank is available.
 
 MOM rows also get `residual_20d`, `watch_hint`, `beta_field` when the name exists in the book.
+
+GICS chips are a **filter strip**, not an enrich layer. Refresh does not pull `GICS_SECTOR_NAME`. See [GICS-FILTER.md](GICS-FILTER.md). Momentum streak vs 5: [MOM-STREAK.md](MOM-STREAK.md).
 
 ## Options score v2 (unchanged)
 
