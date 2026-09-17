@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -158,13 +159,47 @@ class EmbedTests(unittest.TestCase):
         _h, climb = _hist_and_card("CLIMB US Equity", [6, 7, 8, 8, 9, 9, 10])
         ranked = bo.rank_book([climb], _h)
         out = bo.ensure_embedded(html, ranked)
-        self.assertIn('data-view="breakout"', out)
-        self.assertIn('data-view="breakdown"', out)
+        self.assertRegex(out, r'<button\b[^>]*data-view=["\']breakout["\']')
+        self.assertRegex(out, r'<button\b[^>]*data-view=["\']breakdown["\']')
         self.assertIn('id="fd-breakout-db"', out)
         self.assertIn("CLIMB", out)
         self.assertIn("breakout_score", out)
         self.assertNotIn('data-tab="sectors"', out)
         self.assertNotIn("&gt;", bo.embed_db(ranked))
+
+    def test_css_without_buttons_still_gains_nav(self) -> None:
+        """Live HTML already has breakout CSS selectors; that must not skip the tabs."""
+        html = f"""<!DOCTYPE html><html><head>
+<style id="fd-breakout-css">
+{bo.strip_css()}
+</style></head><body>
+<nav>
+  <button id="refresh">Refresh</button>
+  <button>Momentum Up</button>
+  <button>Momentum Down</button>
+  <button>Outliers</button>
+  <button>Options</button>
+</nav>
+<article class="card" data-t="X">X</article>
+</body></html>"""
+        self.assertIn('data-view="breakout"', html)
+        self.assertIn('data-view="breakdown"', html)
+        self.assertIsNone(re.search(r'<button\b[^>]*data-view=["\']breakout["\']', html, re.I))
+        self.assertIsNone(re.search(r'<button\b[^>]*data-view=["\']breakdown["\']', html, re.I))
+        self.assertFalse(bo._has_nav_button(html, view="breakout", data_attr="data-fd-breakout", btn_id="fd-nav-breakout"))
+        self.assertFalse(bo._has_nav_button(html, view="breakdown", data_attr="data-fd-breakdown", btn_id="fd-nav-breakdown"))
+        out = bo.ensure_embedded(html, {"breakout": [], "breakdown": []})
+        bo_btns = re.findall(r'<button\b[^>]*data-view=["\']breakout["\'][^>]*>', out, re.I)
+        bd_btns = re.findall(r'<button\b[^>]*data-view=["\']breakdown["\'][^>]*>', out, re.I)
+        self.assertEqual(len(bo_btns), 1, out[out.find("<nav") : out.find("</nav>") + 6] if "<nav" in out else out[:800])
+        self.assertEqual(len(bd_btns), 1)
+        self.assertIn(">Breakout</button>", out)
+        self.assertIn(">Breakdown</button>", out)
+        self.assertIn('id="fd-nav-breakout"', out)
+        self.assertIn('id="fd-nav-breakdown"', out)
+        again = bo.ensure_embedded(out, {"breakout": [], "breakdown": []})
+        self.assertEqual(len(re.findall(r'<button\b[^>]*data-view=["\']breakout["\'][^>]*>', again, re.I)), 1)
+        self.assertEqual(len(re.findall(r'<button\b[^>]*data-view=["\']breakdown["\'][^>]*>', again, re.I)), 1)
 
     def test_write_combined_patches_live_html_with_tabs_and_delta(self) -> None:
         body = """<!DOCTYPE html>
@@ -203,8 +238,10 @@ class EmbedTests(unittest.TestCase):
             out = desk_dash.write_combined(dest, root=root, book=book)
             text = out.read_text(encoding="utf-8")
             self.assertGreater(out.stat().st_size, 2_000_000)
-            self.assertIn("Breakout", text)
-            self.assertIn("Breakdown", text)
+            self.assertRegex(text, r'<button\b[^>]*data-view=["\']breakout["\']')
+            self.assertRegex(text, r'<button\b[^>]*data-view=["\']breakdown["\']')
+            self.assertIn(">Breakout</button>", text)
+            self.assertIn(">Breakdown</button>", text)
             self.assertIn('id="fd-breakout-db"', text)
             self.assertIn('id="fd-book-delta"', text)
             self.assertIn("baseline set", text)

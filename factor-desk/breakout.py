@@ -79,13 +79,15 @@ PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
 HID_CLASS = "fd-bb-hid"
 
+NAV_BREAKOUT_ID = "fd-nav-breakout"
+NAV_BREAKDOWN_ID = "fd-nav-breakdown"
 BTN_BREAKOUT = (
-    '<button type="button" class="nav-btn" data-view="breakout" '
-    'data-fd-breakout="1">Breakout</button>'
+    f'<button type="button" class="nav-btn" id="{NAV_BREAKOUT_ID}" '
+    'data-view="breakout" data-fd-breakout="1">Breakout</button>'
 )
 BTN_BREAKDOWN = (
-    '<button type="button" class="nav-btn" data-view="breakdown" '
-    'data-fd-breakdown="1">Breakdown</button>'
+    f'<button type="button" class="nav-btn" id="{NAV_BREAKDOWN_ID}" '
+    'data-view="breakdown" data-fd-breakdown="1">Breakdown</button>'
 )
 
 _HOP_LEADER_RE = re.compile(r"\b(hop|leader)\b", re.I)
@@ -781,9 +783,24 @@ def _ensure_css(html_text: str) -> str:
     return css + html_text
 
 
+def _has_nav_button(html_text: str, *, view: str, data_attr: str, btn_id: str) -> bool:
+    """True only when an actual ``<button>`` exists — not CSS like ``.nav-btn[data-view="breakout"]``."""
+    text = html_text or ""
+    patterns = (
+        rf'<button\b[^>]*\bdata-view=["\']{re.escape(view)}["\']',
+        rf'<button\b[^>]*\b{re.escape(data_attr)}=["\']1["\']',
+        rf'<button\b[^>]*\bid=["\']{re.escape(btn_id)}["\']',
+    )
+    return any(re.search(pat, text, re.I | re.S) for pat in patterns)
+
+
 def _ensure_nav(html_text: str) -> str:
-    has_bo = bool(re.search(r'data-view=["\']breakout["\']', html_text, re.I) or re.search(r'data-fd-breakout=["\']1["\']', html_text, re.I))
-    has_bd = bool(re.search(r'data-view=["\']breakdown["\']', html_text, re.I) or re.search(r'data-fd-breakdown=["\']1["\']', html_text, re.I))
+    has_bo = _has_nav_button(
+        html_text, view="breakout", data_attr="data-fd-breakout", btn_id=NAV_BREAKOUT_ID
+    )
+    has_bd = _has_nav_button(
+        html_text, view="breakdown", data_attr="data-fd-breakdown", btn_id=NAV_BREAKDOWN_ID
+    )
     if has_bo and has_bd:
         return html_text
     pair = ""
@@ -867,8 +884,9 @@ def _ensure_js(html_text: str) -> str:
 def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> str:
     """Nav buttons + panes + filled db + JS. Safe on live ~2.7MB HTML. No Sectors tab."""
     text = html_text or ""
-    text = _ensure_css(text)
+    # Buttons before CSS: CSS selectors contain ``data-view="breakout"`` text.
     text = _ensure_nav(text)
+    text = _ensure_css(text)
     text = _ensure_panes(text, ranked)
     text = _ensure_db(text, ranked)
     text = _ensure_js(text)
