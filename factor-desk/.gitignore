@@ -14,6 +14,8 @@ mom_score_hist.json
 mom_score_hist.json.tmp
 desk_snapshot.json
 desk_snapshot.json.tmp
+paper_trades.json
+paper_trades.json.tmp
 clean/*.csv
 .dapi*
 *.png

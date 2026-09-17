@@ -40,6 +40,10 @@ Home filter-strip chips (G1–G12 language). Read `gics_sector_name` from enrich
 
 Mid-score climbers / crackers as home tabs (not maxed MOM). `breakout.ensure_embedded` + `book_delta.ensure_embedded` + `desk_hitch.ensure_embedded` on every HTML write. See [BREAKOUT-BREAKDOWN.md](BREAKOUT-BREAKDOWN.md). Do **not** reintroduce a Sectors tab.
 
+## Paper trading
+
+1-unit Buy/Sell on dense `cardHTML` cards. Paper only. `paper_trade.ensure_embedded` on every HTML write. Recopy `paper_trade.py`; do not wholesale replace live `desk_dash.py`. See [PAPER-TRADE.md](PAPER-TRADE.md) and [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §10.
+
 ## Momentum streak tag
 
 Home UP/DOWN cards: consecutive trading-day streak of the card momentum rank vs **5**. Fields `mom_score` / `momentum_score` first; else on-disk hist / prices 13-window count (0–13). Exactly 5 → streak 0, tag `=5`. Chart overlay marks streak start and open end without burying the price series; existing tag-trigger labels are clustered. See [MOM-STREAK.md](MOM-STREAK.md).
