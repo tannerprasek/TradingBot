@@ -820,7 +820,7 @@ def strip_js() -> str:
     el.textContent = text;
     el.hidden = false;
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { el.hidden = true; }, 1600);
+    toastTimer = setTimeout(function () { el.hidden = true; }, 2200);
   }
   function tickerOf(node, card) {
     if (card) {
@@ -939,9 +939,14 @@ def strip_js() -> str:
     paintHost(host, ticker, mark, loadBook());
     bindHost(host, node, ticker);
   }
+  var painting = false;
   function paintAll() {
-    var nodes = document.querySelectorAll("article.card, article[data-t], article[data-ticker], .grid .card, .grid.dense .card");
-    for (var i = 0; i < nodes.length; i++) hydrateCard(nodes[i], null);
+    if (painting) return;
+    painting = true;
+    try {
+      var nodes = document.querySelectorAll("article.card, article[data-t], article[data-ticker], .grid .card, .grid.dense .card");
+      for (var i = 0; i < nodes.length; i++) hydrateCard(nodes[i], null);
+    } finally { painting = false; }
   }
   function injectIntoHtml(html, card) {
     try {
@@ -970,7 +975,28 @@ def strip_js() -> str:
   function observe() {
     if (window.__FD_PAPER_OBS__) return;
     if (!document.body) return;
-    window.__FD_PAPER_OBS__ = new MutationObserver(function () { paintAll(); });
+    window.__FD_PAPER_OBS__ = new MutationObserver(function (muts) {
+      if (painting) return;
+      var need = false;
+      for (var i = 0; i < muts.length && !need; i++) {
+        var added = muts[i].addedNodes || [];
+        for (var j = 0; j < added.length; j++) {
+          var n = added[j];
+          if (!n || n.nodeType !== 1) continue;
+          if (n.id === "fd-paper-toast") continue;
+          if (n.classList && n.classList.contains("fd-paper")) continue;
+          if (n.matches && n.matches("article.card, article[data-t], article[data-ticker], .card")) {
+            if (!n.querySelector || !n.querySelector(".fd-paper")) { need = true; break; }
+            continue;
+          }
+          if (n.querySelector && n.querySelector("article.card, article[data-t], .card")) {
+            need = true;
+            break;
+          }
+        }
+      }
+      if (need) paintAll();
+    });
     window.__FD_PAPER_OBS__.observe(document.body, { childList: true, subtree: true });
   }
   function install() {
