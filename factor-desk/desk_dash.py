@@ -55,11 +55,11 @@ NAV_HTML = f"""
 <nav class="topnav" aria-label="Factor Desk">
   <button type="button" id="refresh" class="nav-btn refresh" data-sidecar-refresh="1">Refresh</button>
   {OPTIONS_REFRESH_BTN}
+  {PROGRESS_HTML}
   <button type="button" class="nav-btn" data-view="mom-up">Momentum Up</button>
   <button type="button" class="nav-btn" data-view="mom-down">Momentum Down</button>
   <button type="button" class="nav-btn" data-view="outliers">Outliers</button>
   <button type="button" class="nav-btn" data-view="options">Options</button>
-  {PROGRESS_HTML}
 </nav>
 """.strip()
 
@@ -86,16 +86,16 @@ NAV_CSS = """
 #options-refresh, .options-refresh { border-color: #9d174d; color: #f9a8d4; }
 #options-refresh:hover, .options-refresh:hover { border-color: #f9a8d4; color: #fff; }
 .sidecar-progress {
-  display: flex;
+  display: none;
   align-items: center;
   gap: 8px;
-  min-width: 180px;
-  flex: 1 1 160px;
-  margin-left: 4px;
+  min-width: 220px;
+  flex: 1 1 200px;
+  margin: 0 8px 0 2px;
 }
-.sidecar-progress[hidden] { display: none !important; }
+.sidecar-progress.is-on { display: flex !important; }
 .sidecar-progress-label {
-  font: 650 10px/1.2 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  font: 650 11px/1.2 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
   color: #93c5fd;
   letter-spacing: 0.04em;
   white-space: nowrap;
@@ -103,7 +103,7 @@ NAV_CSS = """
 .sidecar-progress.kind-options .sidecar-progress-label { color: #f9a8d4; }
 .sidecar-progress-track {
   flex: 1;
-  height: 6px;
+  height: 8px;
   background: #1f2937;
   border: 1px solid #374151;
   border-radius: 3px;
@@ -309,12 +309,36 @@ def sidecar_js() -> str:
     if (lab) lab.textContent = text || "";
   }
 
+  function origLabel(btn, fallback) {
+    if (!btn) return fallback;
+    var saved = btn.getAttribute("data-orig-label");
+    if (saved) return saved;
+    var cur = (btn.textContent || fallback).trim();
+    if (cur.indexOf(" · ") >= 0) cur = fallback;
+    btn.setAttribute("data-orig-label", cur || fallback);
+    return btn.getAttribute("data-orig-label");
+  }
+
+  function markButtons(isOptions, text) {
+    var opt = document.getElementById("options-refresh");
+    var ref = document.querySelector("[data-sidecar-refresh='1']");
+    if (opt) {
+      origLabel(opt, "Options Refresh");
+      opt.textContent = isOptions ? text : origLabel(opt, "Options Refresh");
+      opt.setAttribute("aria-busy", isOptions ? "true" : "false");
+    }
+    if (ref) {
+      origLabel(ref, "Refresh");
+      ref.textContent = (!isOptions) ? text : origLabel(ref, "Refresh");
+      ref.setAttribute("aria-busy", (!isOptions) ? "true" : "false");
+    }
+  }
+
   function paint(st) {
     st = st || {};
     var host = hostEl();
     var bar = barEl();
     var track = trackEl();
-    if (!host) return;
     var isOpt = st.kind === "options" || !!st.options;
     var pct = Number(st.pct || 0);
     if (isNaN(pct)) pct = 0;
@@ -327,11 +351,17 @@ def sidecar_js() -> str:
       label = "refresh";
     }
     if (st.error) label = (isOpt ? "options · error" : "error") + ": " + st.error;
-    host.classList.toggle("kind-options", !!isOpt);
-    host.hidden = false;
-    if (bar) bar.style.width = pct + "%";
-    if (track) track.setAttribute("aria-valuenow", String(Math.round(pct)));
-    setLabel(label + (st.busy ? "  " + Math.round(pct) + "%" : (stage === "done" ? "  100%" : "")));
+    var shown = label + "  " + Math.round(pct) + "%";
+    if (host) {
+      host.classList.toggle("kind-options", !!isOpt);
+      host.classList.add("is-on");
+      host.hidden = false;
+      host.removeAttribute("hidden");
+      if (bar) bar.style.width = pct + "%";
+      if (track) track.setAttribute("aria-valuenow", String(Math.round(pct)));
+    }
+    setLabel(shown);
+    markButtons(isOpt, (isOpt ? "Options Refresh · " : "Refresh · ") + shown);
   }
 
   function post(paths, body) {
@@ -377,7 +407,7 @@ def sidecar_js() -> str:
           setLabel((st.kind === "options" || st.options ? "options · error: " : "error: ") + st.error);
           return;
         }
-        window.setTimeout(function () { window.location.reload(); }, 250);
+        window.setTimeout(function () { window.location.reload(); }, 2500);
       }).catch(function () {
         setLabel("sidecar offline");
         stopPoll();
@@ -391,7 +421,9 @@ def sidecar_js() -> str:
   function startJob(isOptions) {
     var host = hostEl();
     if (host) {
+      host.classList.add("is-on");
       host.hidden = false;
+      host.removeAttribute("hidden");
       host.classList.toggle("kind-options", !!isOptions);
     }
     if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
@@ -410,22 +442,21 @@ def sidecar_js() -> str:
     });
   }
 
-  document.querySelectorAll("[data-sidecar-refresh='1']").forEach(function (btn) {
-    btn.addEventListener("click", function (ev) {
-      ev.preventDefault();
-      ev.stopPropagation();
-      startJob(false);
-    });
-  });
-  var optBtn = document.getElementById("options-refresh");
-  if (optBtn && !optBtn.getAttribute("data-fd-bound")) {
-    optBtn.setAttribute("data-fd-bound", "1");
-    optBtn.addEventListener("click", function (ev) {
+  document.addEventListener("click", function (ev) {
+    var t = ev.target && ev.target.closest ? ev.target.closest("button, [data-sidecar-refresh], [data-sidecar-options-refresh]") : ev.target;
+    if (!t || !t.getAttribute) return;
+    if (t.id === "options-refresh" || t.getAttribute("data-sidecar-options-refresh") === "1") {
       ev.preventDefault();
       ev.stopPropagation();
       startJob(true);
-    });
-  }
+      return;
+    }
+    if (t.getAttribute("data-sidecar-refresh") === "1") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      startJob(false);
+    }
+  }, true);
 })();
 """.strip()
 
@@ -455,12 +486,19 @@ def _ensure_options_refresh_ui(html_text: str) -> str:
     """Always keep Options Refresh beside Refresh. Does not change LIVE_NAV_MARKERS."""
     if not html_text:
         return html_text
-    if ".sidecar-progress" not in html_text:
-        block = f'<style id="sidecar-refresh-css">\n{NAV_CSS}\n</style>\n'
+    css = f'<style id="sidecar-refresh-css">\n{NAV_CSS}\n</style>\n'
+    html_text, n_css = re.subn(
+        r'<style\b[^>]*\bid=["\']sidecar-refresh-css["\'][^>]*>.*?</style>\s*',
+        lambda _m: css,
+        html_text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    if n_css == 0:
         if "</head>" in html_text:
-            html_text = html_text.replace("</head>", block + "</head>", 1)
+            html_text = html_text.replace("</head>", css + "</head>", 1)
         else:
-            html_text = block + html_text
+            html_text = css + html_text
     if not _has_options_refresh_btn(html_text):
         m = _REFRESH_BTN_RE.search(html_text)
         if m:
@@ -494,8 +532,15 @@ def _ensure_options_refresh_ui(html_text: str) -> str:
             )
         else:
             html_text = PROGRESS_HTML + "\n" + html_text
-    if 'id="sidecar-refresh-js"' not in html_text:
-        script = f'<script id="sidecar-refresh-js">\n{sidecar_js()}\n</script>\n'
+    script = f'<script id="sidecar-refresh-js">\n{sidecar_js()}\n</script>\n'
+    html_text, n_js = re.subn(
+        r'<script\b[^>]*\bid=["\']sidecar-refresh-js["\'][^>]*>.*?</script>\s*',
+        lambda _m: script,
+        html_text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    if n_js == 0:
         if "</body>" in html_text:
             html_text = html_text.replace("</body>", script + "</body>", 1)
         else:
