@@ -171,7 +171,7 @@ def layout_marks(
             for i, mark in enumerate(group):
                 if i == 0:
                     mark["show_label"] = True
-                    mark["label"] = group[0].get("label") or "1d"
+                    mark["label"] = group[0].get("label") or group[-1].get("label") or "1d"
                     mark["title"] = group[0].get("title") or "streak start = end (still open)"
                 else:
                     mark["show_label"] = False
@@ -274,7 +274,7 @@ def _marks_for_card(
             {
                 "x": xs[start.isoformat()],
                 "kind": "streak-start",
-                "label": (label or "1d") if same_day else "s",
+                "label": "1d" if same_day else "s",
                 "side": side,
                 "title": f"streak start {start.isoformat()} {label}".strip(),
             }
@@ -588,18 +588,16 @@ def overlay_js() -> str:
     return anchors[anchors.length - 1].x;
   }
   function ensureOverlay(chart) {
+    if (chart.classList && chart.classList.contains("fd-chart")) return null;
+    if (chart.querySelector && chart.querySelector(".fd-chart-mark-streak-start, [data-kind='streak-start']")) return null;
     var host = chart.parentElement;
     if (!host) return null;
     if (!host.classList.contains("fd-chart-host")) {
-      if (chart.classList && chart.classList.contains("fd-chart")) {
-        host = chart;
-      } else {
-        var wrap = document.createElement("div");
-        wrap.className = "fd-chart-host";
-        host.insertBefore(wrap, chart);
-        wrap.appendChild(chart);
-        host = wrap;
-      }
+      var wrap = document.createElement("div");
+      wrap.className = "fd-chart-host";
+      host.insertBefore(wrap, chart);
+      wrap.appendChild(chart);
+      host = wrap;
     }
     var svg = host.querySelector("svg.fd-chart-overlay");
     if (!svg) {
@@ -654,7 +652,7 @@ def overlay_js() -> str:
       overlay.appendChild(g);
     }
     var same = rec.start && rec.end && rec.start === rec.end;
-    mark(rec.start, "streak-start", same ? (rec.label || "1d") : "s");
+    mark(rec.start, "streak-start", same ? "1d" : "s");
     if (!same && rec.end) mark(rec.end, rec.open ? "streak-end-open" : "streak-end", rec.open ? "now" : "e");
   }
   function apply() {

@@ -105,7 +105,7 @@ class SvgTests(unittest.TestCase):
         svg = cm.render_svg(card)
         self.assertEqual(svg.count('data-kind="streak-start"'), 1)
         self.assertNotIn('data-kind="streak-end', svg)
-        self.assertIn("↑1d&gt;5", svg)
+        self.assertIn(">1d</text>", svg)
 
     def test_svg_has_distinct_tag_and_streak_marks(self) -> None:
         card = {
@@ -170,6 +170,7 @@ class SvgTests(unittest.TestCase):
         self.assertIn("fd-chart-marks-js", html)
         self.assertIn("Options Refresh", html)
         self.assertIn('id="options-refresh"', html)
+        self.assertIn('classList.contains("fd-chart")', html)
 
 
 class WriteCombinedChartTests(unittest.TestCase):
