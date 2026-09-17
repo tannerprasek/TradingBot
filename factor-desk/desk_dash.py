@@ -607,7 +607,7 @@ def render_html(
     intra = bool((meta or {}).get("intraday")) if isinstance(meta, Mapping) else False
     sectors = gics_filter.sectors_present(cards, cache)
     db = gics_filter.filled_sector_db(cards, cache=cache, book=book)
-    streak_map = mom_streak.streak_db(cards)
+    streak_map = mom_streak.streak_db(cards, hist=hist)
     chart_map = chart_marks.chart_db(cards)
     gics_note = ""
     if rows and not sectors:
@@ -711,7 +711,7 @@ def write_combined(
         cards = cards_from_enrichment(book)
     cards = [dict(c) for c in cards]
     hist = mom_streak.rebuild_hist_for_cards(cards, root=base, write=True)
-    series, _src = mom_streak.discover_score_series(base)
+    series, _src = mom_streak.discover_score_series(base, hist=hist)
     cards = attach_all(cards, book, cache=cache, hist=hist, series_by_ticker=series)
 
     existing = ""
@@ -732,7 +732,7 @@ def write_combined(
     if gics_filter.GICS_SECTOR_DB_PLACEHOLDER in text:
         text = text.replace(gics_filter.GICS_SECTOR_DB_PLACEHOLDER, _gics_sector_db_json(book, cards, cache, base))
     text = gics_filter.ensure_embedded(text, mapping)
-    text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards))
+    text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards, hist=hist))
     text = chart_marks.ensure_embedded(text, chart_marks.chart_db(cards))
     dest.write_text(text, encoding="utf-8")
     LOG.info("wrote %s (%s bytes)", dest, dest.stat().st_size)

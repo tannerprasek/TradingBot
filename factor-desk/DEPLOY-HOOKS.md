@@ -316,6 +316,8 @@ Cards should keep `data-t` (and `data-ticker`) so both GICS chips and streak tag
 
 Do **not** copy generated `factorbook.html`, `dapi_enrichment.json`, `gics_sectors.json`, `mom_score_hist.json`. After drop-in, run Refresh once and confirm GICS chips + streak tags are still in the HTML source (`#gics-sector-db` filled, `STRIP_ID` present, `↑`/`↓`/`=5` pills).
 
+Empty / thin `mom_score_hist.json` (missing, median series length < 5, or only today’s asof) **auto-backfills** from `prices_long.csv` using `trend_window_score` over the last ~120 trading days on `write_combined` / Refresh. Copy updated `mom_streak.py`. Do not commit the hist file.
+
 ---
 
 ## 7) Options Refresh button (Desktop, no CoS)

@@ -108,6 +108,141 @@ class HistAndPriceTests(unittest.TestCase):
             self.assertEqual(source, "none")
 
 
+def _weekdays_ending(end: date, n: int) -> list[date]:
+    days: list[date] = []
+    d = end
+    while len(days) < n:
+        if d.weekday() < 5:
+            days.append(d)
+        d -= timedelta(days=1)
+    days.reverse()
+    return days
+
+
+def _write_prices_long(
+    root: Path,
+    *,
+    n: int = 90,
+    end: date | None = None,
+    names: dict[str, str] | None = None,
+) -> list[date]:
+    """names: ticker → 'up' | 'down'. Default two persistent-side names."""
+    end = end or date.today()
+    days = _weekdays_ending(end, n)
+    specs = names or {"UP US Equity": "up", "DOWN US Equity": "down"}
+    lines = ["date,ticker,adj_close"]
+    for ticker, side in specs.items():
+        px = 100.0
+        for _i, day in enumerate(days):
+            px *= 1.012 if side == "up" else 0.988
+            lines.append(f"{day.isoformat()},{ticker},{px:.6f}")
+    (root / "prices_long.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return days
+
+
+class PricesLongBackfillTests(unittest.TestCase):
+    def test_hist_is_thin_when_missing_or_one_day(self) -> None:
+        self.assertTrue(ms.hist_is_thin(None))
+        self.assertTrue(ms.hist_is_thin({"names": {}}))
+        self.assertTrue(
+            ms.hist_is_thin(
+                {
+                    "asof": "2026-09-17",
+                    "names": {
+                        "AAPL US Equity": {"series": [{"date": "2026-09-17", "score": 8}]},
+                        "JPM US Equity": {"series": [{"date": "2026-09-17", "score": 3}]},
+                    },
+                }
+            )
+        )
+        rich = {
+            "names": {
+                f"T{i} US Equity": {
+                    "series": [{"date": f"2026-09-{d:02d}", "score": 8} for d in range(1, 10)]
+                }
+                for i in range(3)
+            }
+        }
+        self.assertFalse(ms.hist_is_thin(rich))
+
+    def test_no_hist_prices_long_rebuild_has_multiday_streaks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            days = _write_prices_long(root, n=90, end=date.today())
+            asof = days[-1]
+            cards = [
+                {"ticker": "UP US Equity", "mom_score": 11},
+                {"ticker": "DOWN US Equity", "mom_score": 2},
+            ]
+            hist = ms.rebuild_hist_for_cards(cards, root=root, asof=asof, write=True)
+            self.assertTrue((root / ms.HIST_FILENAME).is_file())
+            self.assertEqual(hist["meta"]["source"], ms.BACKFILL_SOURCE_PRICES_LONG)
+            self.assertGreater(cards[0]["mom_streak"], 1)
+            self.assertEqual(cards[0]["mom_streak_side"], "above")
+            self.assertGreater(cards[1]["mom_streak"], 1)
+            self.assertEqual(cards[1]["mom_streak_side"], "below")
+            up_series = ms.series_of(hist, "UP US Equity")
+            self.assertGreaterEqual(len(up_series), 5)
+            self.assertEqual(up_series[-1][1], 11)  # live card today wins
+            self.assertNotEqual(up_series[-2][1], 11)  # prior days from backfill
+
+    def test_thin_one_day_hist_still_backfills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            days = _write_prices_long(root, n=90, end=date.today())
+            asof = days[-1]
+            thin = {
+                "asof": asof.isoformat(),
+                "threshold": 5,
+                "names": {
+                    "UP US Equity": {
+                        "series": [{"date": asof.isoformat(), "score": 9}],
+                        "score": 9,
+                    }
+                },
+                "meta": {"source": "empty"},
+            }
+            ms.write_hist(thin, root=root)
+            cards = [{"ticker": "UP US Equity", "mom_score": 9}]
+            hist = ms.rebuild_hist_for_cards(cards, root=root, asof=asof, write=True)
+            self.assertGreater(len(ms.series_of(hist, "UP US Equity")), 5)
+            self.assertGreater(cards[0]["mom_streak"], 1)
+            self.assertIn("backfill", str(hist["meta"]["source"]))
+
+    def test_write_combined_fills_streak_db_not_empty_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            days = _write_prices_long(root, n=90, end=date.today())
+            rec = de.build_name_record(
+                "UP US Equity",
+                {"GICS_SECTOR_NAME": "Information Technology", "EQY_BETA": 1.0},
+            )
+            rec["mom_score"] = 10
+            rec2 = de.build_name_record(
+                "DOWN US Equity",
+                {"GICS_SECTOR_NAME": "Energy", "EQY_BETA": 0.8},
+            )
+            rec2["mom_score"] = 1
+            book = {
+                "asof": days[-1].isoformat(),
+                "names": {"UP US Equity": rec, "DOWN US Equity": rec2},
+                "meta": {},
+            }
+            dest = desk_dash.write_combined(root / "factorbook.html", root=root, book=book)
+            text = dest.read_text(encoding="utf-8")
+            self.assertIn('id="mom-streak-db"', text)
+            self.assertNotIn('id="mom-streak-db">{}</script>', text)
+            self.assertIn("UP US Equity", text)
+            hist = ms.load_hist(root=root)
+            filled = ms.streak_db([], hist=hist)
+            self.assertTrue(filled)
+            self.assertGreater(filled["UP US Equity"]["streak"], 1)
+            patched = ms.ensure_embedded("<html><body></body></html>", filled)
+            self.assertIn('id="mom-streak-db"', patched)
+            self.assertNotIn(">{}</script>", patched)
+            self.assertRegex(text, r'id="mom-streak-db">\{.+\}</script>')
+
+
 class CardTagTests(unittest.TestCase):
     def test_attach_writes_pill(self) -> None:
         hist = {
