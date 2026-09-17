@@ -330,6 +330,12 @@ class CardTagTests(unittest.TestCase):
         self.assertEqual(card["mom_streak_label"], "↑4d>5")
         self.assertTrue(any(p["key"] == "mom-streak" for p in card["enrich_pills"]))
 
+    def test_embed_db_does_not_html_escape_gt(self) -> None:
+        html = ms.embed_db({"X": {"label": "↑12d>5"}})
+        self.assertIn("12d>5", html)
+        self.assertNotIn("&gt;", html)
+        self.assertIn("<\\/", ms._script_json('{"x":"</script>"}'))
+
     def test_render_html_has_tag_and_nav(self) -> None:
         rec = de.build_name_record(
             "AAPL US Equity",
@@ -354,7 +360,8 @@ class CardTagTests(unittest.TestCase):
         self.assertIn("Options", html)
         self.assertIn('data-t="AAPL US Equity"', html)
         self.assertIn("↑", html)
-        self.assertIn("d&gt;5", html)
+        self.assertIn("d&gt;5", html)  # HTML pill markup still escapes
+        self.assertIn("d>5", html)  # #mom-streak-db JSON must keep raw >
         self.assertIn('id="mom-streak-db"', html)
         self.assertIn("var STRIP_ID", html)
 

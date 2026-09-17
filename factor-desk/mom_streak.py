@@ -35,7 +35,6 @@ today. A day at 5, or a missing print, breaks the streak.
 from __future__ import annotations
 
 import csv
-import html
 import json
 import logging
 import os
@@ -919,9 +918,19 @@ def streak_db_from_hist(hist: Mapping[str, Any] | None) -> dict[str, dict[str, A
     return out
 
 
+def _script_json(blob: str) -> str:
+    """Put JSON in a ``<script>`` tag without HTML-escaping ``>`` / ``<``.
+
+    ``type="application/json"`` does not decode entities, so ``html.escape``
+    would leave literal ``&gt;`` in labels like ``↑12d>5``. Only neutralize
+    ``</`` so a value cannot close the script element.
+    """
+    return (blob or "").replace("</", "<\\/")
+
+
 def embed_db(mapping: Mapping[str, Any] | None) -> str:
     blob = json.dumps(dict(mapping or {}), separators=(",", ":"), ensure_ascii=True)
-    return f'<script type="application/json" id="{DB_SCRIPT_ID}">{html.escape(blob, quote=False)}</script>'
+    return f'<script type="application/json" id="{DB_SCRIPT_ID}">{_script_json(blob)}</script>'
 
 
 def streak_css() -> str:
