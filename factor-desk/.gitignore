@@ -12,6 +12,8 @@ gics_sectors.json
 gics_sectors.json.tmp
 mom_score_hist.json
 mom_score_hist.json.tmp
+desk_snapshot.json
+desk_snapshot.json.tmp
 clean/*.csv
 .dapi*
 *.png
