@@ -33,10 +33,10 @@ DB_SCRIPT_ID = "fd-chart-db"
 JS_SCRIPT_ID = "fd-chart-marks-js"
 CSS_STYLE_ID = "fd-chart-marks-css"
 CHART_WIDTH = 240
-CHART_HEIGHT = 72
-PAD_X = 8
-PLOT_TOP = 16
-PLOT_BOT = 56
+CHART_HEIGHT = 80
+PAD_X = 10
+PLOT_TOP = 22
+PLOT_BOT = 62
 TAG_CLUSTER_PX = 12
 LABEL_H = 11
 
@@ -121,6 +121,10 @@ def layout_marks(
             "title": str(raw.get("title") or raw.get("label") or ""),
             "show_label": True,
         }
+        try:
+            rec["y_hint"] = float(raw.get("y"))
+        except (TypeError, ValueError):
+            rec["y_hint"] = None
         if kind.startswith("streak"):
             streaks.append(rec)
         else:
@@ -143,7 +147,7 @@ def layout_marks(
         for i, mark in enumerate(group):
             mark["x"] = round(cx if i == 0 else mark["x"], 1)
             mark["y"] = PLOT_TOP
-            mark["label_y"] = 10
+            mark["label_y"] = 11
             mark["show_label"] = i == 0 and bool(caption)
             if i == 0:
                 mark["label"] = caption
@@ -155,8 +159,11 @@ def layout_marks(
     streaks.sort(key=lambda m: (m["x"], 0 if m["kind"] == "streak-start" else 1))
     streak_groups: list[list[dict[str, Any]]] = []
     for mark in streaks:
-        mark["y"] = float(PLOT_TOP + (PLOT_BOT - PLOT_TOP) * 0.55)
-        mark["label_y"] = height - 8
+        if mark.get("y_hint") is not None:
+            mark["y"] = float(mark["y_hint"])
+        else:
+            mark["y"] = float(PLOT_TOP + (PLOT_BOT - PLOT_TOP) * 0.55)
+        mark["label_y"] = height - 6
         if streak_groups and abs(mark["x"] - streak_groups[-1][-1]["x"]) < 6:
             streak_groups[-1].append(mark)
         else:
@@ -226,6 +233,31 @@ def _px_points(series: Sequence[tuple[date, float]], width: int, height: int) ->
     return " ".join(bits)
 
 
+def _series_y(series: Sequence[tuple[date, float]], day: date, height: int) -> float:
+    """Y on the price polyline for ``day`` (nearest print)."""
+    fallback = float(PLOT_TOP + (PLOT_BOT - PLOT_TOP) * 0.55)
+    if not series:
+        return fallback
+    vals = [p for _, p in series]
+    lo, hi = min(vals), max(vals)
+    if hi == lo:
+        hi = lo + 1.0
+    inner_h = PLOT_BOT - PLOT_TOP
+    px = None
+    best = None
+    for d, v in series:
+        if d == day:
+            px = v
+            break
+        gap = abs((d - day).days)
+        if best is None or gap < best[0]:
+            best = (gap, v)
+    if px is None:
+        px = best[1] if best else vals[-1]
+    y = PLOT_BOT - (px - lo) / (hi - lo) * inner_h
+    return max(PLOT_TOP + 4, min(PLOT_BOT - 4, y))
+
+
 def _marks_for_card(
     card: Mapping[str, Any],
     *,
@@ -252,6 +284,7 @@ def _marks_for_card(
                 d = _as_date(row.get("date"))
                 if d:
                     dates.append(d)
+    series = px_series or _score_as_px(card)
     xs = _dates_to_x(dates, width)
     marks: list[dict[str, Any]] = []
     for t in tags:
@@ -276,6 +309,7 @@ def _marks_for_card(
                 "kind": "streak-start",
                 "label": "1d" if same_day else "s",
                 "side": side,
+                "y": _series_y(series, start, CHART_HEIGHT),
                 "title": f"streak start {start.isoformat()} {label}".strip(),
             }
         )
@@ -287,6 +321,7 @@ def _marks_for_card(
                 "kind": end_kind,
                 "label": "now" if card.get("mom_streak_open") else "e",
                 "side": side,
+                "y": _series_y(series, end, CHART_HEIGHT),
                 "title": f"streak {'open end' if card.get('mom_streak_open') else 'end'} {end.isoformat()} {label}".strip(),
             }
         )
@@ -357,7 +392,7 @@ def render_svg(card: Mapping[str, Any] | None, *, width: int = CHART_WIDTH, heig
             cls += f" fd-chart-side-{html.escape(str(side), quote=True)}"
         if kind.startswith("streak"):
             body = f'<path d="M{x:.1f},{y - 4:.1f} L{x + 4:.1f},{y:.1f} L{x:.1f},{y + 4:.1f} L{x - 4:.1f},{y:.1f} Z"/>'
-            stem = f'<line x1="{x:.1f}" y1="{PLOT_TOP}" x2="{x:.1f}" y2="{PLOT_BOT}" />'
+            stem = ""
         else:
             body = f'<path d="M{x:.1f},{PLOT_TOP - 1:.1f} L{x + 3.2:.1f},{PLOT_TOP + 6:.1f} L{x - 3.2:.1f},{PLOT_TOP + 6:.1f} Z"/>'
             stem = ""
@@ -633,12 +668,9 @@ def overlay_js() -> str:
       g.setAttribute("data-date", iso);
       var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("d", "M" + x + "," + (y - 4) + " L" + (x + 4) + "," + y + " L" + x + "," + (y + 4) + " L" + (x - 4) + "," + y + " Z");
-      var line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-      line.setAttribute("x1", x); line.setAttribute("x2", x);
-      line.setAttribute("y1", 8); line.setAttribute("y2", hostBox.height - 10);
       var title = document.createElementNS("http://www.w3.org/2000/svg", "title");
       title.textContent = (kind.indexOf("start") >= 0 ? "streak start " : "streak end ") + iso + " " + (rec.label || "");
-      g.appendChild(title); g.appendChild(line); g.appendChild(path);
+      g.appendChild(title); g.appendChild(path);
       if (caption) {
         var tx = x;
         if (Math.abs(tx - lastCapX) < 16) tx = lastCapX + 16;
