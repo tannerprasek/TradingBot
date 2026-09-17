@@ -131,12 +131,24 @@ def _as_date(value: Any) -> date | None:
     return None
 
 
+ARROW_UP = "\u2191"  # ↑
+ARROW_DOWN = "\u2193"  # ↓
+
+
 def _ticker_key(ticker: str) -> str:
     return dapi_enrich.name_key(ticker) if ticker else ""
 
 
 def _short(ticker: str) -> str:
-    return (ticker or "").split()[0].upper()
+    parts = (ticker or "").split()
+    return parts[0].upper() if parts else ""
+
+
+def card_ticker(card: Mapping[str, Any] | None) -> str:
+    """Live FLAGS/WATCH/MOM cards use ``t`` (and ``score``), not always ``ticker``."""
+    if not card:
+        return ""
+    return str(card.get("ticker") or card.get("name") or card.get("t") or card.get("symbol") or "").strip()
 
 
 def in_home_score_range(value: float | None) -> bool:
@@ -275,9 +287,9 @@ def tag_label(streak: int, side: str | None, threshold: float = THRESHOLD) -> st
         return None
     cut = int(threshold) if float(threshold).is_integer() else threshold
     if side == "above":
-        return f"↑{int(streak)}d>{cut}"
+        return f"{ARROW_UP}{int(streak)}d>{cut}"
     if side == "below":
-        return f"↓{int(streak)}d<{cut}"
+        return f"{ARROW_DOWN}{int(streak)}d<{cut}"
     return f"={cut}"
 
 
@@ -776,8 +788,13 @@ def attach_card(
     *,
     asof: date | None = None,
     threshold: float = THRESHOLD,
+    root: Path | None = None,
 ) -> MutableMapping[str, Any]:
-    ticker = str(card.get("ticker") or card.get("name") or "")
+    ticker = card_ticker(card)
+    if ticker and not str(card.get("ticker") or "").strip():
+        card["ticker"] = ticker
+    if hist is None and series_by_ticker is None:
+        hist = load_hist(root=root)
     rec = compute_for_ticker(ticker, card, hist, series_by_ticker, asof=asof, threshold=threshold)
     card["mom_score"] = rec["mom_score"]
     card["mom_score_source"] = rec["mom_score_source"]
@@ -808,8 +825,12 @@ def attach_all(
     series_by_ticker: Mapping[str, list[tuple[date, float]]] | None = None,
     *,
     asof: date | None = None,
+    root: Path | None = None,
 ) -> list[MutableMapping[str, Any]]:
-    return [attach_card(c, hist, series_by_ticker, asof=asof) for c in cards]
+    cards_list = list(cards)
+    if hist is None and series_by_ticker is None:
+        hist = load_hist(root=root)
+    return [attach_card(c, hist, series_by_ticker, asof=asof, root=root) for c in cards_list]
 
 
 def streak_db(
@@ -833,7 +854,7 @@ def streak_db(
 def _streak_db_rec(item: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(item, Mapping):
         return None
-    ticker = str(item.get("ticker") or item.get("name") or "").strip()
+    ticker = card_ticker(item)
     side = item.get("mom_streak_side") or item.get("side")
     try:
         streak = int(item.get("mom_streak") if item.get("mom_streak") is not None else item.get("streak") or 0)
@@ -1033,9 +1054,13 @@ def rebuild_hist_for_cards(
 
     day = asof or _today()
     for card in cards:
-        attach_card(card, hist, series, asof=day)
+        attach_card(card, hist, series, asof=day, root=base)
         score = dapi_enrich.as_float(card.get("mom_score"))
-        ticker = str(card.get("ticker") or card.get("name") or "")
+        if score is None:
+            score, _src = resolve_card_score(card)
+        ticker = card_ticker(card)
+        if ticker and not str(card.get("ticker") or "").strip():
+            card["ticker"] = ticker
         if score is not None and ticker:
             record_to_hist(
                 hist,

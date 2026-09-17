@@ -278,17 +278,24 @@ Writes gitignored `gics_sectors.json` and stamps `dapi_enrichment.json`. Refresh
 
 Copy `mom_streak.py` next to live `desk_dash.py`. Do **not** change options score v2 or FLAGS/WATCH/MOM ranking.
 
-### After each MOM / FLAGS / WATCH card exists
+Live FLAGS/WATCH/MOM cards use **`t`** and **`score`** (not `ticker` / `mom_score`). `attach_card` reads `ticker or name or t or symbol` and sets `card["ticker"]` when missing. `resolve_card_score` already accepts `score` in `[0, 20]`.
+
+### After the FLAGS / WATCH / MOM card list exists
+
+Do **not** call `attach_all(cards)` with no hist — that ignores `mom_score_hist.json` and stamps `1d>5`. Rebuild hist first (auto-backfills from `prices_long.csv` when missing/thin):
 
 ```python
 import mom_streak
 
-mom_streak.attach_card(card)  # uses card["mom_score"] if present; else hist / prices
-# card now has mom_score, mom_streak, mom_streak_side, mom_streak_label
-# and a .badge.spike-chip pill (↑12d>5 / ↓8d<5 / =5)
+# PATHS["fb_root"] is the live factorbook folder, e.g. Path(r"C:\Users\MLP\Desktop\factorbook")
+hist = mom_streak.rebuild_hist_for_cards(cards, root=PATHS["fb_root"], write=True)
+# cards now have mom_score, mom_streak, mom_streak_side, mom_streak_label
+# and a .badge.spike-chip pill (↑12d>5 / ↓8d<5 / =5). Live card score wins for today.
 ```
 
-Score is the home UP/DOWN rank (`mom_score` first). Threshold is literal **5**. Exactly 5 → streak 0, tag `=5`. See `docs/MOM-STREAK.md`.
+Equivalent: `hist = mom_streak.load_hist(root=PATHS["fb_root"]); mom_streak.attach_all(cards, hist)`.
+
+Score is the home UP/DOWN rank (`mom_score` first, then card `score` in 0–20). Threshold is literal **5**. Exactly 5 → streak 0, tag `=5`. See `docs/MOM-STREAK.md`.
 
 ### End of live `write_combined` / `write_dash.write`
 

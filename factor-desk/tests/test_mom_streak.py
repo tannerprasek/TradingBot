@@ -78,6 +78,21 @@ class StreakRuleTests(unittest.TestCase):
         self.assertEqual(ms.trend_window_score(down), 0)
         self.assertIsNone(ms.trend_window_score([10.0, 11.0]))
 
+    def test_tag_label_arrows_are_unicode_up_down(self) -> None:
+        up = ms.tag_label(12, "above")
+        down = ms.tag_label(89, "below")
+        self.assertEqual(ord(up[0]), 0x2191)
+        self.assertEqual(ord(down[0]), 0x2193)
+        self.assertEqual(up, "\u219112d>5")
+        self.assertEqual(down, "\u219389d<5")
+        self.assertEqual(ms.ARROW_UP, "\u2191")
+        self.assertEqual(ms.ARROW_DOWN, "\u2193")
+
+    def test_short_empty_does_not_raise(self) -> None:
+        self.assertEqual(ms._short(""), "")
+        self.assertEqual(ms._short("   "), "")
+        self.assertEqual(ms._short("DT US Equity"), "DT")
+
 
 class HistAndPriceTests(unittest.TestCase):
     def test_prices_csv_builds_score_series(self) -> None:
@@ -241,6 +256,58 @@ class PricesLongBackfillTests(unittest.TestCase):
             self.assertIn('id="mom-streak-db"', patched)
             self.assertNotIn(">{}</script>", patched)
             self.assertRegex(text, r'id="mom-streak-db">\{.+\}</script>')
+
+
+class LiveCardFieldTests(unittest.TestCase):
+    """Desktop FLAGS/WATCH/MOM cards use ``t`` / ``score``, not ticker / mom_score."""
+
+    def test_attach_card_reads_t_and_score_sets_ticker(self) -> None:
+        days = [date(2026, 1, 2) + timedelta(days=i) for i in range(89)]
+        hist = {
+            "names": {
+                "DT US Equity": {
+                    "series": [{"date": d.isoformat(), "score": 8} for d in days],
+                }
+            }
+        }
+        card = {"t": "DT", "score": 9}
+        ms.attach_card(card, hist, asof=days[-1])
+        self.assertEqual(card["ticker"], "DT")
+        self.assertEqual(card["mom_score"], 9)
+        self.assertEqual(card["mom_score_source"], "score")
+        self.assertGreater(card["mom_streak"], 1)
+        self.assertEqual(card["mom_streak_side"], "above")
+        self.assertEqual(card["mom_streak_label"][0], "\u2191")
+        self.assertGreaterEqual(card["mom_streak"], 80)
+
+    def test_attach_all_without_hist_uses_mom_score_hist_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            days = _weekdays_ending(date.today(), 40)
+            hist = {
+                "asof": days[-1].isoformat(),
+                "threshold": 5,
+                "names": {
+                    "DT US Equity": {
+                        "series": [{"date": d.isoformat(), "score": 8} for d in days],
+                        "score": 8,
+                        "streak": 40,
+                        "side": "above",
+                        "label": "\u219140d>5",
+                    }
+                },
+                "meta": {"source": "prices_long.trend_windows_backfill"},
+            }
+            ms.write_hist(hist, root=root)
+            cards = [{"t": "DT US Equity", "score": 8}]
+            out = ms.attach_all(cards, root=root, asof=days[-1])
+            self.assertGreater(out[0]["mom_streak"], 1)
+            self.assertEqual(out[0]["ticker"], "DT US Equity")
+            cards2 = [{"t": "DT US Equity", "score": 8}]
+            out2 = desk_dash.attach_all(cards2, root=root)
+            self.assertGreater(out2[0]["mom_streak"], 1)
+            self.assertEqual(out2[0]["ticker"], "DT US Equity")
+            self.assertEqual(out2[0]["mom_streak_label"][0], "\u2191")
 
 
 class CardTagTests(unittest.TestCase):

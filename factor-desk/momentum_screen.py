@@ -31,13 +31,16 @@ def attach_enrichment(
     book: Mapping[str, Any] | None = None,
     rec: Mapping[str, Any] | None = None,
     cache: Mapping[str, Any] | None = None,
+    hist: Mapping[str, Any] | None = None,
 ) -> MutableMapping[str, Any]:
-    ticker = str(row.get("ticker") or row.get("name") or "")
+    ticker = mom_streak.card_ticker(row)
+    if ticker and not str(row.get("ticker") or "").strip():
+        row["ticker"] = ticker
     if rec is None and book is not None:
         rec = dapi_enrich.lookup_name(book, ticker)
     dapi_enrich.attach_card_fields(row, rec)
     gics_filter.overlay_sector(row, rec, cache=cache, book=book)
-    mom_streak.attach_card(row)
+    mom_streak.attach_card(row, hist=hist)
     if rec:
         row["residual_20d"] = rec.get("residual_20d")
         row["watch_hint"] = rec.get("watch_hint")
@@ -53,7 +56,10 @@ def attach_book(rows: Iterable[MutableMapping[str, Any]], book: Mapping[str, Any
     if book is None:
         book = desk_dash.load_enrichment()
     cache = dapi_enrich.load_gics_cache()
-    return [attach_enrichment(row, book, cache=cache) for row in rows]
+    src = list(rows)
+    root = __import__("pathlib").Path(__file__).resolve().parent
+    hist = mom_streak.rebuild_hist_for_cards(src, root=root, write=True)
+    return [attach_enrichment(row, book, cache=cache, hist=hist) for row in src]
 
 
 def screen(

@@ -178,7 +178,10 @@ def attach_enrichment(
     Missing enrich file → nulls + empty pills.
     """
     if rec is None and book is not None:
-        rec = dapi_enrich.lookup_name(book, ticker or str(card.get("ticker") or card.get("name") or ""))
+        rec = dapi_enrich.lookup_name(book, ticker or mom_streak.card_ticker(card))
+    ticker = ticker or mom_streak.card_ticker(card)
+    if ticker and not str(card.get("ticker") or "").strip():
+        card["ticker"] = ticker
     if rec is None and ticker:
         rec = None
     dapi_enrich.attach_card_fields(card, rec)
@@ -188,14 +191,23 @@ def attach_enrichment(
 
 def attach_all(
     cards: Iterable[MutableMapping[str, Any]],
-    book: Mapping[str, Any] | None,
+    book: Mapping[str, Any] | None = None,
     cache: Mapping[str, Any] | None = None,
     hist: Mapping[str, Any] | None = None,
     series_by_ticker: Mapping[str, list] | None = None,
+    *,
+    root: Path | None = None,
 ) -> list[MutableMapping[str, Any]]:
+    """Attach enrich + mom streak. Missing ``hist`` rebuilds ``mom_score_hist.json``."""
+    cards_list = list(cards)
+    base = Path(root) if root is not None else HERE
+    if hist is None:
+        hist = mom_streak.rebuild_hist_for_cards(cards_list, root=base, write=True)
+        if series_by_ticker is None:
+            series_by_ticker, _ = mom_streak.discover_score_series(base, hist=hist)
     out: list[MutableMapping[str, Any]] = []
-    for card in cards:
-        ticker = str(card.get("ticker") or card.get("name") or "")
+    for card in cards_list:
+        ticker = mom_streak.card_ticker(card)
         rec = dapi_enrich.lookup_name(book, ticker) if book else None
         out.append(
             attach_enrichment(
@@ -568,11 +580,13 @@ def render_html(
     cards = attach_all(list(cards), book, cache=cache, hist=hist, series_by_ticker=series_by_ticker)
     rows: list[str] = []
     for card in cards:
-        ticker = html.escape(str(card.get("ticker") or card.get("name") or ""))
+        ticker = html.escape(str(mom_streak.card_ticker(card) or card.get("ticker") or card.get("name") or ""))
         pills = pills_html(card.get("enrich_pills"))
         sector = gics_filter.sector_of(card, cache) or ""
         sector_attr = html.escape(sector, quote=True)
         score = card.get("mom_score")
+        if score is None:
+            score, _src = mom_streak.resolve_card_score(card)
         spark = chart_marks.render_svg(card)
         rows.append(
             f"""
@@ -712,7 +726,7 @@ def write_combined(
     cards = [dict(c) for c in cards]
     hist = mom_streak.rebuild_hist_for_cards(cards, root=base, write=True)
     series, _src = mom_streak.discover_score_series(base, hist=hist)
-    cards = attach_all(cards, book, cache=cache, hist=hist, series_by_ticker=series)
+    cards = attach_all(cards, book, cache=cache, hist=hist, series_by_ticker=series, root=base)
 
     existing = ""
     if html is not None:

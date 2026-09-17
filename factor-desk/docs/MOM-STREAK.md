@@ -8,7 +8,7 @@ The number on Momentum Up / Down cards is a small **0–13-style rank**, not opt
 
 Resolver (first hit), implemented in `mom_streak.resolve_card_score`:
 
-1. Card/row fields already used for UP/DOWN ranking: `mom_score`, `momentum_score`, `mom_rank`, `trend_rank`.
+1. Card/row fields already used for UP/DOWN ranking: `mom_score`, `momentum_score`, `mom_rank`, `trend_rank`. Live FLAGS/WATCH/MOM cards often store the name as **`t`** and the rank as **`score`** (0–20) rather than `ticker` / `mom_score` — `attach_card` reads `ticker or name or t or symbol` and sets `card["ticker"]` when missing.
 2. `score` or `trend_score` **only if** the value is in `[0, 20]` (rejects 0–100 percentiles and huge option scores).
 3. Durable history already on disk:
    - `mom_score_hist.json` (written each rebuild)
