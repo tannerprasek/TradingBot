@@ -434,6 +434,32 @@ html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
 book_delta.write_snapshot(snap, root=PATHS["fb_root"])  # gitignored desk_snapshot.json
 ```
 
+**Never** call `breakout.ensure_embedded(html)` / `ensure_embedded(html, None)` on the live dash — that leaves ranked panes alone in this pack, but Desktop must still pass `ranked` so `#fd-breakout-db` stays filled. Empty ranks paint “No breakout names”.
+
+### Live `setView` allowlist (required on Desktop)
+
+Live factorbook `setView` only knows `home|mom-up|mom-down|outliers|options|sectors`. A Breakout click falls through → coerced to `home` → FLAGS/WATCH stay up. `breakout.ensure_embedded` now:
+
+- Appends `|breakout|breakdown` to that allowlist string if present
+- Injects an early-return at the top of `function setView(v)` that calls `window.__FD_BB_SHOW__(v)` and **does not** `paint()`
+- Capture-phase click handler `preventDefault` + `stopPropagation` + `stopImmediatePropagation` so the native `#topnav` listener cannot reset to home
+- Hides `#home`, `#view-mom-up`, `#view-mom-down`, `#view-outliers`, `#view-options`, `#view-sectors`, `#search-pane` with class `hide` (hiding cards alone is not enough)
+
+If you are not swapping `breakout.py` yet, paste into live `setView`:
+
+```javascript
+function setView(v) {
+  if (v === "breakout" || v === "breakdown") {
+    if (window.__FD_BB_SHOW__) window.__FD_BB_SHOW__(v);
+    return; // do not paint()
+  }
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors|breakout|breakdown)$/.test(v)) v = "home";
+  // ... existing hide/show + paint()
+}
+```
+
+Injected nav buttons use live chrome: `class="btn nav-btn"` (not bare `nav-btn`).
+
 Cloud `desk_dash.write_combined` already does this. If you are **not** swapping live `desk_dash.py`, paste the tail. `breakout.ensure_embedded` injects **Breakout** / **Breakdown** buttons after Momentum Down even when the live nav already exists.
 
 Tabs clone existing card chrome (`data-t`) — dense cards, not a table. Formula / thresholds: `docs/BREAKOUT-BREAKDOWN.md` and the constants block in `breakout.py`.

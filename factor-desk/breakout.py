@@ -82,12 +82,30 @@ HID_CLASS = "fd-bb-hid"
 NAV_BREAKOUT_ID = "fd-nav-breakout"
 NAV_BREAKDOWN_ID = "fd-nav-breakdown"
 BTN_BREAKOUT = (
-    f'<button type="button" class="nav-btn" id="{NAV_BREAKOUT_ID}" '
+    f'<button type="button" class="btn nav-btn" id="{NAV_BREAKOUT_ID}" '
     'data-view="breakout" data-fd-breakout="1">Breakout</button>'
 )
 BTN_BREAKDOWN = (
-    f'<button type="button" class="nav-btn" id="{NAV_BREAKDOWN_ID}" '
+    f'<button type="button" class="btn nav-btn" id="{NAV_BREAKDOWN_ID}" '
     'data-view="breakdown" data-fd-breakdown="1">Breakdown</button>'
+)
+SETVIEW_MARKER = "/*fd-bb-setview*/"
+NATIVE_VIEW_IDS: tuple[str, ...] = (
+    "home",
+    "view-mom-up",
+    "view-mom-down",
+    "view-outliers",
+    "view-options",
+    "view-sectors",
+    "search-pane",
+)
+_ALLOWLIST_RE = re.compile(
+    r"home\|mom-up\|mom-down\|outliers\|options(?:\|sectors)?(?!\|breakout)",
+    re.I,
+)
+_SETVIEW_FN_RE = re.compile(
+    r"(function\s+setView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{)",
+    re.I,
 )
 
 _HOP_LEADER_RE = re.compile(r"\b(hop|leader)\b", re.I)
@@ -551,50 +569,63 @@ def strip_css() -> str:
   margin: 8px 0 0;
 }}
 .nav-btn[data-view="breakout"].is-on,
-.nav-btn[data-fd-breakout="1"].is-on {{
+.nav-btn[data-view="breakout"].on,
+.btn.nav-btn[data-view="breakout"].on,
+.nav-btn[data-fd-breakout="1"].is-on,
+.nav-btn[data-fd-breakout="1"].on {{
   color: #6ee7b7; border-color: #34d399; background: #064e3b;
 }}
 .nav-btn[data-view="breakdown"].is-on,
-.nav-btn[data-fd-breakdown="1"].is-on {{
+.nav-btn[data-view="breakdown"].on,
+.btn.nav-btn[data-view="breakdown"].on,
+.nav-btn[data-fd-breakdown="1"].is-on,
+.nav-btn[data-fd-breakdown="1"].on {{
   color: #fda4af; border-color: #fb7185; background: #3f1d1d;
 }}
 """.strip()
 
 
 def strip_js() -> str:
-    """Nav + card clone. Same chrome as MOM cards; not a table."""
-    return r"""
-(function () {
+    """Nav + card clone. Same chrome as MOM cards; not a table.
+
+    Capture-phase click stops the live topnav listener. ``show`` is also
+    ``window.__FD_BB_SHOW__`` so a patched live ``setView`` can early-return
+    without ``paint()``.
+    """
+    view_ids = json.dumps(list(NATIVE_VIEW_IDS))
+    return rf"""
+(function () {{
   if (window.__FD_BB_BOUND__) return;
   window.__FD_BB_BOUND__ = true;
   var DB_ID = "fd-breakout-db";
   var BREAKOUT = "fd-bb-breakout";
   var BREAKDOWN = "fd-bb-breakdown";
   var HID = "fd-bb-hid";
+  var NATIVE_VIEWS = {view_ids};
 
-  function $(id) { return document.getElementById(id); }
-  function db() {
+  function $(id) {{ return document.getElementById(id); }}
+  function db() {{
     var el = $(DB_ID);
-    if (!el) return { breakout: [], breakdown: [] };
-    try { return JSON.parse(el.textContent || "{}") || { breakout: [], breakdown: [] }; }
-    catch (e) { return { breakout: [], breakdown: [] }; }
-  }
-  function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
-  function tickerOf(node) {
+    if (!el) return {{ breakout: [], breakdown: [] }};
+    try {{ return JSON.parse(el.textContent || "{{}}") || {{ breakout: [], breakdown: [] }}; }}
+    catch (e) {{ return {{ breakout: [], breakdown: [] }}; }}
+  }}
+  function shortOf(t) {{ return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }}
+  function tickerOf(node) {{
     return (node.getAttribute("data-t") || node.getAttribute("data-ticker") || node.getAttribute("data-name") || "").trim();
-  }
-  function findSrc(ticker) {
+  }}
+  function findSrc(ticker) {{
     var want = shortOf(ticker);
     var nodes = document.querySelectorAll("[data-t], [data-ticker], article.card, .card");
-    for (var i = 0; i < nodes.length; i++) {
+    for (var i = 0; i < nodes.length; i++) {{
       var node = nodes[i];
-      if (node.closest && node.closest("#fd-bb-breakout, #fd-bb-breakdown, nav, .topnav")) continue;
+      if (node.closest && node.closest("#fd-bb-breakout, #fd-bb-breakdown, nav, .topnav, #topnav")) continue;
       var t = shortOf(tickerOf(node));
       if (t && t === want) return node;
-    }
+    }}
     return null;
-  }
-  function fallbackCard(row) {
+  }}
+  function fallbackCard(row) {{
     var art = document.createElement("article");
     art.className = "card fd-bb-card";
     var t = row.t || shortOf(row.ticker) || "";
@@ -608,114 +639,153 @@ def strip_js() -> str:
       (label ? '<span class="badge spike-chip">' + label + '</span>' : '') +
       '</div></header><p class="fd-bb-why">' + why + '</p>';
     return art;
-  }
-  function fill(pane, rows) {
+  }}
+  function fill(pane, rows) {{
     if (!pane) return;
     pane.innerHTML = "";
-    if (!rows || !rows.length) {
+    pane.classList.remove("hide");
+    if (!rows || !rows.length) {{
       var empty = document.createElement("p");
       empty.className = "fd-bb-empty";
       empty.textContent = "No names this Refresh — mid-score climbers / crackers only.";
       pane.appendChild(empty);
       return;
-    }
-    for (var i = 0; i < rows.length; i++) {
-      var row = rows[i] || {};
+    }}
+    for (var i = 0; i < rows.length; i++) {{
+      var row = rows[i] || {{}};
       var src = findSrc(row.ticker || row.t);
       var card;
-      if (src) {
+      if (src) {{
         card = src.cloneNode(true);
-        card.classList.remove(HID, "gics-hid");
+        card.classList.remove(HID, "gics-hid", "hide");
         if (card.style) card.style.display = "";
-      } else {
+      }} else {{
         card = fallbackCard(row);
-      }
+      }}
       pane.appendChild(card);
-    }
-  }
-  function nativeCards() {
+    }}
+  }}
+  function nativeCards() {{
     return document.querySelectorAll("article.card, .card[data-t], [data-t]");
-  }
-  function hideNative() {
+  }}
+  function hideNativeViews() {{
+    for (var i = 0; i < NATIVE_VIEWS.length; i++) {{
+      var el = $(NATIVE_VIEWS[i]);
+      if (el) el.classList.add("hide");
+    }}
+  }}
+  function showNativeViews() {{
+    for (var i = 0; i < NATIVE_VIEWS.length; i++) {{
+      var el = $(NATIVE_VIEWS[i]);
+      if (el) el.classList.remove("hide");
+    }}
+  }}
+  function hideNative() {{
+    hideNativeViews();
     var nodes = nativeCards();
-    for (var i = 0; i < nodes.length; i++) {
+    for (var i = 0; i < nodes.length; i++) {{
       var node = nodes[i];
-      if (node.closest && node.closest("#fd-bb-breakout, #fd-bb-breakdown, nav, .topnav, #gics-filter-strip, #fd-book-delta")) continue;
+      if (node.closest && node.closest("#fd-bb-breakout, #fd-bb-breakdown, nav, .topnav, #topnav, #gics-filter-strip, #fd-book-delta")) continue;
       node.classList.add(HID);
-    }
-  }
-  function showNative() {
+    }}
+  }}
+  function showNative() {{
+    showNativeViews();
     var nodes = document.querySelectorAll("." + HID);
     for (var i = 0; i < nodes.length; i++) nodes[i].classList.remove(HID);
-  }
-  function setOn(btn, on) {
+  }}
+  function setOn(btn, on) {{
     if (!btn) return;
     btn.classList.toggle("is-on", !!on);
+    btn.classList.toggle("on", !!on);
     btn.setAttribute("aria-pressed", on ? "true" : "false");
-  }
-  function navButtons() {
-    return document.querySelectorAll(".topnav .nav-btn, nav .nav-btn, [data-view], [data-fd-breakout], [data-fd-breakdown]");
-  }
-  function show(kind) {
+  }}
+  function navButtons() {{
+    return document.querySelectorAll("#topnav .btn, #topnav .nav-btn, .topnav .nav-btn, nav .btn, nav .nav-btn, [data-view], [data-fd-breakout], [data-fd-breakdown]");
+  }}
+  function oursOf(b, kind) {{
+    var view = (b.getAttribute("data-view") || "");
+    return view === kind || (kind === "breakout" && (b.getAttribute("data-fd-breakout") === "1" || b.id === "fd-nav-breakout")) ||
+      (kind === "breakdown" && (b.getAttribute("data-fd-breakdown") === "1" || b.id === "fd-nav-breakdown"));
+  }}
+  function syncNav(kind) {{
+    var buttons = navButtons();
+    for (var i = 0; i < buttons.length; i++) {{
+      var b = buttons[i];
+      if (kind === "breakout" || kind === "breakdown") setOn(b, oursOf(b, kind));
+      else if (oursOf(b, "breakout") || oursOf(b, "breakdown")) setOn(b, false);
+    }}
+  }}
+  function show(kind) {{
     var data = db();
     var bo = $(BREAKOUT);
     var bd = $(BREAKDOWN);
-    if (kind === "breakout" || kind === "breakdown") {
+    if (kind === "breakout" || kind === "breakdown") {{
       hideNative();
-      if (bo) {
+      if (bo) {{
         bo.classList.toggle("is-on", kind === "breakout");
+        bo.classList.toggle("hide", kind !== "breakout");
         if (kind === "breakout") fill(bo, data.breakout || []);
-      }
-      if (bd) {
+      }}
+      if (bd) {{
         bd.classList.toggle("is-on", kind === "breakdown");
+        bd.classList.toggle("hide", kind !== "breakdown");
         if (kind === "breakdown") fill(bd, data.breakdown || []);
-      }
+      }}
       document.body.setAttribute("data-fd-bb", kind);
-      var buttons = navButtons();
-      for (var i = 0; i < buttons.length; i++) {
-        var b = buttons[i];
-        var view = (b.getAttribute("data-view") || "");
-        var ours = view === kind || (kind === "breakout" && b.getAttribute("data-fd-breakout") === "1") ||
-          (kind === "breakdown" && b.getAttribute("data-fd-breakdown") === "1");
-        setOn(b, ours);
-      }
+      syncNav(kind);
       return;
-    }
+    }}
     showNative();
-    if (bo) bo.classList.remove("is-on");
-    if (bd) bd.classList.remove("is-on");
+    if (bo) {{ bo.classList.remove("is-on"); bo.classList.add("hide"); }}
+    if (bd) {{ bd.classList.remove("is-on"); bd.classList.add("hide"); }}
     document.body.removeAttribute("data-fd-bb");
-    var buttons2 = navButtons();
-    for (var j = 0; j < buttons2.length; j++) {
-      var b2 = buttons2[j];
-      var v2 = b2.getAttribute("data-view") || "";
-      if (v2 === "breakout" || v2 === "breakdown" || b2.getAttribute("data-fd-breakout") === "1" ||
-          b2.getAttribute("data-fd-breakdown") === "1") setOn(b2, false);
-    }
-  }
-  function kindOf(btn) {
+    syncNav("");
+  }}
+  window.__FD_BB_SHOW__ = show;
+  function kindOf(btn) {{
     if (!btn || !btn.getAttribute) return "";
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
-    if (view === "breakout" || btn.getAttribute("data-fd-breakout") === "1") return "breakout";
-    if (view === "breakdown" || btn.getAttribute("data-fd-breakdown") === "1") return "breakdown";
+    if (view === "breakout" || btn.getAttribute("data-fd-breakout") === "1" || btn.id === "fd-nav-breakout") return "breakout";
+    if (view === "breakdown" || btn.getAttribute("data-fd-breakdown") === "1" || btn.id === "fd-nav-breakdown") return "breakdown";
     var label = (btn.textContent || "").replace(/\s+/g, " ").trim();
     if (label === "Breakout") return "breakout";
     if (label === "Breakdown") return "breakdown";
     if (btn.id === "refresh" || btn.id === "options-refresh") return "";
+    if (btn.closest && btn.closest("#topnav, nav, .topnav") && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || view)) return "other";
     if (btn.classList && (btn.classList.contains("nav-btn") || view)) return "other";
     return "";
-  }
-  document.addEventListener("click", function (ev) {
+  }}
+  document.addEventListener("click", function (ev) {{
     var t = ev.target && ev.target.closest ? ev.target.closest("button, [data-view], [data-fd-breakout], [data-fd-breakdown]") : ev.target;
     var kind = kindOf(t);
     if (!kind) return;
-    if (kind === "breakout" || kind === "breakdown") {
+    if (kind === "breakout" || kind === "breakdown") {{
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
       show(kind);
       return;
-    }
+    }}
     if (kind === "other") show("");
-  }, true);
-})();
+  }}, true);
+  function installSetViewBridge() {{
+    var orig = window.setView;
+    if (typeof orig !== "function" || orig.__fdBb) return;
+    window.setView = function (v) {{
+      var kind = String(v || "").toLowerCase();
+      if (kind === "breakout" || kind === "breakdown") {{
+        show(kind);
+        return;
+      }}
+      show("");
+      return orig.apply(this, arguments);
+    }};
+    window.setView.__fdBb = true;
+  }}
+  installSetViewBridge();
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", installSetViewBridge);
+}})();
 """.strip()
 
 
@@ -824,9 +894,46 @@ def _ensure_nav(html_text: str) -> str:
     return pair + "\n" + html_text
 
 
-def _ensure_panes(html_text: str, ranked: Mapping[str, Any] | None) -> str:
+def _patch_setview_allowlist(html_text: str) -> str:
+    """Append ``|breakout|breakdown`` to the live ``setView`` allowlist if present."""
+    text = html_text or ""
+    if re.search(
+        r"home\|mom-up\|mom-down\|outliers\|options(?:\|sectors)?\|breakout\|breakdown",
+        text,
+        re.I,
+    ):
+        return text
+    return _ALLOWLIST_RE.sub(lambda m: m.group(0) + "|breakout|breakdown", text)
+
+
+def _patch_setview_early_return(html_text: str) -> str:
+    """Live ``setView(v)`` early-returns for our tabs — hide native views, no ``paint()``."""
+    text = html_text or ""
+    if SETVIEW_MARKER in text:
+        return text
+
+    def inject(match: re.Match[str]) -> str:
+        head, param = match.group(1), match.group(2)
+        return (
+            f"{head}{SETVIEW_MARKER}"
+            f"if({param}===\"breakout\"||{param}===\"breakdown\"){{"
+            f"if(window.__FD_BB_SHOW__)window.__FD_BB_SHOW__({param});return;}}"
+        )
+
+    return _SETVIEW_FN_RE.sub(inject, text, count=1)
+
+
+def _patch_setview(html_text: str) -> str:
+    text = _patch_setview_allowlist(html_text)
+    return _patch_setview_early_return(text)
+
+
+def _ensure_panes(html_text: str, ranked: Mapping[str, Any] | None, *, replace: bool = True) -> str:
+    has = bool(re.search(rf'id=["\']{PANE_BREAKOUT_ID}["\']', html_text, re.I))
+    if has and not replace:
+        return html_text
     host = panes_html(ranked)
-    if re.search(rf'id=["\']{PANE_BREAKOUT_ID}["\']', html_text, re.I):
+    if has:
         html_text = re.sub(
             rf'<div\b[^>]*\bid=["\']{PANE_BREAKOUT_ID}["\'][^>]*>.*?</div>\s*'
             rf'<div\b[^>]*\bid=["\']{PANE_BREAKDOWN_ID}["\'][^>]*>.*?</div>',
@@ -882,12 +989,22 @@ def _ensure_js(html_text: str) -> str:
 
 
 def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> str:
-    """Nav buttons + panes + filled db + JS. Safe on live ~2.7MB HTML. No Sectors tab."""
+    """Nav buttons + panes + filled db + JS. Safe on live ~2.7MB HTML. No Sectors tab.
+
+    ``ranked=None`` must not wipe already-ranked live panes / ``#fd-breakout-db``.
+    Always pass ``rank_book(...)`` on a live write.
+    """
     text = html_text or ""
     # Buttons before CSS: CSS selectors contain ``data-view="breakout"`` text.
     text = _ensure_nav(text)
     text = _ensure_css(text)
-    text = _ensure_panes(text, ranked)
-    text = _ensure_db(text, ranked)
+    text = _patch_setview(text)
+    if ranked is not None:
+        text = _ensure_panes(text, ranked, replace=True)
+        text = _ensure_db(text, ranked)
+    else:
+        text = _ensure_panes(text, {"breakout": [], "breakdown": []}, replace=False)
+        if not re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', text, re.I):
+            text = _ensure_db(text, {"breakout": [], "breakdown": []})
     text = _ensure_js(text)
     return text

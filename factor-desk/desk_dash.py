@@ -62,8 +62,8 @@ NAV_HTML = f"""
   {PROGRESS_HTML}
   <button type="button" class="nav-btn" data-view="mom-up">Momentum Up</button>
   <button type="button" class="nav-btn" data-view="mom-down">Momentum Down</button>
-  <button type="button" class="nav-btn" id="fd-nav-breakout" data-view="breakout" data-fd-breakout="1">Breakout</button>
-  <button type="button" class="nav-btn" id="fd-nav-breakdown" data-view="breakdown" data-fd-breakdown="1">Breakdown</button>
+  <button type="button" class="btn nav-btn" id="fd-nav-breakout" data-view="breakout" data-fd-breakout="1">Breakout</button>
+  <button type="button" class="btn nav-btn" id="fd-nav-breakdown" data-view="breakdown" data-fd-breakdown="1">Breakdown</button>
   <button type="button" class="nav-btn" data-view="outliers">Outliers</button>
   <button type="button" class="nav-btn" data-view="options">Options</button>
 </nav>

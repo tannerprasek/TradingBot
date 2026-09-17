@@ -200,6 +200,58 @@ class EmbedTests(unittest.TestCase):
         again = bo.ensure_embedded(out, {"breakout": [], "breakdown": []})
         self.assertEqual(len(re.findall(r'<button\b[^>]*data-view=["\']breakout["\'][^>]*>', again, re.I)), 1)
         self.assertEqual(len(re.findall(r'<button\b[^>]*data-view=["\']breakdown["\'][^>]*>', again, re.I)), 1)
+        self.assertIn('class="btn nav-btn"', out)
+
+    def test_ensure_embedded_patches_setview_allowlist_and_js_stops_native(self) -> None:
+        html = """<!DOCTYPE html><html><body>
+<nav id="topnav">
+  <button class="btn" data-view="home">Home</button>
+  <button class="btn">Momentum Down</button>
+</nav>
+<div id="home">FLAGS</div>
+<script>
+function setView(v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+  paint();
+}
+</script>
+</body></html>"""
+        ranked = {
+            "breakout": [{"t": "CLIMB", "ticker": "CLIMB US Equity", "score": 9, "why": "band 9"}],
+            "breakdown": [],
+        }
+        out = bo.ensure_embedded(html, ranked)
+        self.assertRegex(
+            out,
+            r"home\|mom-up\|mom-down\|outliers\|options\|sectors\|breakout\|breakdown",
+        )
+        self.assertIn(bo.SETVIEW_MARKER, out)
+        self.assertIn("window.__FD_BB_SHOW__", out)
+        self.assertIn("return;", out.split("function setView")[1][:400])
+        js = bo.strip_js()
+        self.assertIn("stopImmediatePropagation", js)
+        self.assertIn("window.__FD_BB_SHOW__", js)
+        self.assertIn('classList.add("hide")', js)
+        self.assertIn("view-mom-up", js)
+        self.assertIn("search-pane", js)
+        self.assertIn('class="btn nav-btn"', out)
+
+    def test_ensure_embedded_none_does_not_wipe_ranked_panes(self) -> None:
+        html = """<!DOCTYPE html><html><body>
+<nav><button>Momentum Down</button></nav>
+<article class="card" data-t="CLIMB">CLIMB</article>
+</body></html>"""
+        ranked = {
+            "breakout": [{"t": "CLIMB", "ticker": "CLIMB US Equity", "score": 9, "why": "band 9"}],
+            "breakdown": [],
+        }
+        filled = bo.ensure_embedded(html, ranked)
+        self.assertIn("CLIMB", filled)
+        self.assertNotIn("No breakout names this Refresh.", filled)
+        kept = bo.ensure_embedded(filled, None)
+        self.assertIn("CLIMB", kept)
+        self.assertNotIn("No breakout names this Refresh.", kept)
+        self.assertIn("band 9", kept)
 
     def test_write_combined_patches_live_html_with_tabs_and_delta(self) -> None:
         body = """<!DOCTYPE html>
