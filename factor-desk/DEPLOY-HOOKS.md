@@ -519,4 +519,53 @@ Suggested Desktop sync paths:
 - Code: `factor-desk/*.py` → `C:\Users\MLP\Desktop\factorbook\`
 - Ideas: `C:\Users\MLP\Desktop\jr-analysts\ideas\` → env `FACTOR_DESK_IDEAS_DIR` or a synced copy at `C:\Users\MLP\Desktop\factorbook\ideas\`
 
+---
+
+## 10) Paper trading (Buy / Sell on dense MOM cards)
+
+Copy `paper_trade.py` next to live `desk_dash.py`. **Do not wholesale replace** live `desk_dash.py` (FLAGS / WATCH / MOM chrome stays). Paper only — no brokerage. 1 unit notional; no size UI.
+
+Same-side click while a position is open is a **no-op + brief toast** (`Already long — sell to close` / `Already short — buy to close`). It does not add size and does not flip. Opposite click **closes** (flat + Buy = long, flat + Sell = short).
+
+### End of live `write_combined` / `write_dash.write`
+
+After the existing GICS / streak / chart / breakout / hitch `ensure_embedded` tail:
+
+```python
+import paper_trade
+
+# cards already attached (enrich + mom_streak). Marks come from card px / PX_LAST / last Refresh print.
+paper_marks = paper_trade.marks_db(cards, book=book)
+
+html = gics_filter.ensure_embedded(html, db)
+html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
+html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
+html = breakout.ensure_embedded(html, ranked)
+html = book_delta.ensure_embedded(html, delta)
+html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
+html = paper_trade.ensure_embedded(html, paper_marks)  # wraps cardHTML; localStorage fd-paper-book
+# dest.write_text(html)
+```
+
+Optional on the enrich attach path (cloud `_article_html` already does this):
+
+```python
+paper_trade.attach_mark(card, _rec)
+# card.paper_mark / px_last when a print exists
+```
+
+`ensure_embedded` wraps live `window.cardHTML` so home / Momentum Up / Down / Breakout / Breakdown / search cards that go through `cardHTML` get generic **Buy** / **Sell**, an open-position line (`LONG`/`SHORT` + entry + live P&L %), and a collapsed **Previous trades** `<details>`. Missing mark disables both buttons (`title` = need card price / `PX_LAST` / last Refresh print). Persistence is **localStorage** (`fd-paper-book`); the module also exports `sidecar_schema()` if a later `paper_book.json` sidecar is wanted. Do not add a brokerage hook.
+
+Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping live `desk_dash.py`, paste the tail. Recopy `paper_trade.py` after this drop-in.
+
+### Desktop checklist
+
+| Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
+| --- | --- |
+| `paper_trade.py` | **recopy** — Buy/Sell + history on dense `cardHTML` cards; localStorage `fd-paper-book` |
+| `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
+| `docs/PAPER-TRADE.md` | optional, for the desk |
+
+Do **not** copy generated `factorbook.html` or a later `paper_book.json`. After drop-in, Refresh once and confirm dense cards show Buy/Sell (disabled with a title if no mark), a long/short line + live % when a position is open, collapsed previous trades with the correct short sign (short profits when price falls), and that Reload / Refresh keeps the book (localStorage). Mom Up/Down chrome is otherwise unchanged.
+
 
