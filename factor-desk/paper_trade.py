@@ -901,29 +901,28 @@ def strip_js() -> str:
     node.appendChild(host);
     return host;
   }
+  function onPaperClick(ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-act]") : null;
+    var host = ev.target && ev.target.closest ? ev.target.closest(".fd-paper") : null;
+    if (!btn && !host) return;
+    ev.stopPropagation();
+    if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+    if (!btn || btn.disabled) return;
+    ev.preventDefault();
+    var node = (host && host.closest("article, .card")) || (btn.closest && btn.closest("article, .card"));
+    var t = tickerOf(node, null);
+    var card = findMomCard(t);
+    var mark = markOf(t, node, card);
+    var book = loadBook();
+    var res = applyClick(book, t, btn.getAttribute("data-fd-paper-act"), mark);
+    if (res.toast) showToast(res.toast);
+    if (res.ok && res.action !== "noop") saveBook(book);
+    paintAll();
+  }
   function bindHost(host, node, ticker) {
     if (host.__fdPaperBound) return;
     host.__fdPaperBound = true;
-    host.addEventListener("click", function (ev) {
-      ev.stopPropagation();
-    }, true);
-    host.addEventListener("click", function (ev) {
-      var btn = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-act]") : null;
-      if (!btn) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-      var act = btn.getAttribute("data-fd-paper-act");
-      var t = tickerOf(node, null) || ticker;
-      var card = findMomCard(t);
-      var mark = markOf(t, node, card);
-      var book = loadBook();
-      var res = applyClick(book, t, act, mark);
-      if (res.toast) showToast(res.toast);
-      if (res.ok && res.action !== "noop") saveBook(book);
-      else if (res.ok && res.action === "noop") { /* same-side: no persist change */ }
-      paintAll();
-    });
+    host.addEventListener("click", onPaperClick, true);
   }
   function hydrateCard(node, card) {
     if (!node || !node.querySelector) return;
@@ -986,8 +985,8 @@ def strip_js() -> str:
           if (n.id === "fd-paper-toast") continue;
           if (n.classList && n.classList.contains("fd-paper")) continue;
           if (n.matches && n.matches("article.card, article[data-t], article[data-ticker], .card")) {
-            if (!n.querySelector || !n.querySelector(".fd-paper")) { need = true; break; }
-            continue;
+            need = true;
+            break;
           }
           if (n.querySelector && n.querySelector("article.card, article[data-t], .card")) {
             need = true;
@@ -1003,6 +1002,10 @@ def strip_js() -> str:
     wrapCardHTML();
     paintAll();
     observe();
+    if (!window.__FD_PAPER_CLICK__) {
+      window.__FD_PAPER_CLICK__ = true;
+      document.addEventListener("click", onPaperClick, true);
+    }
   }
   window.__FD_PAPER_APPLY__ = applyClick;
   window.__FD_PAPER_PNL__ = pnlPct;

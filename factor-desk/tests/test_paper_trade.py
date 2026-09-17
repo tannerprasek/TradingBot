@@ -145,6 +145,8 @@ window.MOM = { cards: [{ t: "AAPL", px_last: 12 }] };
         self.assertIn("No mark price", js)
         self.assertIn("var painting = false", js)
         self.assertIn("if (painting) return", js)
+        self.assertIn("__FD_PAPER_CLICK__", js)
+        self.assertIn("onPaperClick", js)
         chrome = pt.chrome_html("AAPL", mark=None)
         self.assertIn("disabled", chrome)
         self.assertIn("No mark price", chrome)
