@@ -8,13 +8,13 @@ The number on Momentum Up / Down cards is a small **0–13-style rank**, not opt
 
 Resolver (first hit), implemented in `mom_streak.resolve_card_score`:
 
-1. Card/row fields already used for UP/DOWN ranking: `mom_score`, `momentum_score`, `mom_rank`, `trend_rank`.
+1. Card/row fields already used for UP/DOWN ranking: `mom_score`, `momentum_score`, `mom_rank`, `trend_rank`. Live FLAGS/WATCH/MOM cards often store the name as **`t`** and the rank as **`score`** (0–20) rather than `ticker` / `mom_score` — `attach_card` reads `ticker or name or t or symbol` and sets `card["ticker"]` when missing.
 2. `score` or `trend_score` **only if** the value is in `[0, 20]` (rejects 0–100 percentiles and huge option scores).
 3. Durable history already on disk:
    - `mom_score_hist.json` (written each rebuild)
    - score CSVs: `mom_scores.csv`, `score_hist.csv`, `v0_scores.csv`, `clean/…`
    - **v0 residual files are used only when they have a `score` / `mom_score` column.** A residual-only CSV is not this rank.
-4. If still missing: **13-horizon trend-window count** from `prices.csv` / `clean/prices.csv` (closes). Score = how many of `TREND_WINDOWS = (5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 150, 200)` have a positive total return → **0–13**. Persisted to `mom_score_hist.json` so Refresh keeps a series.
+4. If still missing **or hist is empty/thin** (median series length < 5, or only today’s asof): **13-horizon trend-window count** from `prices_long.csv` / `prices.csv` (date, ticker, `adj_close`/`close`). Score = how many of `TREND_WINDOWS = (5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 150, 200)` have a positive total return → **0–13**. Auto-backfill writes ~120 trading days into `mom_score_hist.json` (`meta.source` like `prices_long.trend_windows_backfill`) so the first Refresh after deploy is not every name `1d>5`. Live card `mom_score` still wins for *today’s* point.
 
 Live FLAGS/WATCH/MOM HTML is Desktop-owned; this pack does not invent a second rank when the card already shows one.
 
@@ -46,9 +46,10 @@ Home-card charts keep **tag-trigger** marks (already on the live desk) and add *
 
 `desk_dash.write_combined` / `write_dash.write` (Refresh rebuild) always:
 
-1. Resolves today’s score + history
-2. Attaches `mom_score`, `mom_streak`, `mom_streak_side`, `mom_streak_label`, `mom_streak_start` / `_end` / `_open`, and a pill on the card
-3. Embeds `#mom-streak-db` JSON + JS so live cards with `data-t` / `data-ticker` still get the tag after an HTML write
+1. If `mom_score_hist.json` is missing or thin, auto-backfill from `prices_long.csv` (`trend_window_score`, last ~120 trading days)
+2. Resolves today’s score + history (live card `mom_score` wins for today)
+3. Attaches `mom_score`, `mom_streak`, `mom_streak_side`, `mom_streak_label`, `mom_streak_start` / `_end` / `_open`, and a pill on the card
+4. Embeds a **filled** `#mom-streak-db` JSON + JS from attached cards so live cards with `data-t` / `data-ticker` still get the tag after an HTML write
 
 `mom_score_hist.json` is gitignored (Desktop local).
 

@@ -12,10 +12,12 @@ Resolver, first hit:
    ``mom_score``, ``momentum_score``, ``mom_rank``, ``trend_rank``,
    then ``score`` / ``trend_score`` only when the value is in ``[0, 20]``.
 2. Durable history on disk (``mom_score_hist.json``, then v0/score CSVs).
-3. If still missing: **13-horizon trend-window count** from a price series
-   already on disk (closes). That fallback is 0–13 = how many of
-   ``TREND_WINDOWS`` have a positive total return. It is written into
-   ``mom_score_hist.json`` so Refresh/write_dash keeps a trading-day series.
+3. If still missing **or hist is empty/thin**: **13-horizon trend-window count**
+   from ``prices_long.csv`` / ``prices.csv`` (closes). That fallback is 0–13 =
+   how many of ``TREND_WINDOWS`` have a positive total return. Missing or thin
+   ``mom_score_hist.json`` is auto-backfilled (~120 trading days) on
+   ``rebuild_hist_for_cards`` / Refresh so the first deploy is not every name
+   ``1d>5``. Live card ``mom_score`` still wins for *today's* point.
 
 Threshold
 ---------
@@ -33,7 +35,6 @@ today. A day at 5, or a missing print, breaks the streak.
 from __future__ import annotations
 
 import csv
-import html
 import json
 import logging
 import os
@@ -56,10 +57,16 @@ THRESHOLD = 5.0
 MAX_SERIES = 252
 # Fri→Mon is 3 calendar days. A longer hole in the series breaks the streak.
 MAX_GAP_DAYS = 4
+# First Refresh after deploy has no hist. Backfill this many daily scores
+# from prices_long (need max(TREND_WINDOWS) extra closes of lookback).
+BACKFILL_SCORE_DAYS = 120
+THIN_SERIES_MEDIAN = 5
+BACKFILL_SOURCE_PRICES_LONG = "prices_long.trend_windows_backfill"
 
 # 13 lookbacks in trading days → score in 0..13. Used only when the live
 # card does not already carry the UP/DOWN rank.
 TREND_WINDOWS: tuple[int, ...] = (5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 150, 200)
+PRICE_LOOKBACK = max(TREND_WINDOWS)
 
 CARD_SCORE_KEYS: tuple[str, ...] = (
     "mom_score",
@@ -85,9 +92,11 @@ HIST_CANDIDATES: tuple[str, ...] = (
     "clean/scores.csv",
 )
 PRICE_CANDIDATES: tuple[str, ...] = (
+    "prices_long.csv",
     "prices.csv",
     "px.csv",
     "closes.csv",
+    "clean/prices_long.csv",
     "clean/prices.csv",
     "clean/px.csv",
 )
@@ -121,12 +130,24 @@ def _as_date(value: Any) -> date | None:
     return None
 
 
+ARROW_UP = "\u2191"  # ↑
+ARROW_DOWN = "\u2193"  # ↓
+
+
 def _ticker_key(ticker: str) -> str:
     return dapi_enrich.name_key(ticker) if ticker else ""
 
 
 def _short(ticker: str) -> str:
-    return (ticker or "").split()[0].upper()
+    parts = (ticker or "").split()
+    return parts[0].upper() if parts else ""
+
+
+def card_ticker(card: Mapping[str, Any] | None) -> str:
+    """Live FLAGS/WATCH/MOM cards use ``t`` (and ``score``), not always ``ticker``."""
+    if not card:
+        return ""
+    return str(card.get("ticker") or card.get("name") or card.get("t") or card.get("symbol") or "").strip()
 
 
 def in_home_score_range(value: float | None) -> bool:
@@ -265,9 +286,9 @@ def tag_label(streak: int, side: str | None, threshold: float = THRESHOLD) -> st
         return None
     cut = int(threshold) if float(threshold).is_integer() else threshold
     if side == "above":
-        return f"↑{int(streak)}d>{cut}"
+        return f"{ARROW_UP}{int(streak)}d>{cut}"
     if side == "below":
-        return f"↓{int(streak)}d<{cut}"
+        return f"{ARROW_DOWN}{int(streak)}d<{cut}"
     return f"={cut}"
 
 
@@ -369,6 +390,57 @@ def series_of(hist: Mapping[str, Any] | None, ticker: str) -> list[tuple[date, f
                     if d is not None and s is not None:
                         out.append((d, s))
     out.sort(key=lambda x: x[0])
+    return out
+
+
+def _median(values: Sequence[int]) -> float:
+    if not values:
+        return 0.0
+    xs = sorted(values)
+    n = len(xs)
+    mid = n // 2
+    if n % 2:
+        return float(xs[mid])
+    return (xs[mid - 1] + xs[mid]) / 2.0
+
+
+def hist_is_thin(hist: Mapping[str, Any] | None, asof: date | None = None) -> bool:
+    """True when hist is missing, empty, median series < 5, or only one asof day."""
+    if not hist:
+        return True
+    names = hist.get("names") if isinstance(hist.get("names"), dict) else {}
+    if not names:
+        return True
+    lengths: list[int] = []
+    all_dates: set[date] = set()
+    for ticker in names:
+        series = series_of(hist, ticker)
+        lengths.append(len(series))
+        for day, _score in series:
+            all_dates.add(day)
+    if not lengths or max(lengths) == 0:
+        return True
+    if _median(lengths) < THIN_SERIES_MEDIAN:
+        return True
+    if len(all_dates) <= 1:
+        return True
+    today = asof or _as_date(hist.get("asof"))
+    if today is not None and all_dates <= {today}:
+        return True
+    return False
+
+
+def _merge_series_maps(
+    base: Mapping[str, list[tuple[date, float]]],
+    overlay: Mapping[str, list[tuple[date, float]]],
+) -> dict[str, list[tuple[date, float]]]:
+    """Overlay wins on the same date (live / hist today over backfill)."""
+    out: dict[str, list[tuple[date, float]]] = {k: list(v) for k, v in base.items()}
+    for ticker, rows in overlay.items():
+        combined = {d: s for d, s in out.get(ticker, [])}
+        for d, s in rows:
+            combined[d] = s
+        out[ticker] = sorted(combined.items())[-MAX_SERIES:]
     return out
 
 
@@ -503,27 +575,77 @@ def load_price_csv(path: Path) -> dict[str, list[tuple[date, float]]]:
     return out
 
 
-def scores_from_prices(panel: Mapping[str, list[tuple[date, float]]]) -> dict[str, list[tuple[date, float]]]:
+def scores_from_prices(
+    panel: Mapping[str, list[tuple[date, float]]],
+    *,
+    score_days: int | None = None,
+    lookback: int | None = None,
+) -> dict[str, list[tuple[date, float]]]:
+    """Daily ``trend_window_score`` series. ``score_days`` keeps the tail (default max)."""
+    keep_scores = score_days if score_days is not None else MAX_SERIES
+    look = lookback if lookback is not None else PRICE_LOOKBACK
+    keep_px = look + keep_scores
     out: dict[str, list[tuple[date, float]]] = {}
     for ticker, rows in panel.items():
-        dates = [d for d, _ in rows]
-        closes = [p for _, p in rows]
+        ordered = sorted(rows, key=lambda x: x[0])[-keep_px:]
+        dates = [d for d, _ in ordered]
+        closes = [p for _, p in ordered]
         series: list[tuple[date, float]] = []
         for i in range(len(closes)):
             score = trend_window_score(closes[: i + 1])
             if score is not None:
                 series.append((dates[i], float(score)))
         if series:
-            out[ticker] = series[-MAX_SERIES:]
+            out[ticker] = series[-keep_scores:]
     return out
 
 
-def discover_score_series(root: Path | None = None) -> tuple[dict[str, list[tuple[date, float]]], str]:
-    """Load the best on-disk score history. Does not invent tickers."""
+def load_price_panel(root: Path | None = None) -> tuple[dict[str, list[tuple[date, float]]], str]:
+    """First readable prices file under the factorbook root (``prices_long.csv`` first)."""
     base = Path(root) if root is not None else HERE
-    hist = load_hist(root=base)
+    for rel in PRICE_CANDIDATES:
+        path = base / rel
+        if not path.is_file():
+            continue
+        panel = load_price_csv(path)
+        if panel:
+            return panel, rel
+    return {}, ""
+
+
+def backfill_source_for(rel: str) -> str:
+    name = Path(str(rel)).name.lower()
+    if name == "prices_long.csv":
+        return BACKFILL_SOURCE_PRICES_LONG
+    return f"prices.trend_windows_backfill:{rel}"
+
+
+def backfill_from_prices(
+    root: Path | None = None,
+    *,
+    score_days: int = BACKFILL_SCORE_DAYS,
+) -> tuple[dict[str, list[tuple[date, float]]], str]:
+    """Compute ~120 trading days of 0–13 scores from ``prices_long.csv`` (or prices.csv)."""
+    panel, rel = load_price_panel(root)
+    if not panel:
+        return {}, ""
+    computed = scores_from_prices(panel, score_days=score_days, lookback=PRICE_LOOKBACK)
+    if not computed:
+        return {}, ""
+    return computed, backfill_source_for(rel)
+
+
+def discover_score_series(
+    root: Path | None = None,
+    hist: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, list[tuple[date, float]]], str]:
+    """Load the best on-disk score history. Thin hist does not block a prices backfill."""
+    base = Path(root) if root is not None else HERE
+    if hist is None:
+        hist = load_hist(root=base)
     merged: dict[str, list[tuple[date, float]]] = {}
     source = "none"
+    thin = True
 
     hist_names = hist.get("names") if isinstance(hist.get("names"), dict) else {}
     if hist_names:
@@ -533,6 +655,9 @@ def discover_score_series(root: Path | None = None) -> tuple[dict[str, list[tupl
                 merged[ticker] = series
         if merged:
             source = HIST_FILENAME
+            thin = hist_is_thin(hist)
+            if not thin:
+                return merged, source
 
     for rel in HIST_CANDIDATES:
         if rel == HIST_FILENAME:
@@ -546,18 +671,16 @@ def discover_score_series(root: Path | None = None) -> tuple[dict[str, list[tupl
         for ticker, series in extra.items():
             merged.setdefault(ticker, series)
         source = f"{source}+{rel}" if source != "none" else rel
+        thin = False
 
-    if merged:
+    if merged and not thin:
         return merged, source
 
-    for rel in PRICE_CANDIDATES:
-        path = base / rel
-        if not path.is_file():
-            continue
-        panel = load_price_csv(path)
-        computed = scores_from_prices(panel)
-        if computed:
-            return computed, f"prices.trend_windows:{rel}"
+    filled, bsrc = backfill_from_prices(base)
+    if filled:
+        if merged:
+            filled = _merge_series_maps(filled, merged)
+        return filled, bsrc
     return merged, source
 
 
@@ -567,17 +690,22 @@ def merge_into_hist(
     *,
     source: str | None = None,
     threshold: float = THRESHOLD,
+    prefer_existing: bool = False,
 ) -> MutableMapping[str, Any]:
     for ticker, series in series_by_ticker.items():
         if not series:
             continue
-        day, score = series[-1]
         names = hist.setdefault("names", {})
         existing = series_of(hist, ticker)
         combined = {d: s for d, s in existing}
         for d, s in series:
+            if prefer_existing and d in combined:
+                continue
             combined[d] = s
         ordered = sorted(combined.items())[-MAX_SERIES:]
+        if not ordered:
+            continue
+        day, score = ordered[-1]
         rec = names.get(_ticker_key(ticker)) if isinstance(names.get(_ticker_key(ticker)), dict) else {}
         rec = dict(rec or {})
         rec["series"] = [{"date": d.isoformat(), "score": s} for d, s in ordered]
@@ -659,8 +787,13 @@ def attach_card(
     *,
     asof: date | None = None,
     threshold: float = THRESHOLD,
+    root: Path | None = None,
 ) -> MutableMapping[str, Any]:
-    ticker = str(card.get("ticker") or card.get("name") or "")
+    ticker = card_ticker(card)
+    if ticker and not str(card.get("ticker") or "").strip():
+        card["ticker"] = ticker
+    if hist is None and series_by_ticker is None:
+        hist = load_hist(root=root)
     rec = compute_for_ticker(ticker, card, hist, series_by_ticker, asof=asof, threshold=threshold)
     card["mom_score"] = rec["mom_score"]
     card["mom_score_source"] = rec["mom_score_source"]
@@ -691,42 +824,113 @@ def attach_all(
     series_by_ticker: Mapping[str, list[tuple[date, float]]] | None = None,
     *,
     asof: date | None = None,
+    root: Path | None = None,
 ) -> list[MutableMapping[str, Any]]:
-    return [attach_card(c, hist, series_by_ticker, asof=asof) for c in cards]
+    cards_list = list(cards)
+    if hist is None and series_by_ticker is None:
+        hist = load_hist(root=root)
+    return [attach_card(c, hist, series_by_ticker, asof=asof, root=root) for c in cards_list]
 
 
-def streak_db(cards: Iterable[Mapping[str, Any]] | None) -> dict[str, dict[str, Any]]:
+def streak_db(
+    cards: Iterable[Mapping[str, Any]] | None,
+    hist: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """JSON map for ``#mom-streak-db``. Always prefer attached card fields."""
     out: dict[str, dict[str, Any]] = {}
     for card in cards or []:
-        if not isinstance(card, Mapping):
+        rec = _streak_db_rec(card)
+        if rec is None:
             continue
-        ticker = str(card.get("ticker") or card.get("name") or "").strip()
-        label = card.get("mom_streak_label")
-        if not ticker or not label:
-            continue
-        out[ticker] = {
-            "label": label,
-            "cls": tag_cls(str(card.get("mom_streak_side") or "")),
-            "streak": card.get("mom_streak") or 0,
-            "side": card.get("mom_streak_side"),
-            "score": card.get("mom_score"),
-            "start": card.get("mom_streak_start"),
-            "end": card.get("mom_streak_end"),
-            "open": card.get("mom_streak_open"),
-            "title": tag_title(
-                int(card.get("mom_streak") or 0),
-                card.get("mom_streak_side"),
-                dapi_enrich.as_float(card.get("mom_score")),
-            ),
-        }
-        short = _short(ticker)
-        out.setdefault(short, out[ticker])
+        ticker = rec.pop("_ticker")
+        out[ticker] = rec
+        out.setdefault(_short(ticker), rec)
+    if not out and hist:
+        out.update(streak_db_from_hist(hist))
     return out
+
+
+def _streak_db_rec(item: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(item, Mapping):
+        return None
+    ticker = card_ticker(item)
+    side = item.get("mom_streak_side") or item.get("side")
+    try:
+        streak = int(item.get("mom_streak") if item.get("mom_streak") is not None else item.get("streak") or 0)
+    except (TypeError, ValueError):
+        streak = 0
+    score = item.get("mom_score") if item.get("mom_score") is not None else item.get("score")
+    label = item.get("mom_streak_label") or item.get("label") or tag_label(streak, side)
+    if not ticker or not label:
+        return None
+    start = item.get("mom_streak_start") or item.get("start")
+    end = item.get("mom_streak_end") or item.get("end")
+    open_flag = item.get("mom_streak_open") if "mom_streak_open" in item else item.get("open")
+    return {
+        "_ticker": ticker,
+        "label": label,
+        "cls": tag_cls(str(side or "")),
+        "streak": streak,
+        "side": side,
+        "score": score,
+        "start": start,
+        "end": end,
+        "open": open_flag,
+        "title": tag_title(streak, side, dapi_enrich.as_float(score)),
+    }
+
+
+def streak_db_from_hist(hist: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    names = hist.get("names") if isinstance(hist, Mapping) and isinstance(hist.get("names"), dict) else {}
+    for ticker, rec in names.items():
+        if not isinstance(rec, Mapping):
+            continue
+        series = series_of(hist, ticker)
+        payload: dict[str, Any] = {
+            "ticker": ticker,
+            "name": ticker,
+            "mom_score": rec.get("score"),
+            "mom_streak": rec.get("streak"),
+            "mom_streak_side": rec.get("side"),
+            "mom_streak_label": rec.get("label"),
+            "mom_streak_start": rec.get("start"),
+            "mom_streak_end": rec.get("end"),
+            "mom_streak_open": rec.get("open"),
+        }
+        if series and payload.get("mom_streak") is None:
+            n, side = streak_from_dated(series)
+            span = streak_span(series)
+            payload["mom_streak"] = n
+            payload["mom_streak_side"] = side
+            payload["mom_streak_label"] = rec.get("label") or tag_label(n, side)
+            payload["mom_score"] = series[-1][1]
+            if span:
+                payload["mom_streak_start"] = span.get("start")
+                payload["mom_streak_end"] = span.get("end")
+                payload["mom_streak_open"] = span.get("open")
+        db_rec = _streak_db_rec(payload)
+        if db_rec is None:
+            continue
+        key = db_rec.pop("_ticker")
+        out[key] = db_rec
+        out.setdefault(_short(key), db_rec)
+    return out
+
+
+def _script_json(blob: str) -> str:
+    """Put JSON in a ``<script>`` tag without HTML-escaping ``>`` / ``<``.
+
+    ``type="application/json"`` does not decode entities, so ``html.escape``
+    would leave literal ``&gt;`` in labels like ``↑12d>5``. Only neutralize
+    ``</`` so a value cannot close the script element.
+    """
+    return (blob or "").replace("</", "<\\/")
 
 
 def embed_db(mapping: Mapping[str, Any] | None) -> str:
     blob = json.dumps(dict(mapping or {}), separators=(",", ":"), ensure_ascii=True)
-    return f'<script type="application/json" id="{DB_SCRIPT_ID}">{html.escape(blob, quote=False)}</script>'
+    return f'<script type="application/json" id="{DB_SCRIPT_ID}">{_script_json(blob)}</script>'
 
 
 def streak_css() -> str:
@@ -827,17 +1031,45 @@ def rebuild_hist_for_cards(
     asof: date | None = None,
     write: bool = True,
 ) -> dict[str, Any]:
-    """Attach streaks, persist hist. Called from write_combined / Refresh rebuild."""
+    """Attach streaks, persist hist. Called from write_combined / Refresh rebuild.
+
+    Missing or thin ``mom_score_hist.json`` is auto-backfilled from
+    ``prices_long.csv`` (``trend_window_score`` over ~120 trading days) **before**
+    cards are attached, so the first Refresh after deploy is not every name ``1d``.
+    Live card ``mom_score`` still wins for *today's* point.
+    """
     base = Path(root) if root is not None else HERE
     hist = load_hist(root=base)
-    series, source = discover_score_series(base)
-    if series:
-        merge_into_hist(hist, series, source=source)
+    source = str((hist.get("meta") or {}).get("source") or "none") if isinstance(hist.get("meta"), dict) else "none"
+    series: dict[str, list[tuple[date, float]]] = {}
+
+    if hist_is_thin(hist):
+        filled, bsrc = backfill_from_prices(base)
+        if filled:
+            merge_into_hist(hist, filled, source=bsrc, prefer_existing=True)
+            series = filled
+            source = bsrc
+            LOG.info("mom_score_hist auto-backfill: %s names from %s", len(filled), bsrc)
+
+    discovered, dsrc = discover_score_series(base, hist=hist)
+    if discovered:
+        prefer = bool(series)  # keep backfill + any existing today; fill gaps from discover
+        merge_into_hist(hist, discovered, source=dsrc if source in ("none", "") else source, prefer_existing=prefer)
+        if not series:
+            series = discovered
+            source = dsrc
+        else:
+            series = _merge_series_maps(series, discovered)
+
     day = asof or _today()
     for card in cards:
-        attach_card(card, hist, series, asof=day)
+        attach_card(card, hist, series, asof=day, root=base)
         score = dapi_enrich.as_float(card.get("mom_score"))
-        ticker = str(card.get("ticker") or card.get("name") or "")
+        if score is None:
+            score, _src = resolve_card_score(card)
+        ticker = card_ticker(card)
+        if ticker and not str(card.get("ticker") or "").strip():
+            card["ticker"] = ticker
         if score is not None and ticker:
             record_to_hist(
                 hist,
@@ -851,6 +1083,7 @@ def rebuild_hist_for_cards(
         hist["meta"]["source"] = source
         hist["meta"]["windows"] = list(TREND_WINDOWS)
         hist["meta"]["threshold"] = THRESHOLD
+        hist["meta"]["backfill"] = "backfill" in str(source)
     if write:
         write_hist(hist, root=base)
     return hist

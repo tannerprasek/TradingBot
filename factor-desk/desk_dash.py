@@ -178,7 +178,10 @@ def attach_enrichment(
     Missing enrich file → nulls + empty pills.
     """
     if rec is None and book is not None:
-        rec = dapi_enrich.lookup_name(book, ticker or str(card.get("ticker") or card.get("name") or ""))
+        rec = dapi_enrich.lookup_name(book, ticker or mom_streak.card_ticker(card))
+    ticker = ticker or mom_streak.card_ticker(card)
+    if ticker and not str(card.get("ticker") or "").strip():
+        card["ticker"] = ticker
     if rec is None and ticker:
         rec = None
     dapi_enrich.attach_card_fields(card, rec)
@@ -188,14 +191,23 @@ def attach_enrichment(
 
 def attach_all(
     cards: Iterable[MutableMapping[str, Any]],
-    book: Mapping[str, Any] | None,
+    book: Mapping[str, Any] | None = None,
     cache: Mapping[str, Any] | None = None,
     hist: Mapping[str, Any] | None = None,
     series_by_ticker: Mapping[str, list] | None = None,
+    *,
+    root: Path | None = None,
 ) -> list[MutableMapping[str, Any]]:
+    """Attach enrich + mom streak. Missing ``hist`` rebuilds ``mom_score_hist.json``."""
+    cards_list = list(cards)
+    base = Path(root) if root is not None else HERE
+    if hist is None:
+        hist = mom_streak.rebuild_hist_for_cards(cards_list, root=base, write=True)
+        if series_by_ticker is None:
+            series_by_ticker, _ = mom_streak.discover_score_series(base, hist=hist)
     out: list[MutableMapping[str, Any]] = []
-    for card in cards:
-        ticker = str(card.get("ticker") or card.get("name") or "")
+    for card in cards_list:
+        ticker = mom_streak.card_ticker(card)
         rec = dapi_enrich.lookup_name(book, ticker) if book else None
         out.append(
             attach_enrichment(
@@ -568,11 +580,13 @@ def render_html(
     cards = attach_all(list(cards), book, cache=cache, hist=hist, series_by_ticker=series_by_ticker)
     rows: list[str] = []
     for card in cards:
-        ticker = html.escape(str(card.get("ticker") or card.get("name") or ""))
+        ticker = html.escape(str(mom_streak.card_ticker(card) or card.get("ticker") or card.get("name") or ""))
         pills = pills_html(card.get("enrich_pills"))
         sector = gics_filter.sector_of(card, cache) or ""
         sector_attr = html.escape(sector, quote=True)
         score = card.get("mom_score")
+        if score is None:
+            score, _src = mom_streak.resolve_card_score(card)
         spark = chart_marks.render_svg(card)
         rows.append(
             f"""
@@ -607,7 +621,7 @@ def render_html(
     intra = bool((meta or {}).get("intraday")) if isinstance(meta, Mapping) else False
     sectors = gics_filter.sectors_present(cards, cache)
     db = gics_filter.filled_sector_db(cards, cache=cache, book=book)
-    streak_map = mom_streak.streak_db(cards)
+    streak_map = mom_streak.streak_db(cards, hist=hist)
     chart_map = chart_marks.chart_db(cards)
     gics_note = ""
     if rows and not sectors:
@@ -711,8 +725,8 @@ def write_combined(
         cards = cards_from_enrichment(book)
     cards = [dict(c) for c in cards]
     hist = mom_streak.rebuild_hist_for_cards(cards, root=base, write=True)
-    series, _src = mom_streak.discover_score_series(base)
-    cards = attach_all(cards, book, cache=cache, hist=hist, series_by_ticker=series)
+    series, _src = mom_streak.discover_score_series(base, hist=hist)
+    cards = attach_all(cards, book, cache=cache, hist=hist, series_by_ticker=series, root=base)
 
     existing = ""
     if html is not None:
@@ -732,7 +746,7 @@ def write_combined(
     if gics_filter.GICS_SECTOR_DB_PLACEHOLDER in text:
         text = text.replace(gics_filter.GICS_SECTOR_DB_PLACEHOLDER, _gics_sector_db_json(book, cards, cache, base))
     text = gics_filter.ensure_embedded(text, mapping)
-    text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards))
+    text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards, hist=hist))
     text = chart_marks.ensure_embedded(text, chart_marks.chart_db(cards))
     dest.write_text(text, encoding="utf-8")
     LOG.info("wrote %s (%s bytes)", dest, dest.stat().st_size)
