@@ -16,7 +16,7 @@ LOG = logging.getLogger("write_dash")
 
 
 def write(path: Path | str | None = None, root: Path | None = None) -> Path:
-    return desk_dash.assemble_and_write(path, root=root)
+    return desk_dash.write_combined(path, root=root)
 
 
 def main(argv: list[str] | None = None) -> int:

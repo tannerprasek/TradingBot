@@ -24,6 +24,17 @@ That path pulls `GICS_SECTOR_NAME` then `GICS_SECTOR` (first success), writes gi
 
 Chips sit in the existing top filter row (G1–G12 / tags language: `.filter-chip` / `.gchip`, dark desk). **All** clears the filter. Short labels (IT, FIN, …) with the official GICS name as `title`. Client JS adds `.gics-hid` only — Momentum Up/Down, Outliers, Options, Refresh, FLAGS/WATCH behavior is unchanged.
 
-Cards need `data-gics-sector` (or a ticker the `#gics-sector-db` map can resolve). Unclassified names stay visible on All and hide when a sector is selected.
+Cards need `data-gics-sector` **and** `data-t` / `data-ticker` (or a ticker the `#gics-sector-db` map can resolve). Unclassified names stay visible on All and hide when a sector is selected.
 
-See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §5 for live `factorbook.html` / `desk_dash.py` paste blocks.
+## Survive `write_dash` / `write_combined`
+
+Every HTML write **must** leave all four of:
+
+1. `#gics-filter-strip` host
+2. CSS for `.gics-hid` / `.gchip`
+3. **filled** `#gics-sector-db` JSON from enrich / `gics_sectors.json` (placeholder `__GICS_SECTOR_DB__` is replaced by `_gics_sector_db_json()`)
+4. strip JS with `STRIP_ID = "gics-filter-strip"` that filters on `data-gics-sector` / ticker lookup including **`data-t`**
+
+Call `gics_filter.ensure_embedded(html, mapping)` at the **end** of `desk_dash.write_combined` (this is the function `write_dash.write` uses). If a live ~2.7MB `factorbook.html` already has Refresh / Momentum Up / Momentum Down / Outliers / Options, **patch it** — do not replace it with the skinny enrich-only grid.
+
+See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §5–6.

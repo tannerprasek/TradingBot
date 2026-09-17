@@ -38,3 +38,5 @@ python dapi_enrich.py --gics-once --tickers AAPL,MSFT
 `--dry-run` writes a null book + reasons (does not invent numbers). Live DAPI on Desktop writes resolved fields into `dapi_enrichment.json`.
 
 `--gics-once` is a **manual** GICS sector fill. It is not on the Refresh pipeline. See [docs/GICS-FILTER.md](docs/GICS-FILTER.md).
+
+Rebuild (`write_dash` / `desk_dash.write_combined`) always re-embeds filled `#gics-sector-db` + strip JS and mom streak tags. Live ~2.7MB `factorbook.html` is patched, not replaced.

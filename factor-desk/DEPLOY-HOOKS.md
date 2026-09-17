@@ -186,11 +186,11 @@ import gics_filter
 gics_filter.overlay_sector(card, _rec, cache=dapi_enrich.load_gics_cache())
 ```
 
-When emitting each card/row, set `data-ticker` (already present) and `data-gics-sector`:
+When emitting each card/row, set `data-t` **and** `data-ticker` (already present) and `data-gics-sector`:
 
 ```python
 sector = card.get("gics_sector_name") or ""
-# <article class="card" data-ticker="..." data-gics-sector="{sector}">
+# <article class="card" data-t="..." data-ticker="..." data-gics-sector="{sector}">
 ```
 
 In the **existing top filter strip** (next to G1–G12 / tags), add an empty host — JS fills chips:
@@ -199,18 +199,20 @@ In the **existing top filter strip** (next to G1–G12 / tags), add an empty hos
 <span id="gics-filter-strip" class="filter-strip gics-chips" role="toolbar" aria-label="GICS sector filter"></span>
 ```
 
-Embed the ticker→sector map once per rebuild (from enrich / cache, not a hardcoded map):
+**Every HTML write** (end of live `write_combined` / `write_dash`) must re-embed a **filled** map + strip JS. Host/CSS surviving is not enough — `#gics-sector-db` and `STRIP_ID` were getting wiped.
 
 ```python
-# after cards are attached
-db = gics_filter.sector_db(cards)  # or gics_filter.sector_db(book)
-html += gics_filter.embed_db(db)
-html += "<script>\n" + gics_filter.strip_js() + "\n</script>"
+# after the combined HTML string exists, BEFORE dest.write_text
+db = json.loads(desk_dash._gics_sector_db_json(book=book, cards=cards, cache=dapi_enrich.load_gics_cache(), root=root))
+# or: db = gics_filter.filled_sector_db(cards, cache=..., book=book)
+if "__GICS_SECTOR_DB__" in html:
+    html = html.replace("__GICS_SECTOR_DB__", json.dumps(db, separators=(",", ":")))
+html = gics_filter.ensure_embedded(html, db)
 ```
 
-Add `gics_filter.strip_css()` to the existing dark-desk stylesheet (or paste the CSS below).
+If live `factorbook.html` is already ~2.7MB with Refresh / Momentum Up / Momentum Down / Outliers / Options, **patch that file**. Do not replace it with the cloud skinny grid.
 
-Functions used: `gics_filter.overlay_sector`, `gics_filter.sector_db`, `gics_filter.embed_db`, `gics_filter.strip_css`, `gics_filter.strip_js`.
+Functions used: `gics_filter.overlay_sector`, `gics_filter.filled_sector_db`, `gics_filter.ensure_embedded`, `gics_filter.strip_css`, `gics_filter.strip_js`, `desk_dash._gics_sector_db_json`, `desk_dash.write_combined`.
 
 ### live `factorbook.html` — CSS (paste with other G-chip rules)
 
@@ -269,4 +271,49 @@ dapi_enrich.fill_gics_sectors(tickers=tickers or None, root=Path(r"C:\Users\MLP\
 ```
 
 Writes gitignored `gics_sectors.json` and stamps `dapi_enrichment.json`. Refresh continues to skip GICS fields so this does not become a second full-book pull.
+
+---
+
+## 6) Momentum streak tag + `write_combined`
+
+Copy `mom_streak.py` next to live `desk_dash.py`. Do **not** change options score v2 or FLAGS/WATCH/MOM ranking.
+
+### After each MOM / FLAGS / WATCH card exists
+
+```python
+import mom_streak
+
+mom_streak.attach_card(card)  # uses card["mom_score"] if present; else hist / prices
+# card now has mom_score, mom_streak, mom_streak_side, mom_streak_label
+# and a .badge.spike-chip pill (↑12d>5 / ↓8d<5 / =5)
+```
+
+Score is the home UP/DOWN rank (`mom_score` first). Threshold is literal **5**. Exactly 5 → streak 0, tag `=5`. See `docs/MOM-STREAK.md`.
+
+### End of live `write_combined` / `write_dash.write`
+
+Same tail as GICS — always re-embed, and **never clobber** a ~2.7MB live file:
+
+```python
+html = gics_filter.ensure_embedded(html, db)
+html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
+# then write factorbook.html
+```
+
+Cards should keep `data-t` (and `data-ticker`) so both GICS chips and streak tags resolve after a Refresh write.
+
+### CoS deploy checklist (Desktop `C:\Users\MLP\Desktop\factorbook`)
+
+| Copy into Desktop | Notes |
+| --- | --- |
+| `mom_streak.py` | new |
+| `gics_filter.py` | replace with this version (`ensure_embedded`, `data-t`) |
+| `desk_dash.py` hooks | `write_combined` tail + `_gics_sector_db_json`; do not replace FLAGS/WATCH/MOM |
+| `write_dash.py` | `write()` → `desk_dash.write_combined` |
+| `momentum_screen.py` hook | `mom_streak.attach_card(row)` after enrich attach |
+| `dapi_enrich.py` | already has `gics_sector_name` parse / cache |
+| `docs/MOM-STREAK.md`, `docs/GICS-FILTER.md` | optional, for the desk |
+
+Do **not** copy generated `factorbook.html`, `dapi_enrichment.json`, `gics_sectors.json`, `mom_score_hist.json`. After drop-in, run Refresh once and confirm GICS chips + streak tags are still in the HTML source (`#gics-sector-db` filled, `STRIP_ID` present, `↑`/`↓`/`=5` pills).
+
 

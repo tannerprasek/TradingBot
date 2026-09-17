@@ -28,9 +28,10 @@ See [docs/CLOUD-AGENT.md](docs/CLOUD-AGENT.md) and [STRUCTURE.md](STRUCTURE.md).
 factor-desk/
   dapi_enrich.py         # DAPI enrichment pack (9 layers, no news)
   gics_filter.py         # GICS sector chips (filter strip, not a Sectors tab)
+  mom_streak.py          # home momentum rank streak vs 5
   add_server.py          # sidecar HTTP on :8765 — Refresh + intraday=1
-  desk_dash.py           # dashboard assembly + enrich pills
-  write_dash.py          # write factorbook.html
+  desk_dash.py           # dashboard assembly + write_combined
+  write_dash.py          # write factorbook.html via write_combined
   pull_options_pulse.py  # options pulse + score v2 + skew
   momentum_screen.py     # MOM rows + enrich attach
   early_warning.py
@@ -46,6 +47,7 @@ factor-desk/
 
 Refresh: `prices → options pulse → dapi_enrich (~50–60%) → rebuild`.
 Optional: `GET/POST /refresh?intraday=1` (default off). See [docs/DAPI-ENRICH.md](docs/DAPI-ENRICH.md).
-GICS sector chips read `gics_sector_name` already on the enrich file; optional one-shot `python dapi_enrich.py --gics-once` (not part of Refresh). See [docs/GICS-FILTER.md](docs/GICS-FILTER.md).
+GICS sector chips read `gics_sector_name` already on the enrich file; optional one-shot `python dapi_enrich.py --gics-once` (not part of Refresh). `write_combined` re-embeds filled `#gics-sector-db` + strip JS on every HTML write. See [docs/GICS-FILTER.md](docs/GICS-FILTER.md).
+Home cards: momentum streak vs score 5 (`↑12d>5` / `↓8d<5`). See [docs/MOM-STREAK.md](docs/MOM-STREAK.md).
 
 Desktop copies `dapi_enrich.py` into `C:\Users\MLP\Desktop\factorbook` and merges the thin hooks. Remaining ingest/troughing modules stay Desktop-owned until synced.

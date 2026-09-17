@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import sys
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
@@ -221,24 +222,32 @@ def strip_js() -> str:
   }
 
   function tickerOf(el) {
-    return (el.getAttribute("data-ticker") || el.getAttribute("data-name") || "").trim();
+    return (el.getAttribute("data-t") || el.getAttribute("data-ticker") || el.getAttribute("data-name") || "").trim();
+  }
+
+  function lookupTicker(t, map) {
+    if (!t) return "";
+    if (map[t]) return map[t];
+    var keys = Object.keys(map);
+    var short = t.split(/\s+/)[0];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (k === t) return map[k];
+      if (t && (k.indexOf(t) === 0 || t.indexOf(k) === 0)) return map[k];
+      if (k.split(/\s+/)[0] === short) return map[k];
+    }
+    return "";
   }
 
   function sectorOf(el, map) {
     var s = (el.getAttribute("data-gics-sector") || "").trim();
     if (s) return s;
-    var t = tickerOf(el);
-    if (t && map[t]) return map[t];
-    var keys = Object.keys(map);
-    for (var i = 0; i < keys.length; i++) {
-      if (t && keys[i].indexOf(t) === 0) return map[keys[i]];
-    }
-    return "";
+    return lookupTicker(tickerOf(el), map);
   }
 
   function cardNodes() {
     var out = [];
-    var nodes = document.querySelectorAll("[data-gics-sector], [data-ticker], article.card, .card");
+    var nodes = document.querySelectorAll("[data-gics-sector], [data-ticker], [data-t], article.card, .card");
     for (var i = 0; i < nodes.length; i++) {
       var el = nodes[i];
       if (isChrome(el)) continue;
@@ -357,12 +366,136 @@ def render_strip(sectors: Sequence[str] | None) -> str:
     return "".join(bits)
 
 
+GICS_SECTOR_DB_PLACEHOLDER = "__GICS_SECTOR_DB__"
+DB_SCRIPT_ID = "gics-sector-db"
+STRIP_HOST_ID = "gics-filter-strip"
+
+
+def sector_db_json(mapping: Mapping[str, str] | None) -> str:
+    return json.dumps(dict(mapping or {}), separators=(",", ":"), ensure_ascii=True)
+
+
+def filled_sector_db(
+    items: Iterable[Mapping[str, Any]] | Mapping[str, Any] | None = None,
+    cache: Mapping[str, Any] | None = None,
+    book: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Ticker → GICS name from enrich/cache only. Never invents a map."""
+    out: dict[str, str] = {}
+    if cache:
+        blob: Mapping[str, Any]
+        names = cache.get("names") if isinstance(cache, Mapping) else None
+        blob = names if isinstance(names, dict) else cache
+        for ticker, raw in blob.items():
+            if isinstance(raw, Mapping):
+                raw = raw.get("gics_sector_name") or raw.get("sector")
+            name, _reason = dapi_enrich.parse_gics_sector_name(raw)
+            if name:
+                out[str(ticker)] = name
+    if book is not None:
+        out.update(sector_db(book))
+    if items is not None:
+        out.update(sector_db(items))
+    return out
+
+
+def _gics_sector_db_json(
+    items: Iterable[Mapping[str, Any]] | Mapping[str, Any] | None = None,
+    cache: Mapping[str, Any] | None = None,
+    book: Mapping[str, Any] | None = None,
+) -> str:
+    """Filled JSON for ``#gics-sector-db`` / ``__GICS_SECTOR_DB__``."""
+    return sector_db_json(filled_sector_db(items, cache, book))
+
+
 def embed_db(mapping: Mapping[str, str] | None) -> str:
-    blob = json.dumps(dict(mapping or {}), separators=(",", ":"), ensure_ascii=True)
-    return f'<script type="application/json" id="gics-sector-db">{html.escape(blob, quote=False)}</script>'
+    blob = sector_db_json(mapping)
+    return f'<script type="application/json" id="{DB_SCRIPT_ID}">{html.escape(blob, quote=False)}</script>'
 
 
 def markup_attr(sector: str | None) -> str:
     if not sector:
         return ""
     return html.escape(sector, quote=True)
+
+
+def _ensure_css(html_text: str) -> str:
+    if ".gics-hid" in html_text and ".gchip" in html_text:
+        return html_text
+    css = strip_css()
+    if "</style>" in html_text:
+        idx = html_text.rfind("</style>")
+        return html_text[:idx] + css + "\n" + html_text[idx:]
+    if "</head>" in html_text:
+        return html_text.replace("</head>", f"<style>\n{css}\n</style>\n</head>", 1)
+    return f"<style>\n{css}\n</style>\n" + html_text
+
+
+def _ensure_host(html_text: str) -> str:
+    if re.search(r'id=["\']gics-filter-strip["\']', html_text, re.I):
+        return html_text
+    host = (
+        f'<div id="{STRIP_HOST_ID}" class="filter-strip gics-chips" '
+        'role="toolbar" aria-label="GICS sector filter"></div>\n'
+    )
+    for pat in (
+        r"(<nav\b[^>]*>.*?</nav>)",
+        r'(<div\b[^>]*class=["\'][^"\']*(?:filter-strip|filters|chip-row|g-row|top-filters)[^"\']*["\'][^>]*>)',
+        r"(<h1\b[^>]*>.*?</h1>)",
+        r"(<body\b[^>]*>)",
+    ):
+        match = re.search(pat, html_text, re.I | re.S)
+        if match:
+            return html_text[: match.end()] + "\n" + host + html_text[match.end() :]
+    return host + html_text
+
+
+def _ensure_db(html_text: str, mapping: Mapping[str, str] | None) -> str:
+    tag = embed_db(mapping)
+    blob = sector_db_json(mapping)
+    if re.search(r'id=["\']gics-sector-db["\']', html_text, re.I):
+        html_text = re.sub(
+            r'<script\b[^>]*\bid=["\']gics-sector-db["\'][^>]*>.*?</script>',
+            lambda _m: tag,
+            html_text,
+            count=1,
+            flags=re.I | re.S,
+        )
+        return html_text
+    if GICS_SECTOR_DB_PLACEHOLDER in html_text:
+        html_text = html_text.replace(GICS_SECTOR_DB_PLACEHOLDER, blob)
+        if not re.search(r'id=["\']gics-sector-db["\']', html_text, re.I):
+            wrapped = tag
+            if "</body>" in html_text:
+                html_text = html_text.replace("</body>", wrapped + "\n</body>", 1)
+            else:
+                html_text += wrapped
+        return html_text
+    if "</body>" in html_text:
+        return html_text.replace("</body>", tag + "\n</body>", 1)
+    return html_text + tag
+
+
+def _ensure_js(html_text: str) -> str:
+    has_strip = "STRIP_ID" in html_text and "gics-filter-strip" in html_text
+    has_fn = "var STRIP_ID" in html_text or "STRIP_ID =" in html_text
+    if has_strip and has_fn and "gics-hid" in html_text and "gics-sector-db" in html_text:
+        return html_text
+    script = "<script>\n" + strip_js() + "\n</script>\n"
+    if "</body>" in html_text:
+        return html_text.replace("</body>", script + "</body>", 1)
+    return html_text + script
+
+
+def ensure_embedded(html_text: str, mapping: Mapping[str, str] | None) -> str:
+    """Re-embed host + CSS + filled sector-db + strip JS after every HTML write.
+
+    Live ``write_combined`` sometimes keeps the strip/CSS but wipes
+    ``#gics-sector-db`` and the ``STRIP_ID`` script. Call this on the way out.
+    """
+    text = html_text or ""
+    text = _ensure_css(text)
+    text = _ensure_host(text)
+    text = _ensure_db(text, mapping)
+    text = _ensure_js(text)
+    return text
