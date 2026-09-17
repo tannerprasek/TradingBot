@@ -51,7 +51,7 @@ Optional boosts (cheap card fields only — **no DAPI pull**):
 
 ## UI
 
-Top-nav **Breakout** / **Breakdown** sit beside Momentum Up / Down. Clicking a tab clones existing MOM/FLAGS card chrome (`data-t` / `data-ticker`) into a dense pane — not a skinny table. Drill behavior is the live card’s. `desk_dash.write_combined` always re-embeds `#fd-breakout-db` + nav + JS (`breakout.ensure_embedded`) so a Refresh rewrite cannot drop the tabs. Live ~2.7MB `factorbook.html` is **patched**, never replaced.
+Top-nav **Breakout** / **Breakdown** sit beside Momentum Up / Down. Clicking a tab fills `#view-breakout` / `#view-breakdown` (`.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`) with live `cardHTML(window.MOM.cards)` — the same dense chrome as Momentum Up — plus why / streak `enrich_pills` (`fd-bb`, `mom-streak`). Drill is `selectTicker`. Legacy `#fd-bb-breakout` / `#fd-bb-breakdown` stay empty and hidden so old CSS cannot paint skinny stub articles. `desk_dash.write_combined` always re-embeds `#fd-breakout-db` + nav + JS (`breakout.ensure_embedded`) so a Refresh rewrite cannot drop the tabs. Live ~2.7MB `factorbook.html` is **patched**, never replaced. Recopy `breakout.py`; do not wholesale replace live `desk_dash.py`.
 
 ## Related
 

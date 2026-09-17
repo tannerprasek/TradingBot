@@ -9,7 +9,6 @@ Tune every threshold in the constants block below. Formula is documented in
 
 from __future__ import annotations
 
-import html
 import json
 import logging
 import re
@@ -77,6 +76,10 @@ JS_SCRIPT_ID = "fd-breakout-js"
 CSS_STYLE_ID = "fd-breakout-css"
 PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
+VIEW_BREAKOUT_ID = "view-breakout"
+VIEW_BREAKDOWN_ID = "view-breakdown"
+GRID_BREAKOUT_ID = "breakout-grid"
+GRID_BREAKDOWN_ID = "breakdown-grid"
 HID_CLASS = "fd-bb-hid"
 
 NAV_BREAKOUT_ID = "fd-nav-breakout"
@@ -90,6 +93,8 @@ BTN_BREAKDOWN = (
     'data-view="breakdown" data-fd-breakdown="1">Breakdown</button>'
 )
 SETVIEW_MARKER = "/*fd-bb-setview*/"
+HIDEALL_MARKER = "/*fd-bb-hideall*/"
+PAINTVIEW_MARKER = "/*fd-bb-paintview*/"
 NATIVE_VIEW_IDS: tuple[str, ...] = (
     "home",
     "view-mom-up",
@@ -98,6 +103,8 @@ NATIVE_VIEW_IDS: tuple[str, ...] = (
     "view-options",
     "view-sectors",
     "search-pane",
+    VIEW_BREAKOUT_ID,
+    VIEW_BREAKDOWN_ID,
 )
 _ALLOWLIST_RE = re.compile(
     r"home\|mom-up\|mom-down\|outliers\|options(?:\|sectors)?(?!\|breakout)",
@@ -107,6 +114,28 @@ _SETVIEW_FN_RE = re.compile(
     r"(function\s+setView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{)",
     re.I,
 )
+_PAINTVIEW_FN_RE = re.compile(
+    r"(function\s+paintView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{)",
+    re.I,
+)
+_HIDEALL_FN_RE = re.compile(
+    r"(function\s+hideAllPanes\s*\(\s*\)\s*\{)",
+    re.I,
+)
+_VIEW_ID_ARRAY_RE = re.compile(
+    r"""((?:\[\s*["']home["']\s*,\s*["']view-mom-up["']\s*,\s*["']view-mom-down["']"""
+    r"""\s*,\s*["']view-outliers["']\s*,\s*["']view-options["']"""
+    r"""(?:\s*,\s*["']view-sectors["'])?(?:\s*,\s*["']search-pane["'])?))"""
+    r"""(?![^\]]*(?:view-breakout|view-breakdown))(\s*\])""",
+    re.I,
+)
+_VIEW_SEL_RE = re.compile(
+    r"(#home\s*,\s*#view-mom-up\s*,\s*#view-mom-down\s*,\s*#view-outliers\s*,\s*"
+    r"#view-options(?:\s*,\s*#view-sectors)?(?:\s*,\s*#search-pane)?)"
+    r"(?![^\"';)]*(?:#view-breakout|#view-breakdown))",
+    re.I,
+)
+_DIV_TOKEN_RE = re.compile(r"<\s*(/)?\s*div\b([^>]*)>", re.I)
 
 _HOP_LEADER_RE = re.compile(r"\b(hop|leader)\b", re.I)
 _OPT_SPIKE_RE = re.compile(r"opt[\s_-]*spike", re.I)
@@ -549,24 +578,18 @@ def embed_db(ranked: Mapping[str, Any] | None) -> str:
 
 def strip_css() -> str:
     return f"""
-.fd-bb-pane {{
-  display: none;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
-  margin: 12px 0 18px;
+/* Legacy stub panes must never paint — dense cards live in #view-breakout / #view-breakdown. */
+#fd-bb-breakout, #fd-bb-breakdown, .fd-bb-pane,
+article.fd-bb-card, .fd-bb-card {{
+  display: none !important;
 }}
-.fd-bb-pane.is-on {{ display: grid !important; }}
+#view-breakout.hide, #view-breakdown.hide {{ display: none !important; }}
 .{HID_CLASS} {{ display: none !important; }}
 .fd-bb-empty {{
   grid-column: 1 / -1;
   color: #9ca3af;
   font-size: 12px;
   margin: 8px 0;
-}}
-.fd-bb-card .fd-bb-why {{
-  color: #9ca3af;
-  font-size: 11px;
-  margin: 8px 0 0;
 }}
 .nav-btn[data-view="breakout"].is-on,
 .nav-btn[data-view="breakout"].on,
@@ -586,11 +609,11 @@ def strip_css() -> str:
 
 
 def strip_js() -> str:
-    """Nav + card clone. Same chrome as MOM cards; not a table.
+    """Fill #breakout-grid / #breakdown-grid with live ``cardHTML`` (MOM chrome).
 
-    Capture-phase click stops the live topnav listener. ``show`` is also
-    ``window.__FD_BB_SHOW__`` so a patched live ``setView`` can early-return
-    without ``paint()``.
+    Capture-phase click stops the live topnav listener. ``show`` is
+    ``window.__FD_BB_SHOW__`` so a patched live ``setView`` early-returns
+    without ``paint()`` and without toggling legacy ``#fd-bb-*`` panes.
     """
     view_ids = json.dumps(list(NATIVE_VIEW_IDS))
     return rf"""
@@ -598,9 +621,12 @@ def strip_js() -> str:
   if (window.__FD_BB_BOUND__) return;
   window.__FD_BB_BOUND__ = true;
   var DB_ID = "fd-breakout-db";
-  var BREAKOUT = "fd-bb-breakout";
-  var BREAKDOWN = "fd-bb-breakdown";
-  var HID = "fd-bb-hid";
+  var VIEW_BO = "view-breakout";
+  var VIEW_BD = "view-breakdown";
+  var GRID_BO = "breakout-grid";
+  var GRID_BD = "breakdown-grid";
+  var LEGACY_BO = "fd-bb-breakout";
+  var LEGACY_BD = "fd-bb-breakdown";
   var NATIVE_VIEWS = {view_ids};
 
   function $(id) {{ return document.getElementById(id); }}
@@ -611,88 +637,98 @@ def strip_js() -> str:
     catch (e) {{ return {{ breakout: [], breakdown: [] }}; }}
   }}
   function shortOf(t) {{ return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }}
-  function tickerOf(node) {{
-    return (node.getAttribute("data-t") || node.getAttribute("data-ticker") || node.getAttribute("data-name") || "").trim();
+  function momCards() {{
+    var mom = window.MOM || {{}};
+    if (Array.isArray(mom.cards)) return mom.cards; // window.MOM.cards
+    if (Array.isArray(mom.up) && Array.isArray(mom.down)) return mom.up.concat(mom.down);
+    if (Array.isArray(window.MOM_CARDS)) return window.MOM_CARDS;
+    return [];
   }}
-  function findSrc(ticker) {{
+  function findMomCard(ticker) {{
     var want = shortOf(ticker);
-    var nodes = document.querySelectorAll("[data-t], [data-ticker], article.card, .card");
-    for (var i = 0; i < nodes.length; i++) {{
-      var node = nodes[i];
-      if (node.closest && node.closest("#fd-bb-breakout, #fd-bb-breakdown, nav, .topnav, #topnav")) continue;
-      var t = shortOf(tickerOf(node));
-      if (t && t === want) return node;
+    var cards = momCards();
+    for (var i = 0; i < cards.length; i++) {{
+      var c = cards[i] || {{}};
+      var t = shortOf(c.t || c.ticker || c.name || c.symbol || "");
+      if (t && t === want) return c;
     }}
     return null;
   }}
-  function fallbackCard(row) {{
-    var art = document.createElement("article");
-    art.className = "card fd-bb-card";
-    var t = row.t || shortOf(row.ticker) || "";
-    art.setAttribute("data-t", t);
-    art.setAttribute("data-ticker", row.ticker || t);
-    var score = (row.score == null) ? "—" : String(row.score);
-    var label = row.label || "";
-    var why = row.why || "";
-    art.innerHTML = '<header><h2>' + t + '</h2><div class="pills">' +
-      '<span class="badge spike-chip">' + score + '</span>' +
-      (label ? '<span class="badge spike-chip">' + label + '</span>' : '') +
-      '</div></header><p class="fd-bb-why">' + why + '</p>';
-    return art;
+  function withPills(card, row) {{
+    var out = {{}};
+    if (card) {{ for (var k in card) out[k] = card[k]; }}
+    if (!out.t) out.t = row.t || shortOf(row.ticker) || "";
+    if (!out.ticker) out.ticker = row.ticker || out.t;
+    if (out.score == null && row.score != null) out.score = row.score;
+    if (out.mom_score == null && row.score != null) out.mom_score = row.score;
+    var pills = Array.isArray(out.enrich_pills) ? out.enrich_pills.slice() : [];
+    pills = pills.filter(function (p) {{ return p && p.key !== "fd-bb"; }});
+    if (row.why) {{
+      pills.push({{ key: "fd-bb", label: String(row.why), cls: "fd-bb-why", title: String(row.why) }});
+    }}
+    if (row.label && !pills.some(function (p) {{ return p && p.key === "mom-streak"; }})) {{
+      var side = row.side || "";
+      pills.push({{
+        key: "mom-streak",
+        label: String(row.label),
+        cls: side === "below" ? "mom-streak-down" : (side === "above" ? "mom-streak-up" : "mom-streak"),
+        title: String(row.label)
+      }});
+    }}
+    out.enrich_pills = pills;
+    return out;
   }}
-  function fill(pane, rows) {{
-    if (!pane) return;
-    pane.innerHTML = "";
-    pane.classList.remove("hide");
+  function htmlFn() {{
+    if (typeof window.cardHTML === "function") return window.cardHTML;
+    if (typeof cardHTML === "function") return cardHTML;
+    return null;
+  }}
+  function selectFn() {{
+    if (typeof window.selectTicker === "function") return window.selectTicker;
+    if (typeof selectTicker === "function") return selectTicker;
+    return null;
+  }}
+  function renderRow(row) {{
+    row = row || {{}};
+    var fn = htmlFn();
+    if (!fn) return null;
+    var card = withPills(findMomCard(row.ticker || row.t), row);
+    var wrap = document.createElement("div");
+    wrap.innerHTML = fn(card);
+    var node = wrap.firstElementChild;
+    if (!node) return null;
+    node.classList.remove("hide", "fd-bb-hid", "gics-hid");
+    node.addEventListener("click", function () {{
+      var sel = selectFn();
+      if (sel) sel(card.t || card.ticker || row.t);
+    }});
+    return node;
+  }}
+  function fillGrid(grid, rows) {{
+    if (!grid) return;
+    grid.innerHTML = "";
     if (!rows || !rows.length) {{
       var empty = document.createElement("p");
       empty.className = "fd-bb-empty";
       empty.textContent = "No names this Refresh — mid-score climbers / crackers only.";
-      pane.appendChild(empty);
+      grid.appendChild(empty);
       return;
     }}
     for (var i = 0; i < rows.length; i++) {{
-      var row = rows[i] || {{}};
-      var src = findSrc(row.ticker || row.t);
-      var card;
-      if (src) {{
-        card = src.cloneNode(true);
-        card.classList.remove(HID, "gics-hid", "hide");
-        if (card.style) card.style.display = "";
-      }} else {{
-        card = fallbackCard(row);
-      }}
-      pane.appendChild(card);
+      var node = renderRow(rows[i] || {{}});
+      if (node) grid.appendChild(node);
     }}
   }}
-  function nativeCards() {{
-    return document.querySelectorAll("article.card, .card[data-t], [data-t]");
+  function hideLegacy() {{
+    var a = $(LEGACY_BO), b = $(LEGACY_BD);
+    if (a) {{ a.classList.add("hide"); a.hidden = true; a.innerHTML = ""; }}
+    if (b) {{ b.classList.add("hide"); b.hidden = true; b.innerHTML = ""; }}
   }}
   function hideNativeViews() {{
     for (var i = 0; i < NATIVE_VIEWS.length; i++) {{
       var el = $(NATIVE_VIEWS[i]);
       if (el) el.classList.add("hide");
     }}
-  }}
-  function showNativeViews() {{
-    for (var i = 0; i < NATIVE_VIEWS.length; i++) {{
-      var el = $(NATIVE_VIEWS[i]);
-      if (el) el.classList.remove("hide");
-    }}
-  }}
-  function hideNative() {{
-    hideNativeViews();
-    var nodes = nativeCards();
-    for (var i = 0; i < nodes.length; i++) {{
-      var node = nodes[i];
-      if (node.closest && node.closest("#fd-bb-breakout, #fd-bb-breakdown, nav, .topnav, #topnav, #gics-filter-strip, #fd-book-delta")) continue;
-      node.classList.add(HID);
-    }}
-  }}
-  function showNative() {{
-    showNativeViews();
-    var nodes = document.querySelectorAll("." + HID);
-    for (var i = 0; i < nodes.length; i++) nodes[i].classList.remove(HID);
   }}
   function setOn(btn, on) {{
     if (!btn) return;
@@ -717,32 +753,24 @@ def strip_js() -> str:
     }}
   }}
   function show(kind) {{
+    hideNativeViews();
+    hideLegacy();
     var data = db();
-    var bo = $(BREAKOUT);
-    var bd = $(BREAKDOWN);
     if (kind === "breakout" || kind === "breakdown") {{
-      hideNative();
-      if (bo) {{
-        bo.classList.toggle("is-on", kind === "breakout");
-        bo.classList.toggle("hide", kind !== "breakout");
-        if (kind === "breakout") fill(bo, data.breakout || []);
-      }}
-      if (bd) {{
-        bd.classList.toggle("is-on", kind === "breakdown");
-        bd.classList.toggle("hide", kind !== "breakdown");
-        if (kind === "breakdown") fill(bd, data.breakdown || []);
-      }}
+      var pane = $(kind === "breakout" ? VIEW_BO : VIEW_BD);
+      var grid = $(kind === "breakout" ? GRID_BO : GRID_BD);
+      if (pane) pane.classList.remove("hide");
+      fillGrid(grid, data[kind] || []);
+      document.body.setAttribute("data-view", kind);
       document.body.setAttribute("data-fd-bb", kind);
       syncNav(kind);
       return;
     }}
-    showNative();
-    if (bo) {{ bo.classList.remove("is-on"); bo.classList.add("hide"); }}
-    if (bd) {{ bd.classList.remove("is-on"); bd.classList.add("hide"); }}
     document.body.removeAttribute("data-fd-bb");
     syncNav("");
   }}
   window.__FD_BB_SHOW__ = show;
+  window.__FD_BB_SYNC_NAV__ = syncNav;
   function kindOf(btn) {{
     if (!btn || !btn.getAttribute) return "";
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
@@ -776,6 +804,7 @@ def strip_js() -> str:
       var kind = String(v || "").toLowerCase();
       if (kind === "breakout" || kind === "breakdown") {{
         show(kind);
+        syncNav(kind);
         return;
       }}
       show("");
@@ -789,52 +818,27 @@ def strip_js() -> str:
 """.strip()
 
 
-def fallback_card_html(row: Mapping[str, Any]) -> str:
-    ticker = html.escape(str(row.get("ticker") or row.get("t") or ""))
-    short = html.escape(str(row.get("t") or _short(str(row.get("ticker") or ""))))
-    score = row.get("score")
-    score_txt = "—" if score is None else html.escape(str(score))
-    label = html.escape(str(row.get("label") or ""))
-    why = html.escape(str(row.get("why") or ""))
-    pills = f'<span class="badge spike-chip">{score_txt}</span>'
-    if label:
-        pills += f'<span class="badge spike-chip">{label}</span>'
-    return (
-        f'<article class="card fd-bb-card" data-t="{short}" data-ticker="{ticker}">'
-        f"<header><h2>{short}</h2><div class=\"pills\">{pills}</div></header>"
-        f'<p class="fd-bb-why">{why}</p></article>'
+def panes_html(ranked: Mapping[str, Any] | None = None, article_html=None) -> str:
+    """Momentum-style view shells. Grids are filled by ``strip_js`` via ``cardHTML``.
+
+    ``ranked`` / ``article_html`` are unused (kept for call-site compatibility).
+    Legacy ``#fd-bb-*`` stay empty so old CSS cannot paint stub articles.
+    """
+    _ = (ranked, article_html)
+    return "\n".join(
+        [
+            f'<div id="{VIEW_BREAKOUT_ID}" class="view-pane hide" data-view="breakout">',
+            '  <div class="ph">Breakout</div>',
+            f'  <div class="grid dense" id="{GRID_BREAKOUT_ID}"></div>',
+            "</div>",
+            f'<div id="{VIEW_BREAKDOWN_ID}" class="view-pane hide" data-view="breakdown">',
+            '  <div class="ph">Breakdown</div>',
+            f'  <div class="grid dense" id="{GRID_BREAKDOWN_ID}"></div>',
+            "</div>",
+            f'<div id="{PANE_BREAKOUT_ID}" class="fd-bb-pane hide" hidden aria-hidden="true"></div>',
+            f'<div id="{PANE_BREAKDOWN_ID}" class="fd-bb-pane hide" hidden aria-hidden="true"></div>',
+        ]
     )
-
-
-def panes_html(ranked: Mapping[str, Any] | None, article_html=None) -> str:
-    ranked = ranked or {}
-    bits = [
-        f'<div id="{PANE_BREAKOUT_ID}" class="fd-bb-pane" data-kind="breakout">',
-    ]
-    breakout = ranked.get("breakout") or []
-    if not breakout:
-        bits.append('<p class="fd-bb-empty">No breakout names this Refresh.</p>')
-    else:
-        for row in breakout:
-            card = row.get("_card") if isinstance(row, Mapping) else None
-            if article_html and card is not None:
-                bits.append(article_html(card))
-            else:
-                bits.append(fallback_card_html(row))
-    bits.append("</div>")
-    bits.append(f'<div id="{PANE_BREAKDOWN_ID}" class="fd-bb-pane" data-kind="breakdown">')
-    breakdown = ranked.get("breakdown") or []
-    if not breakdown:
-        bits.append('<p class="fd-bb-empty">No breakdown names this Refresh.</p>')
-    else:
-        for row in breakdown:
-            card = row.get("_card") if isinstance(row, Mapping) else None
-            if article_html and card is not None:
-                bits.append(article_html(card))
-            else:
-                bits.append(fallback_card_html(row))
-    bits.append("</div>")
-    return "\n".join(bits)
 
 
 def _ensure_css(html_text: str) -> str:
@@ -895,7 +899,7 @@ def _ensure_nav(html_text: str) -> str:
 
 
 def _patch_setview_allowlist(html_text: str) -> str:
-    """Append ``|breakout|breakdown`` to the live ``setView`` allowlist if present."""
+    """Append ``|breakout|breakdown`` to live ``setView`` / ``paintView`` allowlists."""
     text = html_text or ""
     if re.search(
         r"home\|mom-up\|mom-down\|outliers\|options(?:\|sectors)?\|breakout\|breakdown",
@@ -906,47 +910,141 @@ def _patch_setview_allowlist(html_text: str) -> str:
     return _ALLOWLIST_RE.sub(lambda m: m.group(0) + "|breakout|breakdown", text)
 
 
-def _patch_setview_early_return(html_text: str) -> str:
-    """Live ``setView(v)`` early-returns for our tabs — hide native views, no ``paint()``."""
+def _early_return_snippet(marker: str, param: str) -> str:
+    """``SHOW`` + live ``syncNav`` + our nav re-assert. No ``paint()``, no legacy panes."""
+    return (
+        f"{marker}"
+        f"if({param}===\"breakout\"||{param}===\"breakdown\"){{"
+        f"if(window.__FD_BB_SHOW__)window.__FD_BB_SHOW__({param});"
+        f"if(typeof syncNav===\"function\")syncNav();"
+        f"if(window.__FD_BB_SYNC_NAV__)window.__FD_BB_SYNC_NAV__({param});"
+        f"return;}}"
+    )
+
+
+def _replace_or_inject_early_return(
+    html_text: str,
+    *,
+    marker: str,
+    fn_re: re.Pattern[str],
+) -> str:
     text = html_text or ""
-    if SETVIEW_MARKER in text:
-        return text
+    existing = re.search(
+        re.escape(marker) + r'if\((\w+)==="breakout".*?return;\}',
+        text,
+        re.S,
+    )
+    if existing:
+        return text[: existing.start()] + _early_return_snippet(marker, existing.group(1)) + text[existing.end() :]
 
     def inject(match: re.Match[str]) -> str:
         head, param = match.group(1), match.group(2)
-        return (
-            f"{head}{SETVIEW_MARKER}"
-            f"if({param}===\"breakout\"||{param}===\"breakdown\"){{"
-            f"if(window.__FD_BB_SHOW__)window.__FD_BB_SHOW__({param});return;}}"
-        )
+        return f"{head}{_early_return_snippet(marker, param)}"
 
-    return _SETVIEW_FN_RE.sub(inject, text, count=1)
+    return fn_re.sub(inject, text, count=1)
+
+
+def _patch_setview_early_return(html_text: str) -> str:
+    """Live ``setView(v)`` early-returns for our tabs — ``SHOW`` + ``syncNav``, no ``paint()``."""
+    return _replace_or_inject_early_return(html_text, marker=SETVIEW_MARKER, fn_re=_SETVIEW_FN_RE)
+
+
+def _patch_paintview_early_return(html_text: str) -> str:
+    """Live ``paintView(v)`` allowlist is patched separately; also early-return to ``SHOW``."""
+    return _replace_or_inject_early_return(html_text, marker=PAINTVIEW_MARKER, fn_re=_PAINTVIEW_FN_RE)
+
+
+def _patch_hideall_panes(html_text: str) -> str:
+    """``hideAllPanes`` must hide ``#view-breakout`` / ``#view-breakdown`` so cards cannot bleed."""
+    text = html_text or ""
+    if HIDEALL_MARKER in text:
+        return text
+    snippet = (
+        f"{HIDEALL_MARKER}"
+        '["view-breakout","view-breakdown"].forEach(function(id){'
+        'var el=document.getElementById(id);if(el)el.classList.add("hide");});'
+    )
+    return _HIDEALL_FN_RE.sub(lambda m: m.group(1) + snippet, text, count=1)
+
+
+def _patch_view_id_lists(html_text: str) -> str:
+    """Append our view ids to live hideAllPanes arrays / querySelectorAll lists."""
+    text = html_text or ""
+    text = _VIEW_ID_ARRAY_RE.sub(
+        r'\1,"view-breakout","view-breakdown"\2',
+        text,
+    )
+    text = _VIEW_SEL_RE.sub(
+        r"\1, #view-breakout, #view-breakdown",
+        text,
+    )
+    return text
 
 
 def _patch_setview(html_text: str) -> str:
     text = _patch_setview_allowlist(html_text)
-    return _patch_setview_early_return(text)
+    text = _patch_setview_early_return(text)
+    text = _patch_paintview_early_return(text)
+    text = _patch_hideall_panes(text)
+    return _patch_view_id_lists(text)
 
 
-def _ensure_panes(html_text: str, ranked: Mapping[str, Any] | None, *, replace: bool = True) -> str:
-    has = bool(re.search(rf'id=["\']{PANE_BREAKOUT_ID}["\']', html_text, re.I))
-    if has and not replace:
-        return html_text
-    host = panes_html(ranked)
-    if has:
-        html_text = re.sub(
-            rf'<div\b[^>]*\bid=["\']{PANE_BREAKOUT_ID}["\'][^>]*>.*?</div>\s*'
-            rf'<div\b[^>]*\bid=["\']{PANE_BREAKDOWN_ID}["\'][^>]*>.*?</div>',
-            host,
-            html_text,
-            count=1,
-            flags=re.I | re.S,
-        )
-        if re.search(rf'id=["\']{PANE_BREAKOUT_ID}["\']', html_text, re.I):
-            return html_text
+def _find_tag_span(html_text: str, elem_id: str) -> tuple[int, int] | None:
+    """``[start, end)`` of ``<div id=elem_id>…</div>`` with nested divs balanced."""
+    text = html_text or ""
+    opener = re.compile(
+        rf'<div\b(?=[^>]*\bid=["\']{re.escape(elem_id)}["\'])[^>]*>',
+        re.I,
+    )
+    match = opener.search(text)
+    if not match:
+        return None
+    start = match.start()
+    depth = 1
+    for tok in _DIV_TOKEN_RE.finditer(text, match.end()):
+        closing = bool(tok.group(1))
+        rest = tok.group(2) or ""
+        self_close = rest.rstrip().endswith("/")
+        if closing:
+            depth -= 1
+            if depth == 0:
+                return start, tok.end()
+        elif self_close:
+            continue
+        else:
+            depth += 1
+    return None
+
+
+def _legacy_empty_html() -> tuple[str, str]:
+    return (
+        f'<div id="{PANE_BREAKOUT_ID}" class="fd-bb-pane hide" hidden aria-hidden="true"></div>',
+        f'<div id="{PANE_BREAKDOWN_ID}" class="fd-bb-pane hide" hidden aria-hidden="true"></div>',
+    )
+
+
+def _ensure_legacy_empty(html_text: str) -> str:
+    empty_bo, empty_bd = _legacy_empty_html()
+    text = html_text
+    for elem_id, empty in ((PANE_BREAKOUT_ID, empty_bo), (PANE_BREAKDOWN_ID, empty_bd)):
+        span = _find_tag_span(text, elem_id)
+        if span:
+            text = text[: span[0]] + empty + text[span[1] :]
+            continue
+        anchor = _find_tag_span(text, VIEW_BREAKDOWN_ID) or _find_tag_span(text, VIEW_BREAKOUT_ID)
+        if anchor:
+            text = text[: anchor[1]] + "\n" + empty + text[anchor[1] :]
+        else:
+            text = text + "\n" + empty
+    return text
+
+
+def _insert_host(html_text: str, host: str) -> str:
+    for elem_id in ("view-mom-down", "view-mom-up", "gics-filter-strip", "fd-book-delta"):
+        span = _find_tag_span(html_text, elem_id)
+        if span:
+            return html_text[: span[1]] + "\n" + host + html_text[span[1] :]
     for pat in (
-        r'(<div\b[^>]*\bid=["\']gics-filter-strip["\'][^>]*>.*?</div>)',
-        r'(<div\b[^>]*\bid=["\']fd-book-delta["\'][^>]*>.*?</div>)',
         r"(<nav\b[^>]*>.*?</nav>)",
         r"(<h1\b[^>]*>.*?</h1>)",
         r"(<body\b[^>]*>)",
@@ -955,6 +1053,29 @@ def _ensure_panes(html_text: str, ranked: Mapping[str, Any] | None, *, replace: 
         if match:
             return html_text[: match.end()] + "\n" + host + html_text[match.end() :]
     return host + "\n" + html_text
+
+
+def _ensure_panes(html_text: str, ranked: Mapping[str, Any] | None, *, replace: bool = True) -> str:
+    """Keyed on ``#view-breakout``. ``replace=False`` keeps shells; always empties legacy stubs."""
+    _ = ranked
+    has_view = _find_tag_span(html_text, VIEW_BREAKOUT_ID) is not None
+    if has_view and not replace:
+        return _ensure_legacy_empty(html_text)
+    host = panes_html(ranked)
+    found: list[tuple[int, int]] = []
+    for elem_id in (VIEW_BREAKOUT_ID, VIEW_BREAKDOWN_ID, PANE_BREAKOUT_ID, PANE_BREAKDOWN_ID):
+        span = _find_tag_span(html_text, elem_id)
+        if span:
+            found.append(span)
+    if found:
+        found.sort()
+        insert_at = found[0][0]
+        for start, end in sorted(found, key=lambda s: s[0], reverse=True):
+            while end < len(html_text) and html_text[end] in " \t\r\n":
+                end += 1
+            html_text = html_text[:start] + html_text[end:]
+        return html_text[:insert_at] + host + "\n" + html_text[insert_at:]
+    return _insert_host(html_text, host)
 
 
 def _ensure_db(html_text: str, ranked: Mapping[str, Any] | None) -> str:
@@ -989,10 +1110,10 @@ def _ensure_js(html_text: str) -> str:
 
 
 def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> str:
-    """Nav buttons + panes + filled db + JS. Safe on live ~2.7MB HTML. No Sectors tab.
+    """Nav buttons + view shells + filled db + JS. Safe on live ~2.7MB HTML. No Sectors tab.
 
-    ``ranked=None`` must not wipe already-ranked live panes / ``#fd-breakout-db``.
-    Always pass ``rank_book(...)`` on a live write.
+    ``ranked=None`` must not wipe ``#fd-breakout-db``. View shells stay; legacy
+    ``#fd-bb-*`` are emptied. Always pass ``rank_book(...)`` on a live write.
     """
     text = html_text or ""
     # Buttons before CSS: CSS selectors contain ``data-view="breakout"`` text.

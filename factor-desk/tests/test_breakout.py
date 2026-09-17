@@ -164,6 +164,13 @@ class EmbedTests(unittest.TestCase):
         self.assertIn('id="fd-breakout-db"', out)
         self.assertIn("CLIMB", out)
         self.assertIn("breakout_score", out)
+        self.assertIn('id="view-breakout"', out)
+        self.assertIn('id="view-breakdown"', out)
+        self.assertIn('id="breakout-grid"', out)
+        self.assertIn('id="breakdown-grid"', out)
+        self.assertIn('class="grid dense"', out)
+        self.assertIn('<div class="ph">Breakout</div>', out)
+        self.assertNotRegex(out, r'<article\b[^>]*fd-bb-card')
         self.assertNotIn('data-tab="sectors"', out)
         self.assertNotIn("&gt;", bo.embed_db(ranked))
 
@@ -209,11 +216,27 @@ class EmbedTests(unittest.TestCase):
   <button class="btn">Momentum Down</button>
 </nav>
 <div id="home">FLAGS</div>
+<div id="view-mom-up" class="view-pane hide"><div class="ph">Momentum Up</div><div class="grid dense" id="mom-up-grid"></div></div>
 <script>
+function hideAllPanes() {
+  ["home","view-mom-up","view-mom-down","view-outliers","view-options","view-sectors","search-pane"].forEach(function(id){
+    var el = document.getElementById(id);
+    if (el) el.classList.add("hide");
+  });
+  document.querySelectorAll("#home, #view-mom-up, #view-mom-down, #view-outliers, #view-options, #view-sectors, #search-pane").forEach(function(el){
+    el.classList.add("hide");
+  });
+}
+function paintView(v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+}
 function setView(v) {
   if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+  hideAllPanes();
+  paintView(v);
   paint();
 }
+function syncNav() {}
 </script>
 </body></html>"""
         ranked = {
@@ -226,15 +249,57 @@ function setView(v) {
             r"home\|mom-up\|mom-down\|outliers\|options\|sectors\|breakout\|breakdown",
         )
         self.assertIn(bo.SETVIEW_MARKER, out)
+        self.assertIn(bo.HIDEALL_MARKER, out)
+        self.assertIn(bo.PAINTVIEW_MARKER, out)
         self.assertIn("window.__FD_BB_SHOW__", out)
-        self.assertIn("return;", out.split("function setView")[1][:400])
+        setview_head = out.split("function setView")[1][:700]
+        self.assertIn("return;", setview_head)
+        self.assertIn("syncNav", setview_head)
+        self.assertIn("__FD_BB_SHOW__", setview_head)
+        self.assertNotIn("paint();", setview_head.split("return;")[0])
+        hideall = out.split("function hideAllPanes")[1][:900]
+        self.assertIn("view-breakout", hideall)
+        self.assertIn("view-breakdown", hideall)
+        self.assertIn("#view-breakout", out)
+        paint_head = out.split("function paintView")[1][:500]
+        self.assertIn("breakout|breakdown", paint_head)
         js = bo.strip_js()
         self.assertIn("stopImmediatePropagation", js)
         self.assertIn("window.__FD_BB_SHOW__", js)
         self.assertIn('classList.add("hide")', js)
         self.assertIn("view-mom-up", js)
+        self.assertIn("view-breakout", js)
+        self.assertIn("view-breakdown", js)
         self.assertIn("search-pane", js)
+        self.assertIn("cardHTML", js)
+        self.assertIn("MOM.cards", js)
+        self.assertIn("selectTicker", js)
+        self.assertIn("enrich_pills", js)
+        self.assertIn('"fd-bb"', js)
+        self.assertIn('"mom-streak"', js)
+        self.assertNotIn("fd-bb-card", js)
         self.assertIn('class="btn nav-btn"', out)
+
+    def test_panes_html_emits_view_shells_not_stubs(self) -> None:
+        host = bo.panes_html(
+            {
+                "breakout": [{"t": "CLIMB", "ticker": "CLIMB US Equity", "score": 9, "why": "band 9", "_card": {"t": "CLIMB"}}],
+                "breakdown": [{"t": "CRACK"}],
+            }
+        )
+        self.assertIn('id="view-breakout"', host)
+        self.assertIn('id="view-breakdown"', host)
+        self.assertIn('class="grid dense"', host)
+        self.assertIn('id="breakout-grid"', host)
+        self.assertIn('id="breakdown-grid"', host)
+        self.assertIn('<div class="ph">Breakout</div>', host)
+        self.assertIn('<div class="ph">Breakdown</div>', host)
+        self.assertIn('id="fd-bb-breakout"', host)
+        self.assertIn("hidden", host)
+        self.assertNotIn("CLIMB", host)
+        self.assertNotIn("CRACK", host)
+        self.assertNotIn("fd-bb-card", host)
+        self.assertNotIn("No breakout names", host)
 
     def test_ensure_embedded_none_does_not_wipe_ranked_panes(self) -> None:
         html = """<!DOCTYPE html><html><body>
@@ -246,12 +311,33 @@ function setView(v) {
             "breakdown": [],
         }
         filled = bo.ensure_embedded(html, ranked)
-        self.assertIn("CLIMB", filled)
+        db_blob = re.search(
+            r'<script\b[^>]*id=["\']fd-breakout-db["\'][^>]*>(.*?)</script>',
+            filled,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(db_blob)
+        data = json.loads(db_blob.group(1))
+        self.assertEqual(data["breakout"][0]["t"], "CLIMB")
+        self.assertIn("band 9", data["breakout"][0]["why"])
+        self.assertIn('id="view-breakout"', filled)
+        self.assertNotRegex(filled, r'<article\b[^>]*fd-bb-card')
         self.assertNotIn("No breakout names this Refresh.", filled)
         kept = bo.ensure_embedded(filled, None)
+        kept_blob = re.search(
+            r'<script\b[^>]*id=["\']fd-breakout-db["\'][^>]*>(.*?)</script>',
+            kept,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(kept_blob)
+        kept_data = json.loads(kept_blob.group(1))
+        self.assertEqual(kept_data["breakout"][0]["t"], "CLIMB")
+        self.assertIn("band 9", kept_data["breakout"][0]["why"])
         self.assertIn("CLIMB", kept)
-        self.assertNotIn("No breakout names this Refresh.", kept)
         self.assertIn("band 9", kept)
+        self.assertNotIn("No breakout names this Refresh.", kept)
+        self.assertIn('id="view-breakout"', kept)
+        self.assertIn('id="breakout-grid"', kept)
 
     def test_write_combined_patches_live_html_with_tabs_and_delta(self) -> None:
         body = """<!DOCTYPE html>
@@ -295,6 +381,13 @@ function setView(v) {
             self.assertIn(">Breakout</button>", text)
             self.assertIn(">Breakdown</button>", text)
             self.assertIn('id="fd-breakout-db"', text)
+            self.assertIn('id="view-breakout"', text)
+            self.assertIn('id="breakout-grid"', text)
+            self.assertIn('class="grid dense"', text)
+            self.assertIn("cardHTML", text)
+            self.assertIn("MOM.cards", text)
+            self.assertIn("selectTicker", text)
+            self.assertNotRegex(text, r'<article\b[^>]*fd-bb-card')
             self.assertIn('id="fd-book-delta"', text)
             self.assertIn("baseline set", text)
             self.assertIn('id="fd-hitch-db"', text)

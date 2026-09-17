@@ -734,7 +734,7 @@ def render_html(
   {book_delta.host_html(delta)}
   {gics_note}
   {empty}
-  {breakout.panes_html(ranked, article_html=lambda c: _article_html(c, cache))}
+  {breakout.panes_html(ranked)}
   <div class="grid">
     {"".join(rows)}
   </div>
