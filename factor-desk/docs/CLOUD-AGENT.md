@@ -24,7 +24,7 @@ Skew / IV summary (`attach_skew`, `skew_25d_proxy`) is **additive**. Do not chan
 
 ## DAPI enrich
 
-Nine pointer layers in `dapi_enrich.py` (no news). Refresh stage after options pulse (~50–60%). Query/body `intraday=1` is optional and default off.
+Nine pointer layers in `dapi_enrich.py` (no news). Refresh stage after prices (~50–60%). Full-book options pulse is a separate Options Refresh button. Query/body `intraday=1` is optional and default off.
 
 See [DAPI-ENRICH.md](DAPI-ENRICH.md) for field candidates, chip thresholds, and Desktop copy steps.
 

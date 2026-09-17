@@ -213,6 +213,12 @@ class WriteCombinedSurviveTests(unittest.TestCase):
             self.assertIn(".gchip", text)
             self.assertIn("mom-streak-db", text)
             self.assertNotIn('data-tab="sectors"', text)
+            self.assertIn('<button id="refresh">Refresh</button>', text)
+            self.assertIn('id="options-refresh"', text)
+            self.assertIn("Options Refresh", text)
+            self.assertIn("sidecar-progress", text)
+            self.assertIn("sidecar-refresh-js", text)
+            self.assertIn("data-sidecar-options-refresh", text)
 
     def test_write_dash_entry_embeds_gics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

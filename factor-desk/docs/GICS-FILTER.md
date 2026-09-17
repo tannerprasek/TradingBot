@@ -6,7 +6,7 @@ Light **top filter strip** chips for main GICS sectors present in the book. Tapp
 
 Prefer `gics_sector_name` already on each name in `dapi_enrichment.json`. Never invent a ticker→sector map. A numeric GICS *code* is not a name (`code_only_no_name`).
 
-Refresh (`prices → options pulse → dapi_enrich → rebuild`) does **not** request `GICS_SECTOR_NAME`. A previously resolved name is kept across Refresh via the enrich file and optional `gics_sectors.json` cache.
+Refresh (`prices → dapi_enrich → rebuild`) does **not** request `GICS_SECTOR_NAME`. A previously resolved name is kept across Refresh via the enrich file and optional `gics_sectors.json` cache. Options pulse is a separate Options Refresh.
 
 ## One-shot fill (optional / manual)
 

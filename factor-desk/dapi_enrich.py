@@ -1,8 +1,8 @@
 """Factor Desk DAPI enrichment pack.
 
-Pipeline slot (after prices, after options pulse, before rebuild)::
+Pipeline slot (after prices, before rebuild; options pulse is a separate Options Refresh)::
 
-    prices → options pulse → dapi_enrich → rebuild / write_dash
+    prices → dapi_enrich → rebuild / write_dash
 
 Never invent Bloomberg numbers. A missing or invalid field is ``None`` plus a
 reason string. One field or one name failing must not abort Refresh.

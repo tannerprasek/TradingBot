@@ -171,6 +171,9 @@ class HtmlChipTests(unittest.TestCase):
         html = desk_dash.render_html(cards=[], book=None)
         self.assertIn("gics-filter-strip", html)
         self.assertNotIn("early trend", html.lower())
+        self.assertIn("Options Refresh", html)
+        self.assertIn('id="options-refresh"', html)
+        self.assertIn("sidecar-progress", html)
 
 
 if __name__ == "__main__":

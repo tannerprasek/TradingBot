@@ -37,13 +37,29 @@ LIVE_NAV_MARKERS = (
     "Options",
 )
 
-NAV_HTML = """
+OPTIONS_REFRESH_BTN = (
+    '<button type="button" id="options-refresh" class="nav-btn options-refresh" '
+    'data-sidecar-options-refresh="1">Options Refresh</button>'
+)
+
+PROGRESS_HTML = """
+<div id="sidecar-progress" class="sidecar-progress" hidden aria-live="polite">
+  <span class="sidecar-progress-label" id="sidecar-progress-label">idle</span>
+  <div class="sidecar-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="sidecar-progress-track">
+    <div class="sidecar-progress-bar" id="sidecar-progress-bar"></div>
+  </div>
+</div>
+""".strip()
+
+NAV_HTML = f"""
 <nav class="topnav" aria-label="Factor Desk">
-  <button type="button" id="refresh" class="nav-btn refresh">Refresh</button>
+  <button type="button" id="refresh" class="nav-btn refresh" data-sidecar-refresh="1">Refresh</button>
+  {OPTIONS_REFRESH_BTN}
   <button type="button" class="nav-btn" data-view="mom-up">Momentum Up</button>
   <button type="button" class="nav-btn" data-view="mom-down">Momentum Down</button>
   <button type="button" class="nav-btn" data-view="outliers">Outliers</button>
   <button type="button" class="nav-btn" data-view="options">Options</button>
+  {PROGRESS_HTML}
 </nav>
 """.strip()
 
@@ -55,7 +71,7 @@ NAV_CSS = """
   gap: 6px;
   margin: 0 0 12px;
 }
-.nav-btn, #refresh, .refresh {
+.nav-btn, #refresh, .refresh, #options-refresh, .options-refresh {
   display: inline-block;
   font: 650 11px/1.2 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
   letter-spacing: 0.04em;
@@ -67,6 +83,40 @@ NAV_CSS = """
   cursor: pointer;
 }
 .nav-btn:hover, #refresh:hover { border-color: #93c5fd; color: #fff; }
+#options-refresh, .options-refresh { border-color: #9d174d; color: #f9a8d4; }
+#options-refresh:hover, .options-refresh:hover { border-color: #f9a8d4; color: #fff; }
+.sidecar-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 180px;
+  flex: 1 1 160px;
+  margin-left: 4px;
+}
+.sidecar-progress[hidden] { display: none !important; }
+.sidecar-progress-label {
+  font: 650 10px/1.2 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  color: #93c5fd;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.sidecar-progress.kind-options .sidecar-progress-label { color: #f9a8d4; }
+.sidecar-progress-track {
+  flex: 1;
+  height: 6px;
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 80px;
+}
+.sidecar-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: #3b82f6;
+  transition: width 0.2s linear;
+}
+.sidecar-progress.kind-options .sidecar-progress-bar { background: #ec4899; }
 """
 
 # Same visual language as live-desk .badge / .spike-chip
@@ -230,6 +280,166 @@ def _gics_sector_db_json(
     return gics_filter._gics_sector_db_json(items=cards, cache=cache, book=book)
 
 
+def sidecar_js() -> str:
+    """Bind Options Refresh (and skinny Refresh) to the local sidecar.
+
+    Does **not** attach to live ``#refresh`` unless it has ``data-sidecar-refresh=1``,
+    so Desktop's existing Refresh handler is left alone.
+    """
+    return r"""
+(function () {
+  if (window.__FD_SIDECAR_BOUND__) return;
+  window.__FD_SIDECAR_BOUND__ = true;
+  var ORIGINS = ["http://127.0.0.1:8765", "http://localhost:8765"];
+  var pollTimer = null;
+  var armed = false;
+  var hideTimer = null;
+
+  function origin() { return ORIGINS[0]; }
+
+  function $(id) { return document.getElementById(id); }
+
+  function hostEl() { return $("sidecar-progress"); }
+  function barEl() { return $("sidecar-progress-bar"); }
+  function labEl() { return $("sidecar-progress-label"); }
+  function trackEl() { return $("sidecar-progress-track"); }
+
+  function setLabel(text) {
+    var lab = labEl();
+    if (lab) lab.textContent = text || "";
+  }
+
+  function paint(st) {
+    st = st || {};
+    var host = hostEl();
+    var bar = barEl();
+    var track = trackEl();
+    if (!host) return;
+    var isOpt = st.kind === "options" || !!st.options;
+    var pct = Number(st.pct || 0);
+    if (isNaN(pct)) pct = 0;
+    pct = Math.max(0, Math.min(100, pct));
+    var stage = String(st.stage || "");
+    var label = stage;
+    if (isOpt && stage.toLowerCase().indexOf("options") < 0) {
+      label = stage ? ("options · " + stage) : "options";
+    } else if (!isOpt && !stage) {
+      label = "refresh";
+    }
+    if (st.error) label = (isOpt ? "options · error" : "error") + ": " + st.error;
+    host.classList.toggle("kind-options", !!isOpt);
+    host.hidden = false;
+    if (bar) bar.style.width = pct + "%";
+    if (track) track.setAttribute("aria-valuenow", String(Math.round(pct)));
+    setLabel(label + (st.busy ? "  " + Math.round(pct) + "%" : (stage === "done" ? "  100%" : "")));
+  }
+
+  function post(paths, body) {
+    var payload = JSON.stringify(body || {});
+    var i = 0;
+    function tryOne() {
+      if (i >= paths.length) return Promise.reject(new Error("sidecar offline"));
+      var url = origin() + paths[i++];
+      return fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload
+      }).then(function (r) {
+        if (r.status === 202 || r.ok) return r.json();
+        if (r.status === 404 || r.status === 405) throw new Error("try next");
+        return r.json().then(function (j) {
+          var err = new Error((j && (j.error || j.stage)) || String(r.status));
+          err.status = r.status;
+          throw err;
+        });
+      }).catch(function (err) {
+        if (err && err.status === 409) throw err;
+        return tryOne();
+      });
+    }
+    return tryOne();
+  }
+
+  function stopPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function beginPoll() {
+    stopPoll();
+    function tick() {
+      fetch(origin() + "/status").then(function (r) { return r.json(); }).then(function (st) {
+        paint(st);
+        if (st.busy) return;
+        stopPoll();
+        if (!armed) return;
+        armed = false;
+        if (st.error) {
+          setLabel((st.kind === "options" || st.options ? "options · error: " : "error: ") + st.error);
+          return;
+        }
+        window.setTimeout(function () { window.location.reload(); }, 250);
+      }).catch(function () {
+        setLabel("sidecar offline");
+        stopPoll();
+        armed = false;
+      });
+    }
+    tick();
+    pollTimer = window.setInterval(tick, 400);
+  }
+
+  function startJob(isOptions) {
+    var host = hostEl();
+    if (host) {
+      host.hidden = false;
+      host.classList.toggle("kind-options", !!isOptions);
+    }
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+    armed = true;
+    paint({ busy: true, pct: 0, stage: "queued", kind: isOptions ? "options" : "refresh", options: !!isOptions });
+    var paths = isOptions
+      ? ["/options-refresh", "/api/options_refresh", "/api/options-refresh", "/api/refresh_live", "/refresh"]
+      : ["/refresh", "/api/refresh", "/api/refresh_live"];
+    var body = isOptions ? { options: 1 } : {};
+    post(paths, body).then(function () {
+      beginPoll();
+    }).catch(function (err) {
+      armed = false;
+      if (err && err.status === 409) setLabel(isOptions ? "options · busy" : "busy");
+      else setLabel("sidecar offline");
+    });
+  }
+
+  document.querySelectorAll("[data-sidecar-refresh='1']").forEach(function (btn) {
+    btn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      startJob(false);
+    });
+  });
+  var optBtn = document.getElementById("options-refresh");
+  if (optBtn && !optBtn.getAttribute("data-fd-bound")) {
+    optBtn.setAttribute("data-fd-bound", "1");
+    optBtn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      startJob(true);
+    });
+  }
+})();
+""".strip()
+
+
+_REFRESH_BTN_RE = re.compile(
+    r'(<button\b(?=[^>]*\bid=["\']refresh["\'])[^>]*>.*?</button>)',
+    re.I | re.S,
+)
+
+
+def _has_options_refresh_btn(html_text: str) -> bool:
+    return bool(re.search(r'id=["\']options-refresh["\']', html_text, re.I))
+
+
 def _ensure_nav(html_text: str) -> str:
     if all(marker in html_text for marker in LIVE_NAV_MARKERS):
         return html_text
@@ -239,6 +449,58 @@ def _ensure_nav(html_text: str) -> str:
         html_text = re.sub(r"(<body\b[^>]*>)", r"\1\n" + NAV_HTML + "\n", html_text, count=1, flags=re.I)
         return html_text
     return NAV_HTML + "\n" + html_text
+
+
+def _ensure_options_refresh_ui(html_text: str) -> str:
+    """Always keep Options Refresh beside Refresh. Does not change LIVE_NAV_MARKERS."""
+    if not html_text:
+        return html_text
+    if ".sidecar-progress" not in html_text:
+        block = f'<style id="sidecar-refresh-css">\n{NAV_CSS}\n</style>\n'
+        if "</head>" in html_text:
+            html_text = html_text.replace("</head>", block + "</head>", 1)
+        else:
+            html_text = block + html_text
+    if not _has_options_refresh_btn(html_text):
+        m = _REFRESH_BTN_RE.search(html_text)
+        if m:
+            html_text = html_text[: m.end()] + "\n  " + OPTIONS_REFRESH_BTN + html_text[m.end() :]
+        elif "<nav" in html_text.lower():
+            html_text = re.sub(
+                r"(<nav\b[^>]*>)",
+                r"\1\n  " + OPTIONS_REFRESH_BTN,
+                html_text,
+                count=1,
+                flags=re.I,
+            )
+        elif "<body" in html_text.lower():
+            html_text = re.sub(
+                r"(<body\b[^>]*>)",
+                r"\1\n  " + OPTIONS_REFRESH_BTN,
+                html_text,
+                count=1,
+                flags=re.I,
+            )
+        else:
+            html_text = OPTIONS_REFRESH_BTN + "\n" + html_text
+    if 'id="sidecar-progress"' not in html_text and "id='sidecar-progress'" not in html_text:
+        if _has_options_refresh_btn(html_text):
+            html_text = re.sub(
+                r'(<button\b(?=[^>]*\bid=["\']options-refresh["\'])[^>]*>.*?</button>)',
+                lambda m: m.group(1) + "\n  " + PROGRESS_HTML,
+                html_text,
+                count=1,
+                flags=re.I | re.S,
+            )
+        else:
+            html_text = PROGRESS_HTML + "\n" + html_text
+    if 'id="sidecar-refresh-js"' not in html_text:
+        script = f'<script id="sidecar-refresh-js">\n{sidecar_js()}\n</script>\n'
+        if "</body>" in html_text:
+            html_text = html_text.replace("</body>", script + "</body>", 1)
+        else:
+            html_text = html_text + "\n" + script
+    return html_text
 
 
 def render_html(
@@ -367,7 +629,7 @@ def render_html(
 """
     html_text = gics_filter.ensure_embedded(html_text, db)
     html_text = mom_streak.ensure_embedded(html_text, streak_map)
-    return html_text
+    return _ensure_options_refresh_ui(html_text)
 
 
 def write_combined(
@@ -408,6 +670,7 @@ def write_combined(
         text = render_html(cards, book=book, cache=cache, hist=hist, series_by_ticker=series)
 
     text = _ensure_nav(text)
+    text = _ensure_options_refresh_ui(text)
     mapping = gics_filter.filled_sector_db(cards, cache=cache, book=book)
     if gics_filter.GICS_SECTOR_DB_PLACEHOLDER in text:
         text = text.replace(gics_filter.GICS_SECTOR_DB_PLACEHOLDER, _gics_sector_db_json(book, cards, cache, base))

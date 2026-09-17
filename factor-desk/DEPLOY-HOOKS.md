@@ -29,11 +29,11 @@ elif isinstance(body, dict) and "intraday" in body:
 
 Also: `GET /refresh?intraday=1` and `POST /refresh` `{"intraday": 1}`.
 
-### Call site — after options pulse, inside `run_refresh_live`
+### Call site — inside `run_refresh_live` (prices → enrich → rebuild)
 
-Progress **~50–60%**. After `pull_options_pulse` (full book), **before** `run_v0` / `write_dash` / `desk_dash`.
+Main **Refresh** does **not** run the full-book options pulse. Skip / gate `pull_options_pulse` on that path. Progress **~50–60%** is still `dapi_enrich`, after prices, **before** `run_v0` / `write_dash` / `desk_dash`.
 
-Pass the live Bloomberg session if you already have one (`session=`). Otherwise `dapi_enrich.open_dapi_session()` reuses `dapi_keepalive.get_session` / `ensure_session` / `session`.
+Pass the live Bloomberg session if you already have one (`session=`). Otherwise `dapi_enrich.open_dapi_session()` reuses `dapi_keepalive.get_session` / `ensure_session` / `session`. `options_by_name` may be `None` on main Refresh (skew stays whatever the last Options Refresh wrote).
 
 ```python
 # --- dapi_enrich stage (50–60%) ---
@@ -315,5 +315,62 @@ Cards should keep `data-t` (and `data-ticker`) so both GICS chips and streak tag
 | `docs/MOM-STREAK.md`, `docs/GICS-FILTER.md` | optional, for the desk |
 
 Do **not** copy generated `factorbook.html`, `dapi_enrichment.json`, `gics_sectors.json`, `mom_score_hist.json`. After drop-in, run Refresh once and confirm GICS chips + streak tags are still in the HTML source (`#gics-sector-db` filled, `STRIP_ID` present, `↑`/`↓`/`=5` pills).
+
+---
+
+## 7) Options Refresh button (Desktop, no CoS)
+
+Main **Refresh** = prices + enrich + rebuild. Full-book options pulse is **manual only**.
+
+### `add_server.py` — skip options on Refresh; add Options Refresh routes
+
+In live `run_refresh_live`, do **not** call `pull_options_pulse` unless `options=1`. Smallest paste: treat query/body `options=1` (and `POST /options-refresh`) as pulse + rebuild, not prices/enrich.
+
+```python
+# query/body flag; default OFF
+options = False
+if query and "options" in query:
+    options = dapi_enrich.parse_intraday_flag(query.get("options", [""])[0])
+elif isinstance(body, dict) and "options" in body:
+    options = dapi_enrich.parse_intraday_flag(body.get("options"))
+
+# GET/POST /options-refresh  (also /api/options_refresh)
+# GET/POST /refresh?options=1
+# POST     /api/refresh_live  {"options": 1}
+if options or path in ("/options-refresh", "/options_refresh", "/api/options_refresh", "/api/options-refresh"):
+    # reuse your existing progress / busy lock (label stages with "options · …")
+    set_progress(5, "options start")
+    pull_options_pulse.run_pulse(tickers=tickers or None, progress_cb=...)  # full book
+    # then the same rebuild you already use: run_v0 / write_dash / desk_dash
+    # so Options tab / OPT SPIKE / abnormal scores refresh
+```
+
+Status JSON should include `kind` (`refresh` | `options`) and `options` (bool) so the progress bar can say it is an options run.
+
+### `desk_dash.py` / live `factorbook.html` — button beside Refresh
+
+Do **not** add `"Options Refresh"` to live-nav detection (that would make a patch look like a full replace). Always inject the button next to `#refresh`:
+
+```html
+<button type="button" id="options-refresh" class="nav-btn options-refresh" data-sidecar-options-refresh="1">Options Refresh</button>
+<div id="sidecar-progress" class="sidecar-progress" hidden>
+  <span id="sidecar-progress-label" class="sidecar-progress-label">idle</span>
+  <div class="sidecar-progress-track"><div id="sidecar-progress-bar" class="sidecar-progress-bar"></div></div>
+</div>
+```
+
+`write_combined` already calls `desk_dash._ensure_options_refresh_ui`. If you are not swapping `desk_dash.py`, paste that helper + `sidecar_js()` before `</body>`, and bind **only** `#options-refresh` (leave live `#refresh` alone unless it has `data-sidecar-refresh=1`).
+
+Button talks to `http://127.0.0.1:8765` like Refresh. Restart the sidecar after the paste.
+
+### Desktop checklist
+
+| Copy / paste | Notes |
+| --- | --- |
+| Skip `pull_options_pulse` on main Refresh | prices → enrich → rebuild |
+| `/options-refresh` + `options=1` on `/api/refresh_live` | pulse + rebuild; progress `kind=options` |
+| `#options-refresh` beside Refresh | `desk_dash._ensure_options_refresh_ui` / `sidecar_js` |
+| Restart `:8765` | no CoS; local sidecar only |
+
 
 

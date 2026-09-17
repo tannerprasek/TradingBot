@@ -216,8 +216,8 @@ def strip_js() -> str:
 
   function isChrome(el) {
     if (!el || !el.closest) return true;
-    if (el.closest("#gics-filter-strip, nav, .topnav, .toolbar, #refresh")) return true;
-    if (el.matches && el.matches("button.filter-chip, button.gchip, .nav-btn, #refresh, .refresh")) return true;
+    if (el.closest("#gics-filter-strip, nav, .topnav, .toolbar, #refresh, #options-refresh, #sidecar-progress")) return true;
+    if (el.matches && el.matches("button.filter-chip, button.gchip, .nav-btn, #refresh, .refresh, #options-refresh, .options-refresh")) return true;
     return false;
   }
 

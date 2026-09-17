@@ -5,7 +5,13 @@ On-demand refresh only. No background polling. No credentials in this tree.
 Pipeline:
 
 ```
-prices → options pulse → dapi_enrich (~50–60%) → rebuild / write_dash
+prices → dapi_enrich (~50–60%) → rebuild / write_dash
+```
+
+Manual **Options Refresh** (not on every Refresh):
+
+```
+options pulse (full book) → rebuild / write_dash
 ```
 
 Sidecar `:8765` (`add_server.py`):
@@ -13,9 +19,11 @@ Sidecar `:8765` (`add_server.py`):
 | Endpoint | Role |
 | --- | --- |
 | `GET /health` | liveness |
-| `GET /status` | `{pct, stage, busy, last, intraday}` |
-| `GET /refresh` | start Refresh |
+| `GET /status` | `{pct, stage, busy, last, intraday, options, kind}` |
+| `GET /refresh` | start Refresh (options pulse **off**) |
 | `POST /refresh` | start Refresh (JSON body) |
+| `GET/POST /options-refresh` | start Options Refresh (full-book pulse + rebuild) |
+| `POST /api/refresh_live` `{"options": 1}` | same as Options Refresh |
 | `GET/POST /gics-fill` | optional one-shot GICS sector fill (**not** Refresh) |
 
 Optional flag (default **off**):
@@ -31,6 +39,7 @@ CLI (no server):
 
 ```
 python add_server.py --once --tickers AAPL,MSFT
+python add_server.py --once --options --tickers AAPL,MSFT
 python dapi_enrich.py --dry-run --tickers AAPL,MSFT
 python dapi_enrich.py --gics-once --tickers AAPL,MSFT
 ```
