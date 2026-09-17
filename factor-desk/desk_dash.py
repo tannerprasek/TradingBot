@@ -22,6 +22,7 @@ if str(HERE) not in sys.path:
 import dapi_enrich  # noqa: E402
 import gics_filter  # noqa: E402
 import mom_streak  # noqa: E402
+import chart_marks  # noqa: E402
 
 LOG = logging.getLogger("desk_dash")
 HTML_NAME = "factorbook.html"
@@ -247,6 +248,8 @@ def cards_from_enrichment(book: Mapping[str, Any] | None) -> list[dict[str, Any]
             "enrich_pills": list(rec.get("enrich_pills") or []),
             "gics_sector_name": rec.get("gics_sector_name"),
             "mom_score": rec.get("mom_score"),
+            "tag_triggers": rec.get("tag_triggers") or rec.get("tags"),
+            "px_series": rec.get("px_series") or rec.get("prices") or rec.get("closes"),
         }
         cards.append(card)
     return cards
@@ -570,6 +573,7 @@ def render_html(
         sector = gics_filter.sector_of(card, cache) or ""
         sector_attr = html.escape(sector, quote=True)
         score = card.get("mom_score")
+        spark = chart_marks.render_svg(card)
         rows.append(
             f"""
             <article class="card" data-t="{ticker}" data-ticker="{ticker}" data-gics-sector="{sector_attr}">
@@ -577,6 +581,7 @@ def render_html(
                 <h2>{ticker}</h2>
                 <div class="pills">{pills}</div>
               </header>
+              {spark}
               <dl>
                 <div><dt>si_ratio</dt><dd>{_fmt(card.get("si_ratio"))}</dd></div>
                 <div><dt>vol_regime</dt><dd>{_fmt(card.get("vol_regime"))}</dd></div>
@@ -603,6 +608,7 @@ def render_html(
     sectors = gics_filter.sectors_present(cards, cache)
     db = gics_filter.filled_sector_db(cards, cache=cache, book=book)
     streak_map = mom_streak.streak_db(cards)
+    chart_map = chart_marks.chart_db(cards)
     gics_note = ""
     if rows and not sectors:
         gics_note = (
@@ -649,6 +655,7 @@ def render_html(
     {PILL_CSS}
     {gics_filter.strip_css()}
     {mom_streak.streak_css()}
+    {chart_marks.strip_css()}
   </style>
 </head>
 <body>
@@ -663,17 +670,22 @@ def render_html(
   </div>
   {gics_filter.embed_db(db)}
   {mom_streak.embed_db(streak_map)}
+  {chart_marks.embed_db(chart_map)}
   <script>
   {gics_filter.strip_js()}
   </script>
   <script>
   {mom_streak.strip_js()}
   </script>
+  <script>
+  {chart_marks.overlay_js()}
+  </script>
 </body>
 </html>
 """
     html_text = gics_filter.ensure_embedded(html_text, db)
     html_text = mom_streak.ensure_embedded(html_text, streak_map)
+    html_text = chart_marks.ensure_embedded(html_text, chart_map)
     return _ensure_options_refresh_ui(html_text)
 
 
@@ -721,6 +733,7 @@ def write_combined(
         text = text.replace(gics_filter.GICS_SECTOR_DB_PLACEHOLDER, _gics_sector_db_json(book, cards, cache, base))
     text = gics_filter.ensure_embedded(text, mapping)
     text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards))
+    text = chart_marks.ensure_embedded(text, chart_marks.chart_db(cards))
     dest.write_text(text, encoding="utf-8")
     LOG.info("wrote %s (%s bytes)", dest, dest.stat().st_size)
     return dest

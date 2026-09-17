@@ -223,6 +223,33 @@ def streak_vs_threshold(
     return n, side
 
 
+def streak_span(
+    series: Sequence[tuple[date, float]] | None,
+    threshold: float = THRESHOLD,
+) -> dict[str, Any] | None:
+    """Begin/end of the **current** Feature A streak (latest print inclusive).
+
+    ``open`` is True while the latest print is still on that side. A score of
+    exactly 5 is not a streak — returns None (the card still gets ``=5``).
+    """
+    rows = list(series or [])
+    if not rows:
+        return None
+    n, side = streak_from_dated(rows, threshold)
+    if side in (None, "at") or n <= 0:
+        return None
+    start_d = rows[-n][0]
+    end_d = rows[-1][0]
+    return {
+        "start": start_d.isoformat(),
+        "end": end_d.isoformat(),
+        "open": True,
+        "side": side,
+        "n": n,
+        "label": tag_label(n, side, threshold),
+    }
+
+
 def streak_from_dated(
     series: Sequence[tuple[date, float]] | None,
     threshold: float = THRESHOLD,
@@ -607,6 +634,7 @@ def compute_for_ticker(
     dates = [d for d, _ in series]
     streak, side = streak_vs_threshold(scores, threshold, dates=dates)
     label = tag_label(streak, side, threshold)
+    span = streak_span(series, threshold)
     return {
         "ticker": key,
         "mom_score": score,
@@ -615,8 +643,12 @@ def compute_for_ticker(
         "mom_streak_side": side,
         "mom_streak_label": label,
         "mom_streak_threshold": threshold,
+        "mom_streak_start": None if not span else span.get("start"),
+        "mom_streak_end": None if not span else span.get("end"),
+        "mom_streak_open": None if not span else span.get("open"),
         "asof": day.isoformat() if isinstance(day, date) else str(day),
         "pill": pill_for(streak, side, score, threshold),
+        "series": [{"date": d.isoformat(), "score": s} for d, s in series],
     }
 
 
@@ -636,6 +668,11 @@ def attach_card(
     card["mom_streak_side"] = rec["mom_streak_side"]
     card["mom_streak_label"] = rec["mom_streak_label"]
     card["mom_streak_threshold"] = rec["mom_streak_threshold"]
+    card["mom_streak_start"] = rec.get("mom_streak_start")
+    card["mom_streak_end"] = rec.get("mom_streak_end")
+    card["mom_streak_open"] = rec.get("mom_streak_open")
+    if rec.get("series"):
+        card["mom_score_series"] = rec["series"]
     pill = rec.get("pill")
     pills = card.get("enrich_pills")
     if not isinstance(pills, list):
@@ -673,6 +710,9 @@ def streak_db(cards: Iterable[Mapping[str, Any]] | None) -> dict[str, dict[str, 
             "streak": card.get("mom_streak") or 0,
             "side": card.get("mom_streak_side"),
             "score": card.get("mom_score"),
+            "start": card.get("mom_streak_start"),
+            "end": card.get("mom_streak_end"),
+            "open": card.get("mom_streak_open"),
             "title": tag_title(
                 int(card.get("mom_streak") or 0),
                 card.get("mom_streak_side"),

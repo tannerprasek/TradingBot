@@ -38,7 +38,7 @@ Home filter-strip chips (G1–G12 language). Read `gics_sector_name` from enrich
 
 ## Momentum streak tag
 
-Home UP/DOWN cards: consecutive trading-day streak of the card momentum rank vs **5**. Fields `mom_score` / `momentum_score` first; else on-disk hist / prices 13-window count (0–13). Exactly 5 → streak 0, tag `=5`. See [MOM-STREAK.md](MOM-STREAK.md).
+Home UP/DOWN cards: consecutive trading-day streak of the card momentum rank vs **5**. Fields `mom_score` / `momentum_score` first; else on-disk hist / prices 13-window count (0–13). Exactly 5 → streak 0, tag `=5`. Chart overlay marks streak start and open end without burying the price series; existing tag-trigger labels are clustered. See [MOM-STREAK.md](MOM-STREAK.md).
 
 ## Secrets and dumps
 

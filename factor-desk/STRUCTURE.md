@@ -8,7 +8,8 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | --- | --- |
 | `dapi_enrich.py` | DAPI enrichment pack (9 layers, chips, JSON) |
 | `gics_filter.py` | GICS sector chip filter (pure logic + strip CSS/JS; `ensure_embedded`) |
-| `mom_streak.py` | Home momentum rank streak vs 5 (tags + hist) |
+| `mom_streak.py` | Home momentum rank streak vs 5 (tags + hist + span) |
+| `chart_marks.py` | Chart tag-trigger polish + streak begin/end overlay |
 | `add_server.py` | Sidecar HTTP server on `:8765` (Refresh + `intraday=1`) |
 | `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills + `write_combined` |
 | `write_dash.py` | Write generated `factorbook.html` via `write_combined` |

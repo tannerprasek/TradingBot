@@ -372,5 +372,25 @@ Button talks to `http://127.0.0.1:8765` like Refresh. Restart the sidecar after 
 | `#options-refresh` beside Refresh | `desk_dash._ensure_options_refresh_ui` / `sidecar_js` |
 | Restart `:8765` | no CoS; local sidecar only |
 
+---
+
+## 8) Chart tag-trigger polish + streak bounds
+
+Copy `chart_marks.py` next to live `desk_dash.py`. End of live `write_combined`:
+
+```python
+import chart_marks
+
+html = gics_filter.ensure_embedded(html, db)
+html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
+html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
+# _ensure_options_refresh_ui(html)  # keep Options Refresh on Refresh rewrites
+```
+
+Overlay JS polishes existing `.tag-label` / `[data-tag-trigger]` / `.chart-anno` captions (cluster + collapse) and draws streak start/end diamonds from `#fd-chart-db`. It does not replace the live price series or change score v2.
+
+Also copy `mom_streak.py` (now has `streak_span` / `mom_streak_start` / `mom_streak_end`).
+
+
 
 

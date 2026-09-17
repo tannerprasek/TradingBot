@@ -29,6 +29,7 @@ factor-desk/
   dapi_enrich.py         # DAPI enrichment pack (9 layers, no news)
   gics_filter.py         # GICS sector chips (filter strip, not a Sectors tab)
   mom_streak.py          # home momentum rank streak vs 5
+  chart_marks.py         # chart tag-trigger polish + streak begin/end
   add_server.py          # sidecar HTTP on :8765 — Refresh + intraday=1
   desk_dash.py           # dashboard assembly + write_combined
   write_dash.py          # write factorbook.html via write_combined

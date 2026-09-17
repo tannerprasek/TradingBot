@@ -31,12 +31,23 @@ Threshold is literal **5**.
 
 A day at 5, or a missing print, breaks an above/below run.
 
+## Chart marks
+
+Home-card charts keep **tag-trigger** marks (already on the live desk) and add **streak bounds**.
+
+- Tag triggers: amber triangles along the **top** of the plot. Labels within ~12px collapse to one caption (`G4 · EVT`) so they do not stack over the price line.
+- Streak begin / end: teal (above) or rose (below) **diamonds on the series**, dashed stem, tiny `s` / `now` (or `e`) captions along the **bottom** edge — a different glyph/color than tag triangles. Open (still-running) end is a **hollow** diamond; start and closed end are filled.
+- If the run is still live, the end mark is the latest print (`open`). A 1-day run is a **single** diamond (start = end).
+- `=5` is not a streak — no bound marks (the card pill still shows `=5`).
+
+`desk_dash.write_combined` always re-embeds `#fd-chart-db` + overlay JS (`chart_marks.ensure_embedded`) **and** `_ensure_options_refresh_ui`, so a Refresh rewrite cannot drop the marks or the Options Refresh button. See [chart_marks.py](../chart_marks.py).
+
 ## Rebuild path
 
 `desk_dash.write_combined` / `write_dash.write` (Refresh rebuild) always:
 
 1. Resolves today’s score + history
-2. Attaches `mom_score`, `mom_streak`, `mom_streak_side`, `mom_streak_label` and a pill on the card
+2. Attaches `mom_score`, `mom_streak`, `mom_streak_side`, `mom_streak_label`, `mom_streak_start` / `_end` / `_open`, and a pill on the card
 3. Embeds `#mom-streak-db` JSON + JS so live cards with `data-t` / `data-ticker` still get the tag after an HTML write
 
 `mom_score_hist.json` is gitignored (Desktop local).
