@@ -23,6 +23,9 @@ import dapi_enrich  # noqa: E402
 import gics_filter  # noqa: E402
 import mom_streak  # noqa: E402
 import chart_marks  # noqa: E402
+import breakout  # noqa: E402
+import book_delta  # noqa: E402
+import desk_hitch  # noqa: E402
 
 LOG = logging.getLogger("desk_dash")
 HTML_NAME = "factorbook.html"
@@ -59,6 +62,8 @@ NAV_HTML = f"""
   {PROGRESS_HTML}
   <button type="button" class="nav-btn" data-view="mom-up">Momentum Up</button>
   <button type="button" class="nav-btn" data-view="mom-down">Momentum Down</button>
+  <button type="button" class="btn nav-btn" id="fd-nav-breakout" data-view="breakout" data-fd-breakout="1">Breakout</button>
+  <button type="button" class="btn nav-btn" id="fd-nav-breakdown" data-view="breakdown" data-fd-breakdown="1">Breakdown</button>
   <button type="button" class="nav-btn" data-view="outliers">Outliers</button>
   <button type="button" class="nav-btn" data-view="options">Options</button>
 </nav>
@@ -151,6 +156,7 @@ PILL_CSS = """
 .badge.mom-streak-up, .spike-chip.mom-streak-up { color: #6ee7b7; border-color: #34d399; }
 .badge.mom-streak-down, .spike-chip.mom-streak-down { color: #fda4af; border-color: #fb7185; }
 .badge.mom-streak-at, .spike-chip.mom-streak-at { color: #fde68a; border-color: #a3a3a3; }
+.badge.desk-hitch, .spike-chip.desk-hitch { color: #c4b5fd; border-color: #8b5cf6; }
 """
 
 
@@ -195,30 +201,63 @@ def attach_all(
     cache: Mapping[str, Any] | None = None,
     hist: Mapping[str, Any] | None = None,
     series_by_ticker: Mapping[str, list] | None = None,
+    hitch_index: Mapping[str, Any] | None = None,
     *,
     root: Path | None = None,
 ) -> list[MutableMapping[str, Any]]:
-    """Attach enrich + mom streak. Missing ``hist`` rebuilds ``mom_score_hist.json``."""
+    """Attach enrich + mom streak + hitch. Missing ``hist`` rebuilds ``mom_score_hist.json``."""
     cards_list = list(cards)
     base = Path(root) if root is not None else HERE
     if hist is None:
         hist = mom_streak.rebuild_hist_for_cards(cards_list, root=base, write=True)
         if series_by_ticker is None:
             series_by_ticker, _ = mom_streak.discover_score_series(base, hist=hist)
+    if hitch_index is None:
+        hitch_index = desk_hitch.load_index(root=base)
     out: list[MutableMapping[str, Any]] = []
     for card in cards_list:
         ticker = mom_streak.card_ticker(card)
         rec = dapi_enrich.lookup_name(book, ticker) if book else None
-        out.append(
-            attach_enrichment(
-                card,
-                rec,
-                cache=cache,
-                hist=hist,
-                series_by_ticker=series_by_ticker,
-            )
+        attached = attach_enrichment(
+            card,
+            rec,
+            cache=cache,
+            hist=hist,
+            series_by_ticker=series_by_ticker,
         )
+        desk_hitch.attach_card(attached, hitch_index)
+        out.append(attached)
     return out
+
+
+def _article_html(card: Mapping[str, Any], cache: Mapping[str, Any] | None = None) -> str:
+    ticker = html.escape(str(mom_streak.card_ticker(card) or card.get("ticker") or card.get("name") or ""))
+    pills = pills_html(card.get("enrich_pills"))
+    sector = gics_filter.sector_of(card, cache) or ""
+    sector_attr = html.escape(sector, quote=True)
+    score = card.get("mom_score")
+    if score is None:
+        score, _src = mom_streak.resolve_card_score(card)
+    spark = chart_marks.render_svg(card)
+    return f"""
+            <article class="card" data-t="{ticker}" data-ticker="{ticker}" data-gics-sector="{sector_attr}">
+              <header>
+                <h2>{ticker}</h2>
+                <div class="pills">{pills}</div>
+              </header>
+              {spark}
+              <dl>
+                <div><dt>si_ratio</dt><dd>{_fmt(card.get("si_ratio"))}</dd></div>
+                <div><dt>vol_regime</dt><dd>{_fmt(card.get("vol_regime"))}</dd></div>
+                <div><dt>liq</dt><dd>{_fmt(card.get("liq"))}</dd></div>
+                <div><dt>inst_pct</dt><dd>{_fmt(card.get("inst_pct"))}</dd></div>
+                <div><dt>event_days</dt><dd>{_fmt(card.get("event_days"), 0)}</dd></div>
+                <div><dt>beta</dt><dd>{_fmt(card.get("beta"))}</dd></div>
+                <div><dt>credit</dt><dd>{_fmt(card.get("credit"))}</dd></div>
+                <div><dt>mom_score</dt><dd>{_fmt(score, 0 if isinstance(score, int) else 2)}</dd></div>
+              </dl>
+            </article>
+            """
 
 
 def pills_html(pills: Any) -> str:
@@ -563,6 +602,32 @@ def _ensure_options_refresh_ui(html_text: str) -> str:
     return html_text
 
 
+def _pack_views(
+    cards: list[MutableMapping[str, Any]],
+    *,
+    book: Mapping[str, Any] | None,
+    hist: Mapping[str, Any] | None,
+    root: Path | None,
+    ranked: Mapping[str, Any] | None = None,
+    delta: Mapping[str, Any] | None = None,
+    hitch_index: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Rank breakout/breakdown, diff the book snapshot, index hitch pills."""
+    base = Path(root) if root is not None else HERE
+    if hitch_index is None:
+        hitch_index = desk_hitch.load_index(root=base)
+        desk_hitch.attach_all(cards, hitch_index)
+    if ranked is None:
+        ranked = breakout.rank_book(cards, hist=hist)
+    if delta is None:
+        prior = book_delta.load_snapshot(root=base)
+        snap = book_delta.snapshot_from_cards(
+            cards, asof=str((hist or {}).get("asof") or (book or {}).get("asof") or "")
+        )
+        delta = book_delta.diff_snapshots(prior, snap)
+    return dict(ranked), dict(delta), dict(hitch_index or {})
+
+
 def render_html(
     cards: list[Mapping[str, Any]] | None = None,
     *,
@@ -571,44 +636,29 @@ def render_html(
     hist: Mapping[str, Any] | None = None,
     series_by_ticker: Mapping[str, list] | None = None,
     title: str = "Factor Desk",
+    root: Path | None = None,
+    ranked: Mapping[str, Any] | None = None,
+    delta: Mapping[str, Any] | None = None,
+    hitch_index: Mapping[str, Any] | None = None,
 ) -> str:
     book = book if book is not None else load_enrichment()
     if cache is None:
         cache = dapi_enrich.load_gics_cache()
     if cards is None:
         cards = cards_from_enrichment(book)
-    cards = attach_all(list(cards), book, cache=cache, hist=hist, series_by_ticker=series_by_ticker)
-    rows: list[str] = []
-    for card in cards:
-        ticker = html.escape(str(mom_streak.card_ticker(card) or card.get("ticker") or card.get("name") or ""))
-        pills = pills_html(card.get("enrich_pills"))
-        sector = gics_filter.sector_of(card, cache) or ""
-        sector_attr = html.escape(sector, quote=True)
-        score = card.get("mom_score")
-        if score is None:
-            score, _src = mom_streak.resolve_card_score(card)
-        spark = chart_marks.render_svg(card)
-        rows.append(
-            f"""
-            <article class="card" data-t="{ticker}" data-ticker="{ticker}" data-gics-sector="{sector_attr}">
-              <header>
-                <h2>{ticker}</h2>
-                <div class="pills">{pills}</div>
-              </header>
-              {spark}
-              <dl>
-                <div><dt>si_ratio</dt><dd>{_fmt(card.get("si_ratio"))}</dd></div>
-                <div><dt>vol_regime</dt><dd>{_fmt(card.get("vol_regime"))}</dd></div>
-                <div><dt>liq</dt><dd>{_fmt(card.get("liq"))}</dd></div>
-                <div><dt>inst_pct</dt><dd>{_fmt(card.get("inst_pct"))}</dd></div>
-                <div><dt>event_days</dt><dd>{_fmt(card.get("event_days"), 0)}</dd></div>
-                <div><dt>beta</dt><dd>{_fmt(card.get("beta"))}</dd></div>
-                <div><dt>credit</dt><dd>{_fmt(card.get("credit"))}</dd></div>
-                <div><dt>mom_score</dt><dd>{_fmt(score, 0 if isinstance(score, int) else 2)}</dd></div>
-              </dl>
-            </article>
-            """
-        )
+    cards = attach_all(
+        list(cards),
+        book,
+        cache=cache,
+        hist=hist,
+        series_by_ticker=series_by_ticker,
+        hitch_index=hitch_index,
+        root=root,
+    )
+    ranked, delta, hitch_index = _pack_views(
+        cards, book=book, hist=hist, root=root, ranked=ranked, delta=delta, hitch_index=hitch_index
+    )
+    rows: list[str] = [_article_html(card, cache) for card in cards]
     empty = ""
     if not rows:
         empty = (
@@ -623,6 +673,7 @@ def render_html(
     db = gics_filter.filled_sector_db(cards, cache=cache, book=book)
     streak_map = mom_streak.streak_db(cards, hist=hist)
     chart_map = chart_marks.chart_db(cards)
+    hitch_map = desk_hitch.hitch_db(cards, hitch_index)
     gics_note = ""
     if rows and not sectors:
         gics_note = (
@@ -670,21 +721,29 @@ def render_html(
     {gics_filter.strip_css()}
     {mom_streak.streak_css()}
     {chart_marks.strip_css()}
+    {breakout.strip_css()}
+    {book_delta.strip_css()}
+    {desk_hitch.strip_css()}
   </style>
 </head>
 <body>
   {NAV_HTML}
   <h1>{html.escape(title)}</h1>
-  <p class="meta">asof {asof or "—"} · Refresh / Momentum Up / Down · GICS chips + mom streak vs 5 · intraday={"on" if intra else "off"}</p>
+  <p class="meta">asof {asof or "—"} · Refresh / Momentum Up / Down / Breakout / Breakdown · GICS chips + mom streak vs 5 · intraday={"on" if intra else "off"}</p>
   {gics_filter.render_strip(sectors)}
+  {book_delta.host_html(delta)}
   {gics_note}
   {empty}
+  {breakout.panes_html(ranked)}
   <div class="grid">
     {"".join(rows)}
   </div>
   {gics_filter.embed_db(db)}
   {mom_streak.embed_db(streak_map)}
   {chart_marks.embed_db(chart_map)}
+  {breakout.embed_db(ranked)}
+  {book_delta.embed_db(delta)}
+  {desk_hitch.embed_db(hitch_map)}
   <script>
   {gics_filter.strip_js()}
   </script>
@@ -700,6 +759,9 @@ def render_html(
     html_text = gics_filter.ensure_embedded(html_text, db)
     html_text = mom_streak.ensure_embedded(html_text, streak_map)
     html_text = chart_marks.ensure_embedded(html_text, chart_map)
+    html_text = breakout.ensure_embedded(html_text, ranked)
+    html_text = book_delta.ensure_embedded(html_text, delta)
+    html_text = desk_hitch.ensure_embedded(html_text, hitch_map)
     return _ensure_options_refresh_ui(html_text)
 
 
@@ -726,7 +788,14 @@ def write_combined(
     cards = [dict(c) for c in cards]
     hist = mom_streak.rebuild_hist_for_cards(cards, root=base, write=True)
     series, _src = mom_streak.discover_score_series(base, hist=hist)
-    cards = attach_all(cards, book, cache=cache, hist=hist, series_by_ticker=series, root=base)
+    hitch_index = desk_hitch.load_index(root=base)
+    cards = attach_all(cards, book, cache=cache, hist=hist, series_by_ticker=series, hitch_index=hitch_index, root=base)
+    ranked = breakout.rank_book(cards, hist=hist)
+    snap = book_delta.snapshot_from_cards(
+        cards, asof=str((hist or {}).get("asof") or (book or {}).get("asof") or "")
+    )
+    delta = book_delta.diff_snapshots(book_delta.load_snapshot(root=base), snap)
+    hitch_map = desk_hitch.hitch_db(cards, hitch_index)
 
     existing = ""
     if html is not None:
@@ -738,7 +807,17 @@ def write_combined(
         text = existing
         LOG.info("write_combined: patching live desk HTML (%s bytes)", len(existing.encode("utf-8")))
     else:
-        text = render_html(cards, book=book, cache=cache, hist=hist, series_by_ticker=series)
+        text = render_html(
+            cards,
+            book=book,
+            cache=cache,
+            hist=hist,
+            series_by_ticker=series,
+            root=base,
+            ranked=ranked,
+            delta=delta,
+            hitch_index=hitch_index,
+        )
 
     text = _ensure_nav(text)
     text = _ensure_options_refresh_ui(text)
@@ -748,7 +827,14 @@ def write_combined(
     text = gics_filter.ensure_embedded(text, mapping)
     text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards, hist=hist))
     text = chart_marks.ensure_embedded(text, chart_marks.chart_db(cards))
+    text = breakout.ensure_embedded(text, ranked)
+    text = book_delta.ensure_embedded(text, delta)
+    text = desk_hitch.ensure_embedded(text, hitch_map)
     dest.write_text(text, encoding="utf-8")
+    try:
+        book_delta.write_snapshot(snap, root=base)
+    except OSError:
+        LOG.warning("could not persist %s", book_delta.SNAPSHOT_FILENAME)
     LOG.info("wrote %s (%s bytes)", dest, dest.stat().st_size)
     return dest
 

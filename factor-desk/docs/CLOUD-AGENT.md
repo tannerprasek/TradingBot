@@ -36,6 +36,10 @@ Home filter-strip chips (G1–G12 language). Read `gics_sector_name` from enrich
 
 `write_dash` / `desk_dash.write_combined` must call `gics_filter.ensure_embedded` so `#gics-sector-db` + strip JS (`STRIP_ID`) survive every HTML write. Live ~2.7MB factorbook with Refresh / Momentum Up / Down / Outliers / Options is **patched**, never replaced by the skinny grid. See [GICS-FILTER.md](GICS-FILTER.md).
 
+## Breakout / Breakdown + book delta + hitch
+
+Mid-score climbers / crackers as home tabs (not maxed MOM). `breakout.ensure_embedded` + `book_delta.ensure_embedded` + `desk_hitch.ensure_embedded` on every HTML write. See [BREAKOUT-BREAKDOWN.md](BREAKOUT-BREAKDOWN.md). Do **not** reintroduce a Sectors tab.
+
 ## Momentum streak tag
 
 Home UP/DOWN cards: consecutive trading-day streak of the card momentum rank vs **5**. Fields `mom_score` / `momentum_score` first; else on-disk hist / prices 13-window count (0–13). Exactly 5 → streak 0, tag `=5`. Chart overlay marks streak start and open end without burying the price series; existing tag-trigger labels are clustered. See [MOM-STREAK.md](MOM-STREAK.md).

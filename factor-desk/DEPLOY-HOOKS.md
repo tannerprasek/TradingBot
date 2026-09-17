@@ -400,6 +400,123 @@ Overlay JS polishes existing `.tag-label` / `[data-tag-trigger]` / `.chart-anno`
 
 Also copy `mom_streak.py` (now has `streak_span` / `mom_streak_start` / `mom_streak_end`).
 
+---
 
+## 9) Breakout / Breakdown tabs + book-delta strip + Desk Analyst hitch
+
+Copy `breakout.py`, `book_delta.py`, `desk_hitch.py` next to live `desk_dash.py`. **Do not** reintroduce a Sectors tab. **Do not** add a DAPI stage. **Recopy `breakout.py`** after this hot-fix; **do not wholesale replace** live `desk_dash.py` (paste the `write_combined` tail below if that hook is not already there).
+
+Live FLAGS/WATCH/MOM cards use **`t`** and **`score`**. Stamp `list` (`FLAGS` / `WATCH` / `OUTLIERS` / `MOM`) on each card dict when you already know the bucket — boosts and the delta strip read that field (plus `flags` / `watch` / `outlier` booleans and hop/leader / OPT SPIKE already on the card).
+
+### End of live `write_combined` / `write_dash.write`
+
+After the existing GICS / streak / chart `ensure_embedded` tail:
+
+```python
+import breakout
+import book_delta
+import desk_hitch
+
+# cards already attached (enrich + mom_streak). Hitch is optional / no-op if ideas dir missing.
+hitch_index = desk_hitch.load_index(root=PATHS["fb_root"])
+desk_hitch.attach_all(cards, hitch_index)
+ranked = breakout.rank_book(cards, hist=hist)
+snap = book_delta.snapshot_from_cards(cards, asof=str((hist or {}).get("asof") or ""))
+delta = book_delta.diff_snapshots(book_delta.load_snapshot(root=PATHS["fb_root"]), snap)
+
+html = gics_filter.ensure_embedded(html, db)
+html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
+html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
+html = breakout.ensure_embedded(html, ranked)       # Breakout/Breakdown nav + view shells + #fd-breakout-db
+html = book_delta.ensure_embedded(html, delta)      # #fd-book-delta strip
+html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
+# dest.write_text(html)
+book_delta.write_snapshot(snap, root=PATHS["fb_root"])  # gitignored desk_snapshot.json
+```
+
+**Never** call `breakout.ensure_embedded(html)` / `ensure_embedded(html, None)` on the live dash — that leaves `#fd-breakout-db` alone in this pack, but Desktop must still pass `ranked` so the JSON stays filled.
+
+Breakout/Breakdown must render **dense MOM cards** via live `cardHTML` (same chrome as Momentum Up), **not** skinny `article.fd-bb-card` stubs. `ensure_embedded` emits:
+
+- `#view-breakout` / `#view-breakdown` with `.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`
+- empty hidden `#fd-bb-breakout` / `#fd-bb-breakdown` so old CSS cannot paint stubs
+- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, resolves each ticker against `window.MOM.cards`, renders `cardHTML(card)`, wires click → `selectTicker`, and appends why/streak as `enrich_pills` (`fd-bb` / `mom-streak`)
+
+### Live `setView` / `hideAllPanes` / `paintView` (required on Desktop)
+
+Live factorbook `setView` only knows `home|mom-up|mom-down|outliers|options|sectors`. A Breakout click falls through → coerced to `home` → FLAGS/WATCH stay up. `hideAllPanes` that omits `#view-breakout` leaks the dense grid onto other tabs. `breakout.ensure_embedded` now:
+
+- Appends `|breakout|breakdown` to that allowlist string in **`setView` and `paintView`** if present
+- Injects an early-return at the top of `function setView(v)` that calls `window.__FD_BB_SHOW__(v)`, then `syncNav()`, and **does not** `paint()` and **does not** toggle legacy `#fd-bb-*` panes
+- Appends `view-breakout` / `view-breakdown` to `hideAllPanes` id arrays / `#view-mom-*` selector lists, and injects an extra hide of those two ids
+- Capture-phase click handler `preventDefault` + `stopPropagation` + `stopImmediatePropagation` so the native `#topnav` listener cannot reset to home
+- `__FD_BB_SHOW__` hides `#home`, `#view-mom-up`, `#view-mom-down`, `#view-outliers`, `#view-options`, `#view-sectors`, `#search-pane` **and** shows the matching `#view-breakout` / `#view-breakdown` pane (class `hide`)
+
+If you are not swapping `breakout.py` yet, paste into live `setView` / `hideAllPanes` / `paintView`:
+
+```javascript
+function setView(v) {
+  if (v === "breakout" || v === "breakdown") {
+    if (window.__FD_BB_SHOW__) window.__FD_BB_SHOW__(v);
+    if (typeof syncNav === "function") syncNav();
+    return; // do not paint(); do not toggle #fd-bb-* 
+  }
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors|breakout|breakdown)$/.test(v)) v = "home";
+  // ... existing hide/show + paint()
+}
+
+function hideAllPanes() {
+  ["view-breakout","view-breakdown"].forEach(function(id){
+    var el = document.getElementById(id); if (el) el.classList.add("hide");
+  });
+  // ... existing ids must include view-breakout / view-breakdown
+}
+
+function paintView(v) {
+  if (v === "breakout" || v === "breakdown") {
+    if (window.__FD_BB_SHOW__) window.__FD_BB_SHOW__(v);
+    return;
+  }
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors|breakout|breakdown)$/.test(v)) v = "home";
+  // ...
+}
+```
+
+Injected nav buttons use live chrome: `class="btn nav-btn"` (not bare `nav-btn`).
+
+Cloud `desk_dash.write_combined` already does this. If you are **not** swapping live `desk_dash.py`, paste the tail. `breakout.ensure_embedded` injects **Breakout** / **Breakdown** buttons after Momentum Down even when the live nav already exists.
+
+Dense cards come from live `cardHTML` + `window.MOM.cards` — do not clone skinny stub articles. Formula / thresholds: `docs/BREAKOUT-BREAKDOWN.md` and the constants block in `breakout.py`.
+
+### Desk Analyst hitch — ideas path
+
+Pills (`DA·A` / `DA·B` / `DA·C` / `DA`) appear when a recent `YYYY-MM-DD-*.md` note exists for that ticker. Missing folder = silent no-op.
+
+```python
+# env wins; otherwise sibling ideas/ next to factorbook
+# Desktop:
+#   set FACTOR_DESK_IDEAS_DIR=C:\Users\MLP\Desktop\jr-analysts\ideas
+# or copy/sync that folder to C:\Users\MLP\Desktop\factorbook\ideas
+```
+
+`desk_hitch.py` also looks at `fd_root/ideas`, `../ideas`, `../jr-analysts/ideas`, and `%USERPROFILE%\Desktop\jr-analysts\ideas`. Parse is conservative (frontmatter `ticker` / Action line / `$TICKER` / a single `**TICKER**`). Title = idea date + first thesis line + file path (`file://` when no URL).
+
+### Desktop checklist
+
+| Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
+| --- | --- |
+| `breakout.py` | **recopy** — dense `cardHTML` grids in `#view-breakout` / `#view-breakdown`; do not keep stub `fd-bb-card` panes |
+| `book_delta.py` | new — since-last-Refresh strip |
+| `desk_hitch.py` | new — DA hitch pills |
+| `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
+| `docs/BREAKOUT-BREAKDOWN.md` | optional, for the desk |
+| gitignore `desk_snapshot.json` | local, like `mom_score_hist.json` |
+
+Do **not** copy generated `factorbook.html`, `desk_snapshot.json`, `mom_score_hist.json`, or the ideas markdown. After drop-in, Refresh once and confirm Breakout / Breakdown sit beside Momentum Down, clicking Breakout shows the same dense card grid as Momentum Up (full card chrome, why/streak pills, few names), `#fd-breakout-db` is filled, `#fd-book-delta` shows `baseline set` on the first write, hitch pills appear only when `FACTOR_DESK_IDEAS_DIR` (or `ideas/`) has dated notes, and no skinny `#fd-bb-*` list bleeds onto other tabs.
+
+Suggested Desktop sync paths:
+
+- Code: `factor-desk/*.py` → `C:\Users\MLP\Desktop\factorbook\`
+- Ideas: `C:\Users\MLP\Desktop\jr-analysts\ideas\` → env `FACTOR_DESK_IDEAS_DIR` or a synced copy at `C:\Users\MLP\Desktop\factorbook\ideas\`
 
 
