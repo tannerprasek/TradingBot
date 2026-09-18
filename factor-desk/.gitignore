@@ -16,6 +16,8 @@ desk_snapshot.json
 desk_snapshot.json.tmp
 paper_book.json
 paper_book.json.tmp
+residual_panel.json
+residual_panel.json.tmp
 clean/*.csv
 .dapi*
 *.png

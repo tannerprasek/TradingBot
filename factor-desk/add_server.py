@@ -249,6 +249,11 @@ def run_rebuild_stage(progress_cb: Callable[[float, str], None], root: Path | No
     _, err_v0 = _try_call("run_v0", ("run", "main"), root=root)
     if err_v0 and not err_v0.startswith("run_v0_missing"):
         LOG.warning("run_v0: %s", err_v0)
+    # Experimental residual panel (S-score). Non-fatal. Not a DAPI stage.
+    progress_cb(0.72, "experimental residual panel")
+    _, err_ss = _try_call("s_score", ("materialize_panel",), root=root, write=True)
+    if err_ss and not str(err_ss).startswith("s_score_missing"):
+        LOG.warning("s_score panel: %s — continue", err_ss)
     progress_cb(0.80, "write_dash")
     _, err_wd = _try_call("write_dash", ("write", "main"), root=root)
     if err_wd:

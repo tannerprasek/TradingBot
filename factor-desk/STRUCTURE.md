@@ -13,6 +13,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `book_delta.py` | Since-last-Refresh chip strip (`desk_snapshot.json`) |
 | `desk_hitch.py` | Desk Analyst hitch pills from `ideas/` notes |
 | `paper_trade.py` | Paper Buy/Sell on dense `cardHTML` cards + Home paper-book strip (localStorage) |
+| `s_score.py` | Experimental residual S-score tab only (Avellaneda–Lee; not on MOM/FLAGS/home) |
 | `chart_marks.py` | Chart tag-trigger polish + streak begin/end overlay |
 | `add_server.py` | Sidecar HTTP server on `:8765` (Refresh + `intraday=1`) |
 | `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills + `write_combined` |
@@ -36,6 +37,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `docs/MOM-STREAK.md` | Momentum score vs 5 streak tag |
 | `docs/BREAKOUT-BREAKDOWN.md` | Breakout / Breakdown formula + thresholds |
 | `docs/PAPER-TRADE.md` | Paper Buy/Sell rules + P&L sign |
+| `docs/S-SCORE.md` | Experimental residual S-score (Avellaneda–Lee) |
 | `docs/OPTIONS-PULSE.md` | Options pulse notes |
 | `docs/DAILY-PIPE.md` | Daily pipeline notes |
 | `README-pull.md` | Pull / refresh notes |
@@ -51,4 +53,4 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 
 ## Generated / local (gitignored)
 
-`factorbook.html`, `factorbook_desktop_latest.html`, `*.csv`, `*.xlsx`, `*.png`, `digest_db.json`, `options_abnormal.json`, `options_pulse*.json`, `dapi_enrichment.json`, `gics_sectors.json`, `mom_score_hist.json`, `desk_snapshot.json`, `paper_book.json`, `clean/*.csv`, `.dapi*`, `.venv/`.
+`factorbook.html`, `factorbook_desktop_latest.html`, `*.csv`, `*.xlsx`, `*.png`, `digest_db.json`, `options_abnormal.json`, `options_pulse*.json`, `dapi_enrichment.json`, `gics_sectors.json`, `mom_score_hist.json`, `desk_snapshot.json`, `paper_book.json`, `residual_panel.json`, `clean/*.csv`, `.dapi*`, `.venv/`.
