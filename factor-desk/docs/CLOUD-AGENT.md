@@ -50,7 +50,7 @@ Avellaneda–Lee S-score + κ on the **existing** SparsePCA residual panel (not 
 
 ## Momentum streak tag
 
-Home UP/DOWN cards: consecutive trading-day streak of the card momentum rank vs **5**. Fields `mom_score` / `momentum_score` first; else on-disk hist / prices 13-window count (0–13). Exactly 5 → streak 0, tag `=5`. Chart overlay marks streak start and open end without burying the price series; existing tag-trigger labels are clustered. Name-drill charts: wrap live `paintPxChart` so the close path is green/red by SMA50/SMA200 (Positive: close above both; else Negative). Native SMA20/50/200 stay. See [MOM-STREAK.md](MOM-STREAK.md).
+Home UP/DOWN cards: consecutive trading-day streak of the card momentum rank vs **5**. Fields `mom_score` / `momentum_score` first; else on-disk hist / prices 13-window count (0–13). Exactly 5 → streak 0, tag `=5`. Chart overlay marks streak start and open end without burying the price series; existing tag-trigger labels are clustered. Name-drill charts: wrap live `paintPxChart` so the close path is green/red by SMA50/SMA200 (Positive: close above both; else Negative). Native SMA20/50/200 stay. Desktop inject is `sync_live_paintpx.py` (patches live HTML; refuses &lt; 1MB; never skinny `desk_dash` output). See [MOM-STREAK.md](MOM-STREAK.md) and [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §8.
 
 ## Secrets and dumps
 

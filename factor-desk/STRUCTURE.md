@@ -15,6 +15,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `paper_trade.py` | Paper Buy/Sell on dense `cardHTML` cards + Paper tab (localStorage; not a home chrome strip) |
 | `s_score.py` | Experimental residual S-score tab only (Avellaneda–Lee; not on MOM/FLAGS/home) |
 | `chart_marks.py` | Chart tag-trigger polish + streak begin/end + MA-regime coloring |
+| `sync_live_paintpx.py` | Desktop helper: inject `paintPxChart` wrap into live `factorbook.html` |
 | `add_server.py` | Sidecar HTTP server on `:8765` (Refresh + `intraday=1`) |
 | `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills + `write_combined` |
 | `write_dash.py` | Write generated `factorbook.html` via `write_combined` |
@@ -50,6 +51,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `scripts/dapi_pipe.ps1` | DAPI pipe |
 | `scripts/install_dapi_pipe.ps1` | Install scheduled DAPI pipe |
 | `scripts/_dapi_check.ps1` | DAPI health check |
+| `scripts/sync_live_paintpx.ps1` | Run `sync_live_paintpx.py` against Desktop `factorbook.html` |
 
 ## Generated / local (gitignored)
 

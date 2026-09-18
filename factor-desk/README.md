@@ -35,6 +35,7 @@ factor-desk/
   paper_trade.py         # paper Buy/Sell on dense cardHTML cards + Paper tab
   s_score.py             # Experimental residual S-score (Avellaneda–Lee on SparsePCA residuals)
   chart_marks.py         # chart tag-trigger polish + streak begin/end + MA trend
+  sync_live_paintpx.py    # Desktop: patch live factorbook.html (no skinny rewrite)
   add_server.py          # sidecar HTTP on :8765 — Refresh + intraday=1
   desk_dash.py           # dashboard assembly + write_combined
   write_dash.py          # write factorbook.html via write_combined
@@ -54,7 +55,7 @@ factor-desk/
 Refresh: `prices → dapi_enrich (~50–60%) → rebuild`. Options pulse is a separate **Options Refresh** button (`/options-refresh`, or `options=1`).
 Optional: `GET/POST /refresh?intraday=1` (default off). See [docs/DAPI-ENRICH.md](docs/DAPI-ENRICH.md).
 GICS sector chips read `gics_sector_name` already on the enrich file; optional one-shot `python dapi_enrich.py --gics-once` (not part of Refresh). `write_combined` re-embeds filled `#gics-sector-db` + strip JS on every HTML write. See [docs/GICS-FILTER.md](docs/GICS-FILTER.md).
-Home cards: momentum streak vs score 5 (`↑12d>5` / `↓8d<5`). Name-drill charts wrap live `paintPxChart` so close is green/red vs SMA50/SMA200. See [docs/MOM-STREAK.md](docs/MOM-STREAK.md).
+Home cards: momentum streak vs score 5 (`↑12d>5` / `↓8d<5`). Name-drill charts wrap live `paintPxChart` so close is green/red vs SMA50/SMA200. Desktop: recopy `chart_marks.py` + `sync_live_paintpx.py` and run the sync script on live `factorbook.html` (refuses &lt; 1MB; never skinny generator output). See [docs/MOM-STREAK.md](docs/MOM-STREAK.md) and [DEPLOY-HOOKS.md](DEPLOY-HOOKS.md) §8.
 Breakout / Breakdown tabs (mid-score climbers / crackers), a since-last-Refresh delta strip, and optional Desk Analyst hitch pills: [docs/BREAKOUT-BREAKDOWN.md](docs/BREAKOUT-BREAKDOWN.md).
 Paper Buy/Sell on dense MOM cards plus a Home open-book / week-scorecard strip (localStorage, 1 unit, no brokerage): [docs/PAPER-TRADE.md](docs/PAPER-TRADE.md).
 Experimental residual S-score (Avellaneda–Lee layer on existing SparsePCA residuals; pointers only, own top-nav tab): [docs/S-SCORE.md](docs/S-SCORE.md).

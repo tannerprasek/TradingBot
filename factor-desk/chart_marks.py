@@ -24,6 +24,8 @@ MAs. ``padR`` is enlarged so the last print / marker is not clipped.
 
 Skinny generator cards get a compact SVG sparkline when a price (or score)
 series is available. Live ~4.8MB HTML is patched: overlay JS + JSON db.
+Desktop: ``sync_live_paintpx.py`` calls ``ensure_embedded`` / ``inject_paintpx``
+on live ``factorbook.html`` (refuses files under 1MB; never skinny rewrite).
 """
 
 from __future__ import annotations
@@ -1818,46 +1820,52 @@ def overlay_js() -> str:
 """.strip()
 
 
+def _upsert_block(text: str, pattern: str, block: str) -> str:
+    next_text, n = re.subn(pattern, lambda _m: block, text, count=1, flags=re.I | re.S)
+    if n:
+        return next_text
+    if "</head>" in block or block.lstrip().startswith("<style"):
+        if "</head>" in text:
+            return text.replace("</head>", block + "</head>", 1)
+    if "</body>" in text:
+        return text.replace("</body>", block + "</body>", 1)
+    return text + block
+
+
 def ensure_embedded(html_text: str, mapping: Mapping[str, Any] | None) -> str:
-    """Always leave chart CSS + db + overlay JS. Safe on live 2.7MB HTML."""
+    """Always leave chart CSS + overlay JS. Safe on live ~4.8MB HTML.
+
+    ``mapping=None`` re-injects CSS + the ``paintPxChart`` wrap without wiping
+    ``#fd-chart-db``. Pass a dict (including ``{}``) to replace the db.
+    """
     text = html_text or ""
     css = f'<style id="{CSS_STYLE_ID}">\n{strip_css()}\n</style>\n'
-    text, n_css = re.subn(
+    text = _upsert_block(
+        text,
         rf'<style\b[^>]*\bid=["\']{CSS_STYLE_ID}["\'][^>]*>.*?</style>\s*',
-        lambda _m: css,
-        text,
-        count=1,
-        flags=re.I | re.S,
+        css,
     )
-    if n_css == 0:
-        if "</head>" in text:
-            text = text.replace("</head>", css + "</head>", 1)
-        else:
-            text = css + text
-    db = embed_db(mapping)
-    text, n_db = re.subn(
-        rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
-        lambda _m: db,
-        text,
-        count=1,
-        flags=re.I | re.S,
-    )
-    if n_db == 0:
-        if "</body>" in text:
-            text = text.replace("</body>", db + "\n</body>", 1)
-        else:
-            text += db
+    have_db = bool(re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', text, re.I))
+    if mapping is not None or not have_db:
+        db = embed_db(mapping)
+        text = _upsert_block(
+            text,
+            rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
+            db + ("\n" if not have_db else ""),
+        )
     script = f'<script id="{JS_SCRIPT_ID}">\n{overlay_js()}\n</script>\n'
-    text, n_js = re.subn(
-        rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
-        lambda _m: script,
+    text = _upsert_block(
         text,
-        count=1,
-        flags=re.I | re.S,
+        rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
+        script,
     )
-    if n_js == 0:
-        if "</body>" in text:
-            text = text.replace("</body>", script + "</body>", 1)
-        else:
-            text += script
     return text
+
+
+def inject_paintpx(html_text: str) -> str:
+    """Patch live ``factorbook.html`` with the ``paintPxChart`` wrap.
+
+    CSS + overlay JS only. Does not rebuild skinny ``desk_dash`` HTML and does
+    not wipe ``#fd-chart-db`` / Paper / Experimental / Breakout.
+    """
+    return ensure_embedded(html_text, None)

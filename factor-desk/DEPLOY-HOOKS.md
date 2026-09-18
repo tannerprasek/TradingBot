@@ -385,7 +385,33 @@ Button talks to `http://127.0.0.1:8765` like Refresh. Restart the sidecar after 
 
 ## 8) Chart tag-trigger polish + streak bounds + MA-regime ``paintPxChart`` wrap
 
-Copy **`chart_marks.py`** next to live `desk_dash.py`. Do **not** replace live `factorbook.html` with a generator rebuild. End of live `write_combined` (if the hook is missing):
+Live name-drill is **`paintPxChart`** in the large Desktop `factorbook.html`. Recopying `chart_marks.py` does **not** change the desk until the wrap is injected into that HTML. Do **not** run cloud `desk_dash.py` / `write_dash.py` (skinny generator). Do **not** overwrite live `factorbook.html` with a repo copy.
+
+### Exact Desktop copy (do this)
+
+Working folder: `C:\Users\MLP\Desktop\factorbook`
+
+1. Copy **`chart_marks.py`** from this pack next to live `desk_dash.py` (overwrite the previous `chart_marks.py`).
+2. Copy **`sync_live_paintpx.py`** into the same folder.
+3. Optional: copy `scripts/sync_live_paintpx.ps1`.
+4. From that folder, patch the live HTML (this calls `chart_marks.ensure_embedded` / `inject_paintpx` only):
+
+```bat
+cd /d C:\Users\MLP\Desktop\factorbook
+python sync_live_paintpx.py --html C:\Users\MLP\Desktop\factorbook\factorbook.html
+```
+
+PowerShell equivalent: `.\scripts\sync_live_paintpx.ps1` after the two `.py` files are in `factorbook\`.
+
+5. The script **refuses** if `factorbook.html` is missing, **&lt; 1MB**, or has no `paintPxChart` / `[data-px-svg]` / `[data-px-json]`. It will not write skinny generator output.
+6. Confirm the printout still lists Paper / Experimental / Breakout / `fd-paper-marks`. A backup is `factorbook.html.bak-paintpx`.
+7. Hard-reload the desk (Ctrl+F5). Open a name: price path green when `close > SMA50 AND close > SMA200`, else red; native SMA overlays stay; last print not clipped (`padR` 8→36); 1W/1M/YTD chips cleaned up.
+
+**Do not** copy generated `factorbook.html` from git. **Do not** `python desk_dash.py` / `python write_dash.py` against the live folder.
+
+If live `write_combined` already has the hook below, a later Refresh will keep the wrap. If it does not, **re-run `sync_live_paintpx.py` after Refresh** (Refresh without the hook will drop `#fd-chart-marks-js`).
+
+### Optional live `write_combined` tail (only if the hook is missing)
 
 ```python
 import chart_marks
@@ -396,11 +422,9 @@ html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
 # _ensure_options_refresh_ui(html)  # keep Options Refresh on Refresh rewrites
 ```
 
-**Desktop sync:** recopy `chart_marks.py` → Refresh / `write_combined` so `chart_marks.ensure_embedded` re-injects CSS + overlay JS. Hard-refresh the desk. Never wholesale-replace the live ~4.8MB HTML from the skinny generator.
+Do **not** wholesale replace live `desk_dash.py`. Overlay JS wraps **`paintPxChart(wrap)`** (reads `[data-px-json]`, paints `[data-px-svg]`). The solid white `#e6edf3` price path is hidden and replaced with segmented green/red using `S.s50` / `S.s200` (Positive: close > SMA50 AND close > SMA200). Native SMA20/50/200 + 52w high stay; the wrap does not pile on duplicate MAs. `padR` 8 → 36 (and CSS height ~300px / max-width) so the last print + marker are not clipped and the ribbon aspect eases. 1W/1M/YTD/Trend chips get compact padding/contrast. Generator `svg.fd-chart` is already painted in Python (`data-fd-trend=1`).
 
-Overlay JS wraps live **`paintPxChart(wrap)`** (reads `[data-px-json]`, paints `[data-px-svg]`). The solid white `#e6edf3` price path is hidden and replaced with segmented green/red using `S.s50` / `S.s200` (Positive: close > SMA50 AND close > SMA200). Native SMA20/50/200 + 52w high stay; the wrap does not pile on duplicate MAs. `padR` 8 → 36 (and CSS height ~300px / max-width) so the last print + marker are not clipped and the ribbon aspect eases. 1W/1M/YTD/Trend chips get compact padding/contrast. Generator `svg.fd-chart` is already painted in Python (`data-fd-trend=1`). Recopy `chart_marks.py` after this change.
-
-Also copy `mom_streak.py` (now has `streak_span` / `mom_streak_start` / `mom_streak_end`).
+Also copy `mom_streak.py` if streak begin/end marks are missing (`streak_span` / `mom_streak_start` / `mom_streak_end`).
 
 ---
 
