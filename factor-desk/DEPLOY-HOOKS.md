@@ -503,8 +503,9 @@ Live factorbook `setView` only knows `home|mom-up|mom-down|outliers|options|sect
 - Appends `|breakout|breakdown` to that allowlist string in **`setView` and `paintView`** if present
 - Injects an early-return at the top of `function setView(v)` that calls `window.__FD_BB_SHOW__(v)`, then `syncNav()`, and **does not** `paint()` and **does not** toggle legacy `#fd-bb-*` panes
 - Appends `view-breakout` / `view-breakdown` to `hideAllPanes` id arrays / `#view-mom-*` selector lists, and injects an extra hide of those two ids
-- Capture-phase click handler `preventDefault` + `stopPropagation` + `stopImmediatePropagation` so the native `#topnav` listener cannot reset to home
-- `__FD_BB_SHOW__` hides `#home`, `#view-mom-up`, `#view-mom-down`, `#view-outliers`, `#view-options`, `#view-sectors`, `#search-pane` **and** shows the matching `#view-breakout` / `#view-breakdown` pane (class `hide`)
+- Capture-phase click handler `preventDefault` + `stopPropagation` + `stopImmediatePropagation` **only** for Breakout/Breakdown so the native `#topnav` listener cannot reset those tabs to home. `#fd-nav-paper` is never capture-handled. `kindOf` returns `""` (not `"other"`) for `paper` / `experimental` / `home` / `mom-*`.
+- Wrapped `window.setView`: Breakout/Breakdown early-return to `__FD_BB_SHOW__`. **Paper / Experimental call live `orig` only** (no `show("")`). `show("")` runs only when `data-fd-bb` is set (leaving BB panes) and only hides BB panes — it does not hide `#view-paper` or unhide `#home`.
+- `__FD_BB_SHOW__(breakout|breakdown)` hides `#home`, `#view-mom-up`, `#view-mom-down`, `#view-outliers`, `#view-options`, `#view-sectors`, `#search-pane`, `#view-paper` **and** shows the matching `#view-breakout` / `#view-breakdown` pane (class `hide`)
 
 If you are not swapping `breakout.py` yet, paste into live `setView` / `hideAllPanes` / `paintView`:
 
@@ -628,7 +629,7 @@ Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping
 | --- | --- |
 | `paper_trade.py` | **recopy** — Buy/Sell on dense `cardHTML` cards **and** Paper tab; `stopImmediatePropagation` after `showPaper(true)` so Experimental cannot bounce Paper → Home |
 | `s_score.py` | **recopy** — `kindOf` returns `""` for paper/breakout/breakdown; `show(false)` does not unhide `#home` while Paper or Breakout is on |
-| `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; Paper/Experimental are not `other` nav; dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
+| `breakout.py` | **recopy** — hide `#view-paper` only when showing Breakout/Breakdown; `kindOf` returns `""` (not `"other"`) for `paper` / `experimental` / `home` / `mom-*`; `setView("paper"|"experimental")` calls live `orig` only; `show("")` only when leaving BB panes and does not unhide Home; never capture-handle `#fd-nav-paper`. Live HTML is `Desktop\factorbook.html`. Dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/PAPER-TRADE.md` | optional, for the desk |
 

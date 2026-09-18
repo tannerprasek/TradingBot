@@ -53,6 +53,8 @@ Optional boosts (cheap card fields only — **no DAPI pull**):
 
 Top-nav **Breakout** / **Breakdown** sit beside Momentum Up / Down. Clicking a tab fills `#view-breakout` / `#view-breakdown` (`.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`) with live `cardHTML(window.MOM.cards)` — the same dense chrome as Momentum Up — plus why / streak `enrich_pills` (`fd-bb`, `mom-streak`). After merging a MOM card (or a thin BB row like `{t:'AMGN', ticker:'AMGN US Equity', ...}`), `withPills` / `renderRow` always set display `d` / `t` / `name` from the short ticker so titles never render as `"undefined"`. Drill is `selectTicker`. Legacy `#fd-bb-breakout` / `#fd-bb-breakdown` stay empty and hidden so old CSS cannot paint skinny stub articles. `desk_dash.write_combined` always re-embeds `#fd-breakout-db` + nav + JS (`breakout.ensure_embedded`) so a Refresh rewrite cannot drop the tabs. Live ~2.7MB `factorbook.html` is **patched**, never replaced. Recopy `breakout.py`; do not wholesale replace live `desk_dash.py`.
 
+The embed `setView` bridge must not bounce **Paper** to Home: `kindOf` returns `""` (not `"other"`) for `data-view` `paper` / `experimental` / `home` / `mom-*` and never capture-handles `#fd-nav-paper`. `setView("paper"|"experimental")` calls the live `orig` only. `show("")` runs only when leaving BB panes and does not hide Paper or unhide Home. Live HTML is `C:\Users\MLP\Desktop\factorbook.html`.
+
 ## Related
 
 - Book-delta strip (since last Refresh): [`book_delta.py`](../book_delta.py), gitignored `desk_snapshot.json`

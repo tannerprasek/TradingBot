@@ -281,10 +281,153 @@ function syncNav() {}
         self.assertIn("card.d = card.d || display", js)
         self.assertIn("if (!display) return null", js)
         self.assertNotIn("fd-bb-card", js)
-        self.assertIn('view === "paper"', js)
-        self.assertIn('view === "experimental"', js)
-        self.assertIn('kind === "paper"', js)
         self.assertIn('class="btn nav-btn"', out)
+
+    def test_strip_js_paper_setview_orig_only_not_other(self) -> None:
+        """Paper/Home are not BB capture 'other'; setView(paper) calls orig only."""
+        js = bo.strip_js()
+        kind = js.split("function kindOf")[1].split("document.addEventListener")[0]
+        self.assertIn('btn.id === "fd-nav-paper"', kind)
+        self.assertIn('view === "paper"', kind)
+        self.assertIn('view === "experimental"', kind)
+        self.assertIn('view === "home"', kind)
+        self.assertIn('view.indexOf("mom-") === 0', kind)
+        self.assertNotIn('return "other"', kind.split('view === "paper"')[0])
+        click = js.split('document.addEventListener("click"')[1].split("function installSetViewBridge")[0]
+        self.assertIn('t.id === "fd-nav-paper"', click)
+        self.assertIn("#fd-nav-paper", click)
+        self.assertNotIn('kind === "other") show("")', click)
+        self.assertNotIn('if (kind === "other")', click)
+        bridge = js.split("window.setView = function")[1].split("window.setView.__fdBb")[0]
+        paper = re.search(
+            r'if \(kind === "paper" \|\| kind === "experimental"\) \{([^}]*)\}',
+            bridge,
+        )
+        self.assertIsNotNone(paper)
+        self.assertIn("return orig.apply(this, arguments)", paper.group(1))
+        self.assertNotIn("show(", paper.group(1))
+        self.assertNotIn("hideNativeViews", paper.group(1))
+        self.assertNotIn("hideBbPanes", paper.group(1))
+        self.assertIn(
+            'if (document.body && document.body.getAttribute("data-fd-bb")) show("")',
+            bridge,
+        )
+        self.assertNotIn('home.classList.remove("hide")', js)
+        show_fn = js.split("function show(kind)")[1].split("window.__FD_BB_SHOW__")[0]
+        bb_branch, _, rest = show_fn.partition("hideBbPanes")
+        self.assertIn("hideNativeViews()", bb_branch)
+        self.assertIn('kind === "breakout"', bb_branch)
+        self.assertNotIn("hideNativeViews()", rest)
+
+    def test_kindof_and_setview_bridge_behavior_in_node(self) -> None:
+        """Execute kindOf + setView wrap: Paper is not other; orig-only; leave-BB show("")."""
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available")
+        kind_src = _extract_js_fn(bo.strip_js(), "kindOf")
+        show_src = _extract_js_fn(bo.strip_js(), "show")
+        hide_bb = _extract_js_fn(bo.strip_js(), "hideBbPanes")
+        self.assertIn("fd-nav-paper", kind_src)
+        harness = r"""
+function fakeBtn(opts) {
+  opts = opts || {};
+  var cls = (opts.className || "btn nav-btn").split(/\s+/);
+  return {
+    id: opts.id || "",
+    textContent: opts.label || "",
+    classList: { contains: function (c) { return cls.indexOf(c) >= 0; } },
+    getAttribute: function (k) {
+      if (k === "data-view") return opts.view || "";
+      if (k === "data-fd-breakout") return opts.breakout || "";
+      if (k === "data-fd-breakdown") return opts.breakdown || "";
+      return "";
+    },
+    closest: function () { return opts.inNav === false ? null : {}; }
+  };
+}
+""" + kind_src + r"""
+var cases = [
+  [{id:"fd-nav-paper", view:"paper", label:"Paper"}, ""],
+  [{view:"paper", label:"Paper"}, ""],
+  [{view:"experimental", label:"Experimental"}, ""],
+  [{view:"home", label:"Home"}, ""],
+  [{view:"mom-up", label:"Momentum Up"}, ""],
+  [{view:"mom-down", label:"Momentum Down"}, ""],
+  [{view:"breakout", label:"Breakout"}, "breakout"],
+  [{id:"fd-nav-breakout", view:"breakout"}, "breakout"],
+  [{view:"outliers", label:"Outliers"}, "other"]
+];
+var failed = [];
+for (var i = 0; i < cases.length; i++) {
+  var got = kindOf(fakeBtn(cases[i][0]));
+  if (got !== cases[i][1]) failed.push(JSON.stringify(cases[i][0]) + " got " + JSON.stringify(got) + " want " + JSON.stringify(cases[i][1]));
+}
+
+var calls = [];
+var bodyAttrs = { "data-fd-bb": "breakout" };
+var hidden = {};
+var origCalls = [];
+function $(id) { return { classList: { add: function () { hidden[id] = true; }, remove: function () { hidden[id] = false; } } }; }
+var document = {
+  body: {
+    getAttribute: function (k) { return bodyAttrs[k] || null; },
+    setAttribute: function (k, v) { bodyAttrs[k] = v; },
+    removeAttribute: function (k) { delete bodyAttrs[k]; }
+  }
+};
+function hideLegacy() { calls.push("hideLegacy"); }
+function hideNativeViews() { calls.push("hideNativeViews"); }
+function syncNav(k) { calls.push("syncNav:" + k); }
+function db() { return { breakout: [], breakdown: [] }; }
+function fillGrid() {}
+var VIEW_BO = "view-breakout", VIEW_BD = "view-breakdown";
+var GRID_BO = "breakout-grid", GRID_BD = "breakdown-grid";
+""" + hide_bb + "\n" + show_src + r"""
+function orig(v) { origCalls.push(v); }
+function setViewBridge(v) {
+  var kind = String(v || "").toLowerCase();
+  if (kind === "breakout" || kind === "breakdown") { show(kind); return; }
+  if (kind === "paper" || kind === "experimental") { return orig.apply(this, arguments); }
+  if (document.body && document.body.getAttribute("data-fd-bb")) show("");
+  return orig.apply(this, arguments);
+}
+calls = []; origCalls = []; hidden = {};
+setViewBridge("paper");
+if (origCalls.length !== 1 || origCalls[0] !== "paper") failed.push("paper orig " + JSON.stringify(origCalls));
+if (calls.indexOf("hideNativeViews") >= 0) failed.push("paper must not hideNativeViews: " + JSON.stringify(calls));
+if (hidden["view-paper"]) failed.push("paper must not hide view-paper");
+if (calls.indexOf("hideLegacy") >= 0 || calls.some(function (c) { return c.indexOf("syncNav") === 0; })) {
+  failed.push("paper orig-only, no BB teardown: " + JSON.stringify(calls));
+}
+
+calls = []; origCalls = []; hidden = {};
+bodyAttrs = { "data-fd-bb": "breakout", "data-view": "breakout" };
+setViewBridge("home");
+if (origCalls[0] !== "home") failed.push("home orig " + JSON.stringify(origCalls));
+if (!hidden["view-breakout"] || !hidden["view-breakdown"]) failed.push("leave BB must hide BB panes " + JSON.stringify(hidden));
+if (hidden["view-paper"] || hidden["home"]) failed.push("show('') must not hide paper/home " + JSON.stringify(hidden));
+if (bodyAttrs["data-fd-bb"]) failed.push("leave BB must clear data-fd-bb");
+
+if (failed.length) {
+  console.error(failed.join("\n"));
+  process.exit(1);
+}
+console.log("ok");
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bb_nav.js"
+            path.write_text(harness, encoding="utf-8")
+            proc = subprocess.run(
+                [node, str(path)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
+            self.assertIn("ok", proc.stdout)
 
     def test_panes_html_emits_view_shells_not_stubs(self) -> None:
         host = bo.panes_html(
@@ -401,6 +544,23 @@ function syncNav() {}
             self.assertTrue((root / book_delta.SNAPSHOT_FILENAME).is_file())
             snap = json.loads((root / book_delta.SNAPSHOT_FILENAME).read_text(encoding="utf-8"))
             self.assertIn("names", snap)
+
+
+def _extract_js_fn(js: str, name: str) -> str:
+    token = f"function {name}"
+    start = js.find(token)
+    if start < 0:
+        raise AssertionError(f"missing {name}")
+    i = js.find("{", start)
+    depth = 0
+    for j in range(i, len(js)):
+        if js[j] == "{":
+            depth += 1
+        elif js[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[start : j + 1]
+    raise AssertionError(f"unclosed {name}")
 
 
 if __name__ == "__main__":

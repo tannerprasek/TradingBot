@@ -615,9 +615,11 @@ article.fd-bb-card, .fd-bb-card {{
 def strip_js() -> str:
     """Fill #breakout-grid / #breakdown-grid with live ``cardHTML`` (MOM chrome).
 
-    Capture-phase click stops the live topnav listener. ``show`` is
-    ``window.__FD_BB_SHOW__`` so a patched live ``setView`` early-returns
-    without ``paint()`` and without toggling legacy ``#fd-bb-*`` panes.
+    Capture-phase click handles Breakout/Breakdown only. ``#fd-nav-paper``
+    is never capture-handled (``kindOf`` returns ``""`` for paper /
+    experimental / home / ``mom-*``, not ``"other"``). ``show("")`` only
+    hides BB panes when leaving them — it does not hide Paper or unhide
+    Home. ``setView("paper"|"experimental")`` calls the live ``orig`` only.
     """
     view_ids = json.dumps(list(NATIVE_VIEW_IDS))
     return rf"""
@@ -768,11 +770,21 @@ def strip_js() -> str:
       else if (oursOf(b, "breakout") || oursOf(b, "breakdown")) setOn(b, false);
     }}
   }}
-  function show(kind) {{
-    hideNativeViews();
+  function hideBbPanes() {{
     hideLegacy();
-    var data = db();
+    var bo = $(VIEW_BO), bd = $(VIEW_BD);
+    if (bo) bo.classList.add("hide");
+    if (bd) bd.classList.add("hide");
+    document.body.removeAttribute("data-fd-bb");
+    var dv = document.body.getAttribute("data-view");
+    if (dv === "breakout" || dv === "breakdown") document.body.removeAttribute("data-view");
+    syncNav("");
+  }}
+  function show(kind) {{
     if (kind === "breakout" || kind === "breakdown") {{
+      hideNativeViews();
+      hideLegacy();
+      var data = db();
       var pane = $(kind === "breakout" ? VIEW_BO : VIEW_BD);
       var grid = $(kind === "breakout" ? GRID_BO : GRID_BD);
       if (pane) pane.classList.remove("hide");
@@ -782,17 +794,17 @@ def strip_js() -> str:
       syncNav(kind);
       return;
     }}
-    document.body.removeAttribute("data-fd-bb");
-    syncNav("");
+    hideBbPanes();
   }}
   window.__FD_BB_SHOW__ = show;
   window.__FD_BB_SYNC_NAV__ = syncNav;
   function kindOf(btn) {{
     if (!btn || !btn.getAttribute) return "";
+    if (btn.id === "fd-nav-paper") return "";
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
     if (view === "breakout" || btn.getAttribute("data-fd-breakout") === "1" || btn.id === "fd-nav-breakout") return "breakout";
     if (view === "breakdown" || btn.getAttribute("data-fd-breakdown") === "1" || btn.id === "fd-nav-breakdown") return "breakdown";
-    if (view === "paper" || view === "experimental") return "";
+    if (view === "paper" || view === "experimental" || view === "home" || view.indexOf("mom-") === 0) return "";
     var label = (btn.textContent || "").replace(/\s+/g, " ").trim();
     if (label === "Breakout") return "breakout";
     if (label === "Breakdown") return "breakdown";
@@ -804,16 +816,14 @@ def strip_js() -> str:
   }}
   document.addEventListener("click", function (ev) {{
     var t = ev.target && ev.target.closest ? ev.target.closest("button, [data-view], [data-fd-breakout], [data-fd-breakdown]") : ev.target;
+    if (t && (t.id === "fd-nav-paper" || (t.closest && t.closest("#fd-nav-paper")))) return;
     var kind = kindOf(t);
-    if (!kind) return;
     if (kind === "breakout" || kind === "breakdown") {{
       ev.preventDefault();
       ev.stopPropagation();
       if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
       show(kind);
-      return;
     }}
-    if (kind === "other") show("");
   }}, true);
   function installSetViewBridge() {{
     var orig = window.setView;
@@ -826,15 +836,9 @@ def strip_js() -> str:
         return;
       }}
       if (kind === "paper" || kind === "experimental") {{
-        hideLegacy();
-        var bo = $(VIEW_BO), bd = $(VIEW_BD);
-        if (bo) bo.classList.add("hide");
-        if (bd) bd.classList.add("hide");
-        document.body.removeAttribute("data-fd-bb");
-        syncNav("");
         return orig.apply(this, arguments);
       }}
-      show("");
+      if (document.body && document.body.getAttribute("data-fd-bb")) show("");
       return orig.apply(this, arguments);
     }};
     window.setView.__fdBb = true;
