@@ -47,8 +47,8 @@ PLOT_TOP = 22
 PLOT_BOT = 62
 DETAIL_WIDTH = 560
 DETAIL_HEIGHT = 200
-DETAIL_PLOT_TOP = 36
-DETAIL_PLOT_BOT = 184
+DETAIL_PLOT_TOP = 46
+DETAIL_PLOT_BOT = 186
 TAG_CLUSTER_PX = 12
 LABEL_H = 11
 SMA_FAST = 50
@@ -1240,6 +1240,8 @@ def overlay_js() -> str:
   }
   function showSkinnyDrill(card) {
     if (!canSkinnyDrill() || !card) return;
+    var existing = document.querySelector("#fd-name-drill svg.fd-chart-detail[data-fd-trend]");
+    if (existing) return;
     var src = card.querySelector && card.querySelector("svg.fd-chart");
     if (!src) return;
     var host = ensureDrillHost();

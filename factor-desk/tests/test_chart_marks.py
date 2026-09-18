@@ -296,6 +296,7 @@ class MaTrendTests(unittest.TestCase):
         self.assertIn("fd-chart-line-neg", detail)
         self.assertIn('data-fd-ma="50"', detail)
         self.assertIn('data-fd-ma="200"', detail)
+        self.assertIn("fd-chart-detail[data-fd-trend]", cm.overlay_js())
 
 
 if __name__ == "__main__":
