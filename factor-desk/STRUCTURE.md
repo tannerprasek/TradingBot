@@ -13,7 +13,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `book_delta.py` | Since-last-Refresh chip strip (`desk_snapshot.json`) |
 | `desk_hitch.py` | Desk Analyst hitch pills from `ideas/` notes |
 | `paper_trade.py` | Paper Buy/Sell on dense `cardHTML` cards + Home paper-book strip (localStorage) |
-| `s_score.py` | Experimental residual S-score (Avellaneda–Lee on SparsePCA residuals) |
+| `s_score.py` | Experimental residual S-score tab only (Avellaneda–Lee; not on MOM/FLAGS/home) |
 | `chart_marks.py` | Chart tag-trigger polish + streak begin/end overlay |
 | `add_server.py` | Sidecar HTTP server on `:8765` (Refresh + `intraday=1`) |
 | `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills + `write_combined` |

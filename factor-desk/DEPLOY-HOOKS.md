@@ -588,7 +588,7 @@ Do **not** copy generated `factorbook.html` or a later `paper_book.json`. After 
 
 Copy `s_score.py` next to live `desk_dash.py`. **Do not wholesale replace** live `desk_dash.py` (FLAGS / WATCH / MOM chrome stays; home still opens FLAGS→WATCH→MOM). **Not** a new PCA engine. **Not** a FLAGS rebrand. Pointers only — no auto-enter, no paper auto-open. Do **not** show A–L paper Sharpes as desk KPIs.
 
-Optional `s_score` pill on live MOM cards is **off** (`SHOW_S_SCORE_PILL_ON_MOM = False`). Pills live on **Experimental cards only**.
+**Isolation:** S-score / κ UI is the Experimental tab only. Do **not** add S-score pills onto live MOM / FLAGS / home cards. Do **not** change the default home ritual or production chrome.
 
 Also recopy `breakout.py` (hides `#view-experimental` when Breakout/Breakdown is selected so the Experimental pane cannot leak onto those tabs).
 
@@ -627,7 +627,7 @@ html = s_score.ensure_embedded(html, ss_ranked)  # Experimental tab; does not wr
 # dest.write_text(html)
 ```
 
-`ensure_embedded` injects a top-nav **Experimental** button (after Options, else after Breakdown), `#view-experimental` + `#sscore-grid` dense cards (ticker, S-score, κ/half-life, fade-high / buy-low, entry/exit bands), `#fd-sscore-db`, and JS that patches live `setView` / `hideAllPanes` with `|experimental`. It does **not** wrap `cardHTML`, so production paper Buy/Sell chrome is unchanged.
+`ensure_embedded` injects a top-nav **Experimental** button (after Options, else after Breakdown), `#view-experimental` (hidden until selected) + `#sscore-grid` dense cards ranked by `|S-score|` (ticker, S-score, κ/half-life, fade-high / buy-low, entry/exit bands), `#fd-sscore-db`, and JS that patches live `setView` / `hideAllPanes` with `|experimental`. It does **not** wrap `cardHTML`, so production paper Buy/Sell chrome is unchanged.
 
 Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping live `desk_dash.py`, paste the tail. Recopy `s_score.py` after this drop-in.
 
@@ -656,7 +656,7 @@ Do **not** copy generated `factorbook.html` or `residual_panel.json`. After drop
 
 1. Home still opens FLAGS / WATCH / MOM (Experimental is a separate tab after Options).
 2. **Experimental** shows residual S-score ranks (or an honest empty reason if the panel is thin / missing).
-3. Production FLAGS / WATCH / MOM / Breakout / paper Buy/Sell chrome is unchanged; no `s_score` pill on live MOM cards.
+3. Production FLAGS / WATCH / MOM / Breakout / paper Buy/Sell chrome is unchanged. Experimental is a separate top-nav tab; no S-score / κ chrome on live MOM / FLAGS / home cards.
 4. Banner states **experimental**, panel depth × names, source, and **PIT not claimed**.
 5. No Sharpe numbers anywhere on the desk.
 

@@ -183,8 +183,30 @@ class PanelTests(unittest.TestCase):
             row = ranked["rows"][0]
             self.assertEqual(row["t"], "AAPL")
             self.assertEqual(row["band"], "open")
+            self.assertEqual(row["rank"], 1)
             self.assertIn("fade residual high", row["side_hint"])
             self.assertNotIn("sharpe", json.dumps(ranked).lower())
+
+    def test_rank_panel_sorts_by_abs_s(self) -> None:
+        high = _ou_open(n=60, kappa=0.14, last_extra=0.05)
+        mild = _ou_open(n=60, kappa=0.14, last_extra=0.02)
+        panel = {
+            "already_levels": True,
+            "source": "test",
+            "names": {
+                "MILD US Equity": {"series": [{"residual": v} for v in mild]},
+                "HIGH US Equity": {"series": [{"residual": v} for v in high]},
+            },
+            "panel_depth": 60,
+            "panel_names": 2,
+            "pit": False,
+        }
+        ranked = ss.rank_panel(panel)
+        self.assertGreaterEqual(len(ranked["rows"]), 2)
+        abs_s = [abs(float(r["s_score"])) for r in ranked["rows"]]
+        self.assertEqual(abs_s, sorted(abs_s, reverse=True))
+        self.assertEqual([r["rank"] for r in ranked["rows"]], list(range(1, len(ranked["rows"]) + 1)))
+        self.assertEqual(ranked["rows"][0]["t"], "HIGH")
 
     def test_reconstruct_from_returns_and_loadings(self) -> None:
         days = _weekdays(date(2026, 6, 1), 40)
@@ -258,10 +280,22 @@ class EmbedTests(unittest.TestCase):
         self.assertIn("not a proven edge", out.lower().replace("—", "-"))
         self.assertNotIn("sharpe", out.lower())
         self.assertIn('data-key="s_score"', out)
-        # Live MOM card is untouched (pill only on Experimental cards).
+        self.assertIn("fd-ss-card", out)
+        self.assertIn("κ / HL", out)
+        self.assertIn("open / close", out)
+        self.assertRegex(out, r'id="view-experimental"[^>]*\bhidden\b')
+        css = ss.strip_css()
+        self.assertIn("display: none !important", css)
+        self.assertIn('body[data-fd-ss="1"]', css)
+        self.assertIn(":not(.hide):not([hidden])", css)
+        self.assertNotIn("SHOW_S_SCORE_PILL_ON_MOM", ss.__dict__)
+        self.assertFalse(hasattr(ss, "attach_pill_to_card"))
+        self.assertNotIn("cardHTML", ss.strip_js())
+        # Live MOM card is untouched — S-score lives in Experimental only.
         mom = re.search(r'<article class="card" data-t="AAPL">AAPL MOM</article>', out)
         self.assertIsNotNone(mom)
         self.assertNotIn("s_score", mom.group(0))
+        self.assertNotIn("fd-ss-card", mom.group(0))
         again = ss.ensure_embedded(out, None)
         self.assertEqual(
             len(re.findall(r'<button\b[^>]*data-view=["\']experimental["\']', again, re.I)),
@@ -313,6 +347,8 @@ function setView(v) {
         self.assertIn("view-experimental", out)
         self.assertIn("window.__FD_SS_SHOW__", out)
         self.assertIn("/*fd-ss-setview*/", out)
+        self.assertIn("fd-ss-on", out)
+        self.assertIn('removeAttribute("data-fd-ss")', out)
 
     def test_write_combined_patches_live_html(self) -> None:
         body = """<!DOCTYPE html>
@@ -356,13 +392,16 @@ function setView(v) {
             self.assertIn("Momentum Down", text)
             self.assertNotIn("sharpe", text.lower())
             self.assertTrue((root / ss.PANEL_FILENAME).is_file())
-            # s_score pill is on Experimental cards, not forced onto the live MOM article.
+            # S-score lives on Experimental cards only, not the live MOM article.
             mom_article = re.search(
                 r'<article class="card" data-t="AAPL"[^>]*>AAPL</article>',
                 text,
             )
             self.assertIsNotNone(mom_article)
-        self.assertFalse(ss.SHOW_S_SCORE_PILL_ON_MOM)
+            self.assertNotIn("s_score", mom_article.group(0))
+            self.assertNotIn("fd-ss-card", mom_article.group(0))
+            self.assertRegex(text, r'id="view-experimental"[^>]*\bhidden\b')
+        self.assertNotIn("SHOW_S_SCORE_PILL_ON_MOM", ss.__dict__)
         # Paper Buy/Sell hydrator must skip Experimental cards.
         import paper_trade as pt
         js = pt.strip_js()

@@ -63,11 +63,11 @@ Tune constants at the top of `s_score.py`.
 
 ## UI
 
-Top-nav **Experimental** (after Options — home FLAGS→WATCH→MOM is unchanged). Own dense cards: ticker, `s` pill, κ / half-life, side hint, entry/exit bands. **Not** live `cardHTML` (so production paper Buy/Sell chrome is not reused here). Click ticker → `selectTicker` when that function exists.
+Dedicated top-nav **Experimental** tab after Options. Home still opens FLAGS→WATCH→MOM. All residual S-score / κ chrome lives **inside that tab only** — dense ranked cards (MOM-like, sorted by `|s|`) with S-score, κ / half-life, side hint, and open/close band defaults. **Not** live `cardHTML` (production paper Buy/Sell is not reused). Click ticker → `selectTicker` when that function exists.
 
-Optional `s_score` pill on live MOM cards is **`SHOW_S_SCORE_PILL_ON_MOM = False`**. Do not force it on.
+Do **not** put S-score pills on live MOM / FLAGS / home cards. There is no optional MOM-pill flag.
 
-`desk_dash.write_combined` always re-embeds `#fd-sscore-db` + nav + JS (`s_score.ensure_embedded`). Live ~2.7MB `factorbook.html` is **patched**, never replaced.
+`desk_dash.write_combined` always re-embeds `#fd-sscore-db` + nav + JS (`s_score.ensure_embedded`). Live ~2.7MB `factorbook.html` is **patched**, never replaced. `#view-experimental` is `display:none` until the Experimental tab is selected.
 
 ## Desktop sync
 

@@ -46,7 +46,7 @@ Generic Buy/Sell on dense `cardHTML` cards plus a Home paper-book strip (`#fd-pa
 
 ## Experimental residual S-score
 
-Avellaneda–Lee S-score + κ on the **existing** SparsePCA residual panel (not a new PCA engine). Own top-nav **Experimental** tab. Pointers only — no auto-enter, no paper auto-open, no paper Sharpes as KPIs. PIT is **not** claimed. `s_score.ensure_embedded` on every HTML write. Recopy `s_score.py`; do not wholesale replace live `desk_dash.py`. See [S-SCORE.md](S-SCORE.md).
+Avellaneda–Lee S-score + κ on the **existing** SparsePCA residual panel (not a new PCA engine). Dedicated top-nav **Experimental** tab only — do not paint S-score onto live MOM / FLAGS / home. Pointers only — no auto-enter, no paper auto-open, no paper Sharpes as KPIs. PIT is **not** claimed. `s_score.ensure_embedded` on every HTML write. Recopy `s_score.py`; do not wholesale replace live `desk_dash.py`. See [S-SCORE.md](S-SCORE.md).
 
 ## Momentum streak tag
 

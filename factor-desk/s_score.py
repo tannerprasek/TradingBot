@@ -46,8 +46,7 @@ B_MAX = 0.99
 RANK_CAP = 40
 DT_DAYS = 1.0  # daily OU (κ in trading-day units)
 
-# Optional MOM-card pill — OFF by default so live MOM chrome is untouched.
-SHOW_S_SCORE_PILL_ON_MOM = False
+# S-score / κ UI is Experimental-tab only. Never attach pills to MOM / FLAGS / home.
 
 PANEL_FILENAME = "residual_panel.json"
 PANEL_KIND = "factor-desk-residual-panel"
@@ -1170,12 +1169,8 @@ def load_panel(root: Path | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _band_rank(band: str) -> int:
-    return {"open": 0, "inside": 1, "close": 2, "reject_slow_kappa": 3}.get(band, 9)
-
-
 def rank_panel(panel: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Rank names by |s| (open first). Empty panel → empty rows + reason. No Sharpes."""
+    """Rank names by |s| descending. Empty panel → empty rows + reason. No Sharpes."""
     panel = panel or empty_panel()
     already = bool(panel.get("already_levels"))
     source = str(panel.get("source") or "")
@@ -1205,8 +1200,10 @@ def rank_panel(panel: Mapping[str, Any] | None) -> dict[str, Any]:
             skipped_fit += 1
             continue
         rows.append(row)
-    rows.sort(key=lambda r: (_band_rank(str(r.get("band"))), -abs(float(r.get("s_score") or 0.0))))
+    rows.sort(key=lambda r: -abs(float(r.get("s_score") or 0.0)))
     rows = rows[:RANK_CAP]
+    for i, row in enumerate(rows, start=1):
+        row["rank"] = i
     empty_reason = panel.get("empty_reason")
     if not rows and not empty_reason:
         if skipped_short and not (names and any(True for _ in names)):
@@ -1280,21 +1277,6 @@ def pill_for(row: Mapping[str, Any] | None) -> dict[str, str] | None:
     }
 
 
-def attach_pill_to_card(card: Mapping[str, Any], row: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    """Only used if ``SHOW_S_SCORE_PILL_ON_MOM``. Default path never calls this."""
-    if not SHOW_S_SCORE_PILL_ON_MOM or not row:
-        return card
-    pill = pill_for(row)
-    if not pill:
-        return card
-    pills = list(card.get("enrich_pills") or [])
-    pills = [p for p in pills if not (isinstance(p, Mapping) and p.get("key") == PILL_KEY)]
-    pills.append(pill)
-    card["enrich_pills"] = pills  # type: ignore[index]
-    card["s_score"] = row.get("s_score")  # type: ignore[index]
-    return card
-
-
 # ---------------------------------------------------------------------------
 # HTML / CSS / JS
 # ---------------------------------------------------------------------------
@@ -1303,11 +1285,13 @@ def attach_pill_to_card(card: Mapping[str, Any], row: Mapping[str, Any] | None) 
 def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
     ranked = ranked or rank_panel(empty_panel())
     rows = []
-    for row in ranked.get("rows") or []:
+    for i, row in enumerate(ranked.get("rows") or [], start=1):
         if not isinstance(row, Mapping):
             continue
+        rank = row.get("rank")
         rows.append(
             {
+                "rank": rank if rank is not None else i,
                 "t": row.get("t"),
                 "ticker": row.get("ticker"),
                 "s_score": row.get("s_score"),
@@ -1377,10 +1361,13 @@ def card_html(row: Mapping[str, Any]) -> str:
     entry = _fmt_num(row.get("entry"), 2)
     exit_ = _fmt_num(row.get("exit"), 2)
     n_obs = html.escape(str(row.get("n_obs") or "—"))
+    rank = row.get("rank")
+    rank_txt = f"{int(rank):02d}" if isinstance(rank, int) else (html.escape(str(rank)) if rank is not None else "")
+    rank_html = f'<span class="fd-ss-rank">{rank_txt}</span>' if rank_txt else ""
     return f"""
 <article class="card fd-ss-card" data-t="{t}" data-ticker="{ticker_attr}" data-fd-sscore="1" data-band="{band}" title="{why}">
   <header>
-    <h2>{t}</h2>
+    {rank_html}<h2>{t}</h2>
     <div class="pills">
       <span class="badge spike-chip {pill_cls}" data-key="{PILL_KEY}">{pill_label}</span>
       <span class="badge spike-chip fd-ss-exp" data-key="fd-ss-exp">EXP</span>
@@ -1389,7 +1376,7 @@ def card_html(row: Mapping[str, Any]) -> str:
   <p class="fd-ss-hint">{hint}</p>
   <dl>
     <div><dt>κ / HL</dt><dd>{html.escape(k_txt)} / {html.escape(hl_txt)}</dd></div>
-    <div><dt>bands</dt><dd>open ≥{html.escape(entry)} · close ≤{html.escape(exit_)}</dd></div>
+    <div><dt>open / close</dt><dd>≥{html.escape(entry)} / ≤{html.escape(exit_)}</dd></div>
     <div><dt>n</dt><dd>{n_obs}</dd></div>
     <div><dt>band</dt><dd>{band or "—"}</dd></div>
   </dl>
@@ -1427,11 +1414,18 @@ def empty_copy(ranked: Mapping[str, Any] | None) -> str:
 
 def panes_html(ranked: Mapping[str, Any] | None = None) -> str:
     rows = list((ranked or {}).get("rows") or [])
-    cards = "\n".join(card_html(r) for r in rows if isinstance(r, Mapping))
-    body = cards if cards else empty_copy(ranked)
+    cards: list[str] = []
+    for i, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("rank") is None:
+            row = dict(row)
+            row["rank"] = i
+        cards.append(card_html(row))
+    body = "\n".join(cards) if cards else empty_copy(ranked)
     return "\n".join(
         [
-            f'<div id="{VIEW_ID}" class="view-pane hide" data-view="experimental">',
+            f'<div id="{VIEW_ID}" class="view-pane hide" data-view="experimental" hidden>',
             '  <div class="ph">Experimental</div>',
             f"  {banner_html(ranked)}",
             f'  <div class="grid dense fd-ss-grid" id="{GRID_ID}">{body}</div>',
@@ -1442,10 +1436,18 @@ def panes_html(ranked: Mapping[str, Any] | None = None) -> str:
 
 def strip_css() -> str:
     return f"""
-#{VIEW_ID}.hide {{ display: none !important; }}
+/* Default OFF — Experimental never paints on FLAGS/WATCH/MOM/home. */
+#{VIEW_ID},
+#{VIEW_ID}.hide,
+#{VIEW_ID}[hidden] {{
+  display: none !important;
+}}
+body[data-fd-ss="1"] #{VIEW_ID}.fd-ss-on:not(.hide):not([hidden]) {{
+  display: block !important;
+}}
 #home.hide {{ display: none !important; }}
 .{HID_CLASS} {{ display: none !important; }}
-#{VIEW_ID} {{
+#{VIEW_ID}.fd-ss-on {{
   margin: 0 0 16px;
 }}
 #{VIEW_ID} .ph {{
@@ -1474,11 +1476,33 @@ def strip_css() -> str:
 }}
 .fd-ss-grid {{
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
 }}
 .fd-ss-card {{
   border-color: #78350f;
+}}
+.fd-ss-card header {{
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}}
+.fd-ss-card header h2 {{
+  margin: 0;
+  flex: 1 1 auto;
+}}
+.fd-ss-card .pills {{
+  margin-left: auto;
+}}
+.fd-ss-rank {{
+  display: inline-block;
+  min-width: 1.6em;
+  margin: 0;
+  font: 650 11px/1.2 "Segoe UI", sans-serif;
+  color: #a8a29e;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
 }}
 .fd-ss-hint {{
   margin: 6px 0 0;
@@ -1558,16 +1582,24 @@ def strip_js() -> str:
     art.setAttribute("data-fd-sscore", "1");
     art.setAttribute("data-band", String(row.band || ""));
     if (row.why) art.setAttribute("title", String(row.why));
+    var rankTxt = "";
+    if (row.rank != null && isFinite(Number(row.rank))) {{
+      var n = Number(row.rank);
+      rankTxt = (n < 10 ? "0" : "") + String(n);
+    }} else if (row.rank != null) {{
+      rankTxt = String(row.rank);
+    }}
+    var rank = rankTxt ? '<span class="fd-ss-rank">' + rankTxt + '</span>' : '';
     art.innerHTML =
-      '<header><h2>' + t.replace(/</g, "") + '</h2><div class="pills">' +
+      '<header>' + rank + '<h2>' + t.replace(/</g, "") + '</h2><div class="pills">' +
       '<span class="' + pillCls(row) + '" data-key="s_score">s ' + sTxt + '</span>' +
       '<span class="badge spike-chip fd-ss-exp" data-key="fd-ss-exp">EXP</span>' +
       '</div></header>' +
       '<p class="fd-ss-hint">' + String(row.side_hint || "").replace(/</g, "") + '</p>' +
       '<dl><div><dt>κ / HL</dt><dd>' + fmt(row.kappa, 3) + ' / ' +
         (isFinite(Number(row.half_life)) ? Number(row.half_life).toFixed(1) + 'd' : '—') +
-      '</dd></div><div><dt>bands</dt><dd>open ≥' + fmt(row.entry, 2) +
-      ' · close ≤' + fmt(row.exit, 2) + '</dd></div>' +
+      '</dd></div><div><dt>open / close</dt><dd>≥' + fmt(row.entry, 2) +
+      ' / ≤' + fmt(row.exit, 2) + '</dd></div>' +
       '<div><dt>n</dt><dd>' + String(row.n_obs == null ? "—" : row.n_obs) + '</dd></div>' +
       '<div><dt>band</dt><dd>' + String(row.band || "—") + '</dd></div></dl>' +
       '<p class="fd-ss-note">pointer only · experimental default · not a trade</p>';
@@ -1580,7 +1612,10 @@ def strip_js() -> str:
   function fillGrid(grid, payload) {{
     if (!grid) return;
     grid.innerHTML = "";
-    var rows = (payload && payload.rows) || [];
+    var rows = ((payload && payload.rows) || []).slice();
+    rows.sort(function (a, b) {{
+      return Math.abs(Number((b && b.s_score) || 0)) - Math.abs(Number((a && a.s_score) || 0));
+    }});
     if (!rows.length) {{
       var empty = document.createElement("p");
       empty.className = "fd-ss-empty";
@@ -1589,7 +1624,11 @@ def strip_js() -> str:
       grid.appendChild(empty);
       return;
     }}
-    for (var i = 0; i < rows.length; i++) grid.appendChild(cardNode(rows[i]));
+    for (var i = 0; i < rows.length; i++) {{
+      var row = rows[i] || {{}};
+      if (row.rank == null) row.rank = i + 1;
+      grid.appendChild(cardNode(row));
+    }}
   }}
   function paintBanner(payload) {{
     var el = $("fd-ss-banner");
@@ -1637,7 +1676,11 @@ def strip_js() -> str:
     var pane = $(VIEW);
     if (on) {{
       hideNativeViews();
-      if (pane) pane.classList.remove("hide");
+      if (pane) {{
+        pane.classList.remove("hide");
+        pane.classList.add("fd-ss-on");
+        pane.removeAttribute("hidden");
+      }}
       var payload = db();
       paintBanner(payload);
       fillGrid($(GRID), payload);
@@ -1646,8 +1689,15 @@ def strip_js() -> str:
       syncNav(true);
       return;
     }}
-    if (pane) pane.classList.add("hide");
+    if (pane) {{
+      pane.classList.add("hide");
+      pane.classList.remove("fd-ss-on");
+      pane.setAttribute("hidden", "hidden");
+    }}
     document.body.removeAttribute("data-fd-ss");
+    if (document.body.getAttribute("data-view") === "experimental") {{
+      document.body.removeAttribute("data-view");
+    }}
     syncNav(false);
   }}
   window.__FD_SS_SHOW__ = function () {{ show(true); }};
@@ -1780,15 +1830,28 @@ def _replace_or_inject_early_return(
     return fn_re.sub(inject, text, count=1)
 
 
-def _patch_hideall_panes(html_text: str) -> str:
-    text = html_text or ""
-    if HIDEALL_MARKER in text:
-        return text
-    snippet = (
+def _hideall_snippet() -> str:
+    return (
         f"{HIDEALL_MARKER}"
         '["view-experimental"].forEach(function(id){'
-        'var el=document.getElementById(id);if(el)el.classList.add("hide");});'
+        "var el=document.getElementById(id);"
+        'if(el){el.classList.add("hide");el.classList.remove("fd-ss-on");'
+        'el.setAttribute("hidden","hidden");}'
+        'if(document.body)document.body.removeAttribute("data-fd-ss");'
+        "});"
     )
+
+
+def _patch_hideall_panes(html_text: str) -> str:
+    text = html_text or ""
+    snippet = _hideall_snippet()
+    existing = re.search(
+        re.escape(HIDEALL_MARKER) + r'\["view-experimental"\]\.forEach\(function\(id\)\{.*?\}\);',
+        text,
+        re.S,
+    )
+    if existing:
+        return text[: existing.start()] + snippet + text[existing.end() :]
     return _HIDEALL_FN_RE.sub(lambda m: m.group(1) + snippet, text, count=1)
 
 
@@ -1901,7 +1964,8 @@ def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> 
     """Experimental nav + pane + filled db + JS. Safe on live ~2.7MB HTML.
 
     ``ranked=None`` must not wipe ``#fd-sscore-db``. Does not change home
-    FLAGS→WATCH→MOM. Does not wrap ``cardHTML`` (no paper Buy/Sell here).
+    FLAGS→WATCH→MOM. S-score / κ UI stays inside ``#view-experimental`` only
+    (never pills on live MOM / FLAGS / home cards). Does not wrap ``cardHTML``.
     """
     text = html_text or ""
     text = _ensure_nav(text)
