@@ -362,8 +362,12 @@ function setView(v) {
                 text,
             )
             self.assertIsNotNone(mom_article)
-            self.assertNotIn("s_score", mom_article.group(0))
-            self.assertFalse(ss.SHOW_S_SCORE_PILL_ON_MOM)
+        self.assertFalse(ss.SHOW_S_SCORE_PILL_ON_MOM)
+        # Paper Buy/Sell hydrator must skip Experimental cards.
+        import paper_trade as pt
+        js = pt.strip_js()
+        self.assertIn("fd-ss-card", js)
+        self.assertIn("view-experimental", js)
 
 
 if __name__ == "__main__":

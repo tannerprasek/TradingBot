@@ -1453,7 +1453,9 @@ def strip_js() -> str:
   }
   function hydrateCard(node, card) {
     if (!node || !node.querySelector) return;
-    if (node.closest && node.closest("nav, .topnav, #gics-filter-strip, #fd-book-delta, #fd-paper-home")) return;
+    if (node.closest && node.closest("nav, .topnav, #gics-filter-strip, #fd-book-delta, #fd-paper-home, #view-experimental, #sscore-grid")) return;
+    if (node.getAttribute && node.getAttribute("data-fd-sscore") === "1") return;
+    if (node.classList && node.classList.contains("fd-ss-card")) return;
     if (!(node.matches && (node.matches("article.card, article, .card") || node.hasAttribute("data-t") || node.hasAttribute("data-ticker")))) {
       if (!node.classList || !node.classList.contains("card")) return;
     }

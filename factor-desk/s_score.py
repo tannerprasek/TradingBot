@@ -1443,6 +1443,7 @@ def panes_html(ranked: Mapping[str, Any] | None = None) -> str:
 def strip_css() -> str:
     return f"""
 #{VIEW_ID}.hide {{ display: none !important; }}
+#home.hide {{ display: none !important; }}
 .{HID_CLASS} {{ display: none !important; }}
 #{VIEW_ID} {{
   margin: 0 0 16px;

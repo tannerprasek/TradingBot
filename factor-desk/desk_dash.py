@@ -751,8 +751,10 @@ def render_html(
   {empty}
   {breakout.panes_html(ranked)}
   {s_score.panes_html(ss_ranked)}
+  <div id="home">
   <div class="grid">
     {"".join(rows)}
+  </div>
   </div>
   {gics_filter.embed_db(db)}
   {mom_streak.embed_db(streak_map)}
