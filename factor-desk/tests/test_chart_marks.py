@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -171,6 +171,11 @@ class SvgTests(unittest.TestCase):
         self.assertIn("Options Refresh", html)
         self.assertIn('id="options-refresh"', html)
         self.assertIn('classList.contains("fd-chart")', html)
+        self.assertIn("fd-name-drill", html)
+        self.assertIn("Positive ↑", html)
+        self.assertIn("Negative ↓", html)
+        self.assertIn("trendFlag", html)
+        self.assertIn("close > s50 && close > s200", html)
 
 
 class WriteCombinedChartTests(unittest.TestCase):
@@ -209,6 +214,88 @@ class WriteCombinedChartTests(unittest.TestCase):
             self.assertIn("__FD_CHART_MARKS__", text)
             self.assertIn("id=\"options-refresh\"", text)
             self.assertIn("class=\"chart\"", text)
+            self.assertIn("trendFlag", text)
+            self.assertIn("fd-chart-line-pos", text)
+
+
+class MaTrendTests(unittest.TestCase):
+    def test_sma_none_until_window(self) -> None:
+        vals = [1.0] * 50 + [2.0]
+        ma = cm.sma(vals, 50)
+        self.assertIsNone(ma[48])
+        self.assertAlmostEqual(ma[49], 1.0)
+        self.assertAlmostEqual(ma[50], (49 * 1.0 + 2.0) / 50)
+
+    def test_trend_flag_rule(self) -> None:
+        self.assertEqual(cm.trend_flag(2.0, 1.0, 1.0), "pos")
+        self.assertEqual(cm.trend_flag(1.0, 1.5, 0.5), "neg")
+        self.assertEqual(cm.trend_flag(1.0, 0.5, 1.5), "neg")
+        self.assertEqual(cm.trend_flag(1.0, 1.0, 0.5), "neg")
+        self.assertIsNone(cm.trend_flag(1.0, None, 1.0))
+        self.assertEqual(cm.trend_flag(1.1, 1.0, None), "pos")
+        self.assertEqual(cm.trend_flag(0.9, 1.0, None), "neg")
+
+    def test_short_series_colors_vs_sma50_only(self) -> None:
+        closes = [10.0 + i * 0.1 for i in range(60)]
+        flags, s50, s200 = cm.trend_flags(closes)
+        self.assertTrue(all(v is None for v in s200))
+        self.assertIsNone(flags[48])
+        self.assertEqual(flags[49], "pos")
+        self.assertIsNotNone(s50[49])
+
+    def test_long_series_waits_for_sma200(self) -> None:
+        closes = [10.0 + i * 0.1 for i in range(210)]
+        flags, _s50, s200 = cm.trend_flags(closes)
+        self.assertIsNone(flags[198])
+        self.assertEqual(flags[199], "pos")
+        self.assertIsNotNone(s200[199])
+
+    def test_segments_are_contiguous(self) -> None:
+        flags = [None, None, "pos", "pos", "neg", "neg", "neg", "pos"]
+        self.assertEqual(
+            cm.trend_segments(flags),
+            [("na", 0, 1), ("pos", 2, 3), ("neg", 4, 6), ("pos", 7, 7)],
+        )
+
+    def _px(self, n: int, *, crash_at: int | None = None) -> list[tuple[date, float]]:
+        rows: list[tuple[date, float]] = []
+        px = 100.0
+        d0 = date(2025, 1, 2)
+        for i in range(n):
+            if crash_at is not None and i >= crash_at:
+                px -= 1.2
+            else:
+                px += 0.25
+            rows.append((d0 + timedelta(days=i), round(px, 4)))
+        return rows
+
+    def test_spark_sma50_fallback_no_sma200(self) -> None:
+        card = {"ticker": "AAPL US Equity", "px_series": self._px(60)}
+        svg = cm.render_svg(card)
+        self.assertIn('data-fd-ma="50"', svg)
+        self.assertNotIn('data-fd-ma="200"', svg)
+        self.assertIn("fd-chart-line-pos", svg)
+        self.assertNotIn("Positive ↑", svg)
+
+    def test_spark_and_detail_split_green_red(self) -> None:
+        card = {"ticker": "AAPL US Equity", "px_series": self._px(220, crash_at=200)}
+        spark = cm.render_svg(card)
+        self.assertIn('data-fd-ma="50"', spark)
+        self.assertIn('data-fd-ma="200"', spark)
+        self.assertIn("fd-chart-line-pos", spark)
+        self.assertIn("fd-chart-line-neg", spark)
+        self.assertIn('data-fd-trend="1"', spark)
+        detail = cm.render_detail_svg(card)
+        self.assertIn("fd-chart-detail", detail)
+        self.assertIn("Positive ↑", detail)
+        self.assertIn("Negative ↓", detail)
+        self.assertIn("Trend Signals", detail)
+        self.assertIn("50-Day MA", detail)
+        self.assertIn("200-Day MA", detail)
+        self.assertIn("fd-chart-line-pos", detail)
+        self.assertIn("fd-chart-line-neg", detail)
+        self.assertIn('data-fd-ma="50"', detail)
+        self.assertIn('data-fd-ma="200"', detail)
 
 
 if __name__ == "__main__":

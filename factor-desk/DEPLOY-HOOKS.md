@@ -396,7 +396,7 @@ html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
 # _ensure_options_refresh_ui(html)  # keep Options Refresh on Refresh rewrites
 ```
 
-Overlay JS polishes existing `.tag-label` / `[data-tag-trigger]` / `.chart-anno` captions (cluster + collapse) and draws streak start/end diamonds from `#fd-chart-db`. It does not replace the live price series or change score v2.
+Overlay JS polishes existing `.tag-label` / `[data-tag-trigger]` / `.chart-anno` captions (cluster + collapse), draws streak start/end diamonds from `#fd-chart-db`, and recolors live name-drill polylines green/red by SMA50/SMA200 (Positive: close > both MAs) with thin 50-day (blue) / 200-day (maroon) overlays plus a `Positive ↑ / Negative ↓` legend. Generator `svg.fd-chart` is already painted in Python (`data-fd-trend=1`). It does not change score v2. Recopy `chart_marks.py` after this change.
 
 Also copy `mom_streak.py` (now has `streak_span` / `mom_streak_start` / `mom_streak_end`).
 

@@ -14,7 +14,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `desk_hitch.py` | Desk Analyst hitch pills from `ideas/` notes |
 | `paper_trade.py` | Paper Buy/Sell on dense `cardHTML` cards + Paper tab (localStorage; not a home chrome strip) |
 | `s_score.py` | Experimental residual S-score tab only (Avellaneda–Lee; not on MOM/FLAGS/home) |
-| `chart_marks.py` | Chart tag-trigger polish + streak begin/end overlay |
+| `chart_marks.py` | Chart tag-trigger polish + streak begin/end + MA-regime coloring |
 | `add_server.py` | Sidecar HTTP server on `:8765` (Refresh + `intraday=1`) |
 | `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills + `write_combined` |
 | `write_dash.py` | Write generated `factorbook.html` via `write_combined` |

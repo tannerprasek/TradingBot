@@ -33,14 +33,18 @@ A day at 5, or a missing print, breaks an above/below run.
 
 ## Chart marks
 
-Home-card charts keep **tag-trigger** marks (already on the live desk) and add **streak bounds**.
+Home-card charts keep **tag-trigger** marks (already on the live desk) and add **streak bounds**. Name-drill / detail charts (and card sparks when a close series is present) use the same **2/10 yield-curve** visual language: green/red path + 50/200-day MA overlays.
 
 - Tag triggers: amber triangles along the **top** of the plot. Labels within ~12px collapse to one caption (`G4 · EVT`) so they do not stack over the price line.
 - Streak begin / end: teal (above) or rose (below) **diamonds on the price series** (no full-height stem), tiny `s` / `now` (or `e`) captions along the **bottom** gutter — a different glyph/color than tag triangles. Open (still-running) end is a **hollow** diamond; start and a closed end are filled.
 - If the run is still live, the end mark is the latest print (`open`). A 1-day run is a **single** diamond (start = end).
 - `=5` is not a streak — no bound marks (the card pill still shows `=5`).
 
-`desk_dash.write_combined` always re-embeds `#fd-chart-db` + overlay JS (`chart_marks.ensure_embedded`) **and** `_ensure_options_refresh_ui`, so a Refresh rewrite cannot drop the marks or the Options Refresh button. See [chart_marks.py](../chart_marks.py).
+### MA trend coloring (v1)
+
+Daily close series. **Positive (green):** `close > SMA50 AND close > SMA200`. **Negative (red):** otherwise (close at or below either MA). The path is split into contiguous green/red segments so color flips over time. SMA50 is a thin blue overlay; SMA200 is maroon. If the series is shorter than 200, SMA200 is omitted and color is close vs SMA50 only. If shorter than 50, the default stroke stays (no regime). No arrows or callouts. Legend on the name-drill chart: `Positive ↑ / Negative ↓ Trend Signals`.
+
+`desk_dash.write_combined` always re-embeds `#fd-chart-db` + overlay JS (`chart_marks.ensure_embedded`) **and** `_ensure_options_refresh_ui`, so a Refresh rewrite cannot drop the marks or the Options Refresh button. See [chart_marks.py](../chart_marks.py). Live name-drill charts are recolored in place from the plotted polyline (same rule); generator `svg.fd-chart` is painted in Python.
 
 ## Rebuild path
 

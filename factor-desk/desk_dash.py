@@ -693,6 +693,16 @@ def render_html(
             '<p class="meta">No GICS sector names in the book. Optional one-shot: '
             "<code>python dapi_enrich.py --gics-once</code> (not part of Refresh).</p>"
         )
+    drill = ""
+    for card in cards:
+        detail = chart_marks.render_detail_svg(card)
+        if detail:
+            ticker = html.escape(str(card.get("ticker") or card.get("name") or ""))
+            drill = (
+                f'<section id="fd-name-drill" class="is-on" data-fd-drill-chart="1" data-t="{ticker}">'
+                f"{detail}</section>"
+            )
+            break
     html_text = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -749,6 +759,7 @@ def render_html(
     {book_delta.host_html(delta)}
   {gics_note}
   {empty}
+  {drill}
   {breakout.panes_html(ranked)}
   {s_score.panes_html(ss_ranked)}
   {paper_trade.panes_html()}
