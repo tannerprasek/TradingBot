@@ -20,18 +20,22 @@ P&L (1 unit notional)
 
 Mark price (first finite > 0)
 -----------------------------
-card ``price`` / ``px`` / ``px_last`` / ``PX_LAST`` / last Refresh print /
-last point of ``px_series``, then ``#fd-paper-marks``, then ``MOM.cards``.
+card ``px_last`` / ``PX_LAST`` / live ``px.by[ticker].p[-1]`` (not card
+``last``, which is a return) / last Refresh print / last point of
+``px_series``, then ``#fd-paper-marks``, then ``MOM.cards``.
 Missing mark → buttons disabled, ``title`` explains why.
 
 Paper tab (not a home chrome strip)
 -----------------------------------
 Top-nav **Paper** (``data-view="paper"``, ``#fd-nav-paper``) opens
-``#view-paper``: open positions with live P&L % and inline **Close**,
-ticker + Buy/Sell to open at the current mark, week scorecard since
-Monday 00:00 ``America/Edmonton``, and collapsible closed trades.
-Same ``fd-paper-book`` store as card Buy/Sell. Never inject
+``#view-paper``: ticker + Buy/Sell to open at the current mark, an
+open-positions **table** (Date / Ticker / Side / Entry / Mark /
+Return % / Close), week scorecard since Monday 00:00
+``America/Edmonton``, and a closed-trades table. Same
+``fd-paper-book`` store as card Buy/Sell. Never inject
 ``#fd-paper-home`` into top chrome / BOOK delta.
+Missing mark → Mark / Return show ``—`` (never fake ±100%); Close
+is disabled. Marks refresh from live card prices on Refresh.
 
 Live FLAGS/WATCH/MOM chrome is left alone except the card Buy/Sell
 strip. Recopy ``paper_trade.py`` to Desktop; do **not** wholesale
@@ -84,7 +88,10 @@ PAINTVIEW_MARKER = "/*fd-paper-paintview*/"
 
 BTN_PAPER = (
     f'<button type="button" class="btn nav-btn" id="{NAV_ID}" '
-    'data-view="paper" data-fd-paper-nav="1">Paper</button>'
+    'data-view="paper" data-fd-paper-nav="1" '
+    "onclick=\"if(window.setView)window.setView('paper');"
+    "else if(window.__FD_PAPER_SHOW__)window.__FD_PAPER_SHOW__();"
+    'return false;">Paper</button>'
 )
 
 NATIVE_VIEW_IDS: tuple[str, ...] = (
@@ -107,11 +114,19 @@ _ALLOWLIST_RE = re.compile(
     re.I,
 )
 _SETVIEW_FN_RE = re.compile(
-    r"(function\s+setView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{)",
+    r"("
+    r"function\s+setView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{"
+    r"|"
+    r"(?:window\.)?setView\s*=\s*function\s*(?:\s+\w+)?\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{"
+    r")",
     re.I,
 )
 _PAINTVIEW_FN_RE = re.compile(
-    r"(function\s+paintView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{)",
+    r"("
+    r"function\s+paintView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{"
+    r"|"
+    r"(?:window\.)?paintView\s*=\s*function\s*(?:\s+\w+)?\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{"
+    r")",
     re.I,
 )
 _HIDEALL_FN_RE = re.compile(
@@ -154,8 +169,10 @@ WEEK_TZ_NAME = "America/Edmonton"
 OPEN_SHOW_MAX = 12  # legacy chip-strip cap; the Paper tab lists every open
 EMPTY_OPENS = "no open paper"
 EMPTY_WEEK = "no closed yet this week"
+EMPTY_CLOSED = "no closed paper"
 
-# First finite > 0 wins. Live Refresh often writes px / PX_LAST / last.
+# First finite > 0 wins. Live desk print is px.by[ticker].p[-1].
+# Card ``last`` is a return — never a mark.
 MARK_KEYS: tuple[str, ...] = (
     "paper_mark",
     "px_last",
@@ -163,15 +180,22 @@ MARK_KEYS: tuple[str, ...] = (
     "LAST_PRICE",
     "last_px",
     "last_price",
+    "lastPx",
+    "pxLast",
+    "PxLast",
+    "LAST_PX",
+    "LAST",
     "mark",
     "mark_px",
     "price",
     "px",
-    "last",
     "close",
     "px_close",
     "adj_close",
     "PX_CLOSE",
+    "last_print",
+    "print",
+    "trd_px",
 )
 SERIES_KEYS: tuple[str, ...] = (
     "px_series",
@@ -180,6 +204,22 @@ SERIES_KEYS: tuple[str, ...] = (
     "px",
     "last_refresh",
     "refresh_px",
+    "series",
+    "hist",
+)
+NEST_MARK_KEYS: tuple[str, ...] = (
+    "quote",
+    "ref",
+    "raw",
+    "fields",
+    "dapi",
+    "bloomberg",
+    "ohlc",
+    "last_refresh",
+    "px",
+    "payload",
+    "print",
+    "prints",
 )
 
 SIDECAR_SCHEMA: dict[str, Any] = {
@@ -264,6 +304,8 @@ def empty_book(*, asof: str | None = None) -> dict[str, Any]:
 def _series_last(value: Any) -> float | None:
     if isinstance(value, Mapping):
         for key in MARK_KEYS:
+            if str(key).lower() == "last":
+                continue
             px = dapi_enrich.as_float(value.get(key))
             if px is not None and px > 0:
                 return px
@@ -282,20 +324,81 @@ def _series_last(value: Any) -> float | None:
     return px if px is not None and px > 0 else None
 
 
-def mark_of(card: Mapping[str, Any] | None) -> float | None:
-    """Best available mark on a card / enrich rec / MOM row."""
+def _payload_last(card: Mapping[str, Any] | None) -> float | None:
+    """Live ``px.by[ticker]`` print: ``{b, o, p:[closes], r, h, hi}`` → ``p[-1]``.
+
+    Dense-desk ``last`` is a **return**, not a dollar price — never use it here.
+    """
     if not card:
         return None
-    for key in MARK_KEYS:
-        px = dapi_enrich.as_float(card.get(key))
-        if px is not None and px > 0:
-            return px
-    for key in SERIES_KEYS:
-        if key in MARK_KEYS and not isinstance(card.get(key), (list, tuple)):
-            continue
+    for key in ("p", "closes"):
         raw = card.get(key)
         if isinstance(raw, (list, tuple)) and raw:
             px = _series_last(raw)
+            if px is not None:
+                return px
+    by = card.get("by") if isinstance(card.get("by"), Mapping) else None
+    px_map = card.get("px") or card.get("PX") or card.get("payload")
+    if by is None and isinstance(px_map, Mapping):
+        if isinstance(px_map.get("by"), Mapping):
+            by = px_map.get("by")
+        elif any(isinstance(v, Mapping) and isinstance(v.get("p"), (list, tuple)) for v in px_map.values()):
+            by = px_map
+        else:
+            last = dapi_enrich.as_float(px_map.get("LAST") or px_map.get("PX_LAST"))
+            return last if last is not None and last > 0 else None
+    if not isinstance(by, Mapping):
+        return None
+    hint = card.get("t") or card.get("ticker") or card.get("symbol")
+    rec = None
+    if hint:
+        rec = by.get(str(hint)) or by.get(_short(str(hint)))
+    if isinstance(rec, Mapping):
+        px = _payload_last(rec)
+        if px is not None:
+            return px
+    return None
+
+
+def mark_of(card: Mapping[str, Any] | None) -> float | None:
+    """Best available mark on a card / enrich rec / MOM / px.by row."""
+    if not card:
+        return None
+    payload = _payload_last(card)
+    if payload is not None:
+        return payload
+    for key in MARK_KEYS:
+        raw = card.get(key)
+        if isinstance(raw, Mapping):
+            continue
+        if str(key).lower() == "last":
+            continue
+        px = dapi_enrich.as_float(raw)
+        if px is not None and px > 0:
+            return px
+    # Case-insensitive Last / PX_LAST on live MOM cards.
+    lowered = {str(k).lower(): v for k, v in card.items()}
+    for key in MARK_KEYS:
+        raw = lowered.get(key.lower())
+        if isinstance(raw, Mapping):
+            continue
+        if str(key).lower() == "last":
+            continue
+        px = dapi_enrich.as_float(raw)
+        if px is not None and px > 0:
+            return px
+    for key in SERIES_KEYS:
+        raw = card.get(key)
+        if key in MARK_KEYS and not isinstance(raw, (list, tuple)):
+            continue
+        if isinstance(raw, (list, tuple)) and raw:
+            px = _series_last(raw)
+            if px is not None:
+                return px
+    for nest in NEST_MARK_KEYS:
+        inner = card.get(nest)
+        if isinstance(inner, Mapping) and inner is not card:
+            px = mark_of(inner)
             if px is not None:
                 return px
     return None
@@ -313,40 +416,480 @@ def attach_mark(
     return card
 
 
+def _put_mark(out: dict[str, float], ticker: str, px: float | None) -> None:
+    if not ticker or px is None or px <= 0:
+        return
+    out[ticker] = px
+    short = _short(ticker)
+    if short:
+        out.setdefault(short, px)
+
+
 def marks_db(
     cards: Iterable[Mapping[str, Any]] | None = None,
     book: Mapping[str, Any] | None = None,
+    html: str | None = None,
 ) -> dict[str, float]:
-    """ticker / short → mark, for ``#fd-paper-marks`` after Refresh."""
+    """ticker / short → mark, for ``#fd-paper-marks`` after Refresh.
+
+    Rebuilds from live HTML ``window.px.by[ticker].p[-1]`` (or
+    ``window.px = window.px || {by:…}``) on every Refresh, then card /
+    enrichment ``PX_LAST`` / ``raw``. Card ``last`` is a return and is
+    never stored. Short aliases (``CNH US Equity`` → ``CNH``) are filled
+    alongside the long name so a write cannot wipe prints. A one-shot
+    ``#fd-paper-marks`` hot-fill is not required — ``ensure_embedded``
+    re-harvests ``px.by`` even when the JSON db is ``{}``.
+    """
     out: dict[str, float] = {}
-
-    def put(ticker: str, px: float | None) -> None:
-        if not ticker or px is None or px <= 0:
-            return
-        out[ticker] = px
-        short = _short(ticker)
-        if short:
-            out.setdefault(short, px)
-
+    if html:
+        out.update(harvest_html_marks(html))
     for card in cards or []:
         if not isinstance(card, Mapping):
             continue
-        put(card_ticker(card), mark_of(card))
-        put(str(card.get("t") or ""), mark_of(card))
+        put_px_by(out, card)
+        _collect_mark(out, card)
     names = (book or {}).get("names") if isinstance(book, Mapping) else None
     if isinstance(names, dict):
         for ticker, rec in names.items():
-            put(str(ticker), mark_of(rec if isinstance(rec, Mapping) else None))
+            if isinstance(rec, Mapping):
+                put_px_by(out, rec)
+                _collect_mark(out, rec, ticker_hint=str(ticker))
+            else:
+                _put_mark(out, str(ticker), dapi_enrich.as_float(rec))
+    elif isinstance(book, Mapping):
+        put_px_by(out, book)
+        _collect_mark(out, book)
+    return out
+
+
+_ARTICLE_OPEN_RE = re.compile(r"<article\b([^>]*)>", re.I)
+_ATTR_RE = re.compile(r"""\b([:\w.-]+)\s*=\s*["']([^"']*)["']""", re.I)
+_MARKS_SCRIPT_RE = re.compile(
+    rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>(.*?)</script>',
+    re.I | re.S,
+)
+_JSON_SCRIPT_RE = re.compile(
+    r'<script\b[^>]*type=["\']application/json["\'][^>]*>(.*?)</script>',
+    re.I | re.S,
+)
+_MOM_ASSIGN_RE = re.compile(
+    r"(?:(?:window|self|globalThis)\s*\.\s*)?(?:MOM(?:_CARDS)?(?:\s*\.\s*"
+    r"(?:cards|up|down|flags|watch|all|px|PX|payload))?|"
+    r"BOOK|NAMES|(?:px|PX)(?:\s*\.\s*by)?)\s*=\s*",
+    re.I,
+)
+_PX_BY_START_RE = re.compile(
+    r"(?:(?:window|self|globalThis)\s*\.\s*)?(?:px|PX)\s*\.\s*by\s*=\s*\{"
+    r"|(?:^|[{\,;=\s])\s*[\"']?by[\"']?\s*:\s*\{",
+    re.I | re.M,
+)
+_TICKER_TOKEN_RE = re.compile(r"^[A-Z][A-Z0-9./-]{0,11}$")
+_STRUCT_KEYS = frozenset(
+    {
+        "CARDS",
+        "CARD",
+        "UP",
+        "DOWN",
+        "FLAGS",
+        "WATCH",
+        "PX",
+        "LAST",
+        "MARK",
+        "MARKS",
+        "PRICE",
+        "PRICES",
+        "CLOSE",
+        "CLOSES",
+        "RAW",
+        "QUOTE",
+        "REF",
+        "FIELDS",
+        "OHLC",
+        "SERIES",
+        "HIST",
+        "PAYLOAD",
+        "PRINT",
+        "PRINTS",
+        "MOM",
+        "HOME",
+        "ALL",
+        "NAMES",
+        "BOOK",
+        "META",
+        "ASOF",
+        "VERSION",
+        "KIND",
+        "POSITIONS",
+        "CLOSED",
+        "OUTLIERS",
+        "SEARCH",
+        "DATA",
+        "ITEMS",
+        "ROWS",
+        "VALUES",
+        "T",
+        "TICKER",
+        "SYMBOL",
+        "NAME",
+        "D",
+        "SIDE",
+        "ENTRY",
+        "EXIT",
+        "QTY",
+        "OPEN",
+        "OPENS",
+        "WEEK",
+        "BLOOMBERG",
+        "DAPI",
+        "PXLAST",
+        "LASTPRICE",
+        "PXCLOSE",
+        "ADJCLOSE",
+        "BY",
+        "P",
+        "HI",
+    }
+)
+_TICKER_FIELD_RE = re.compile(
+    r"""["']?(?:t|ticker|symbol)["']?\s*:\s*["']([^"']+)["']""",
+    re.I,
+)
+_PX_FIELD_RE = re.compile(
+    r"""["']?(?:PX_LAST|px_last|LAST_PRICE|last_px|last_price|lastPx|pxLast|"""
+    r"""paper_mark|mark_px|price|PX_CLOSE|adj_close)["']?\s*:\s*"""
+    r"""["']?([0-9]+(?:\.[0-9]+)?)["']?""",
+    re.I,
+)
+_PX_BY_P_RE = re.compile(
+    r"""(?:["']([A-Z][A-Z0-9./-]{0,11})(?:\s+US\s+Equity)?["']|"""
+    r"""(?:^|[{\,])\s*([A-Z][A-Z0-9./]{1,11}))\s*:\s*"""
+    r"""\{[^{}]{0,500}?\bp\s*:\s*\[([^\[\]]{1,12000})\]""",
+    re.I | re.S,
+)
+_PX_REC_START_RE = re.compile(
+    r"""(?:["']([A-Z][A-Z0-9./-]{0,11})(?:\s+US\s+Equity)?["']|"""
+    r"""(?:^|[{\,])\s*([A-Z][A-Z0-9./]{1,11}))\s*:\s*\{""",
+    re.I | re.S,
+)
+
+
+def _looks_like_ticker(value: str) -> bool:
+    short = _short(value)
+    if not short or short in _STRUCT_KEYS:
+        return False
+    return bool(_TICKER_TOKEN_RE.fullmatch(short))
+
+
+def put_px_by(out: dict[str, float], obj: Any, *, _depth: int = 0) -> None:
+    """Fill ``out`` from ``px.by[ticker].p[-1]`` (and short aliases)."""
+    if _depth > 5 or not isinstance(obj, Mapping):
+        return
+    by = obj.get("by") if isinstance(obj.get("by"), Mapping) else None
+    if by is None:
+        values = [v for v in obj.values() if isinstance(v, Mapping)]
+        hits = sum(1 for v in values if isinstance(v.get("p"), (list, tuple)))
+        if hits and hits >= max(1, len(values) // 4):
+            by = obj
+    if isinstance(by, Mapping):
+        for ticker, rec in by.items():
+            if isinstance(rec, Mapping):
+                raw_p = rec.get("p")
+                px = _series_last(raw_p) if isinstance(raw_p, (list, tuple)) else None
+                if px is None:
+                    px = _payload_last(rec)
+                _put_mark(out, str(ticker), px)
+            else:
+                _put_mark(out, str(ticker), dapi_enrich.as_float(rec))
+    for nest in ("px", "PX", "payload"):
+        inner = obj.get(nest)
+        if isinstance(inner, Mapping) and inner is not obj:
+            put_px_by(out, inner, _depth=_depth + 1)
+
+
+def _last_number(blob: str) -> float | None:
+    nums = re.findall(r"[0-9]+(?:\.[0-9]+)?", blob or "")
+    if not nums:
+        return None
+    return dapi_enrich.as_float(nums[-1])
+
+
+def harvest_px_by_text(text: str, out: dict[str, float]) -> None:
+    """Regex fallback when ``window.px = {by:{...}}`` is too JS-y to JSON.load."""
+    blob = text or ""
+    for m in _PX_BY_P_RE.finditer(blob):
+        ticker = m.group(1) or m.group(2) or ""
+        if not _looks_like_ticker(ticker):
+            continue
+        px = _last_number(m.group(3) or "")
+        if px is not None and px > 0:
+            _put_mark(out, ticker, px)
+    for m in _PX_REC_START_RE.finditer(blob):
+        ticker = m.group(1) or m.group(2) or ""
+        if not _looks_like_ticker(ticker):
+            continue
+        short = _short(ticker)
+        if short and short in out:
+            continue
+        rec = _extract_balanced(blob, m.end() - 1, max_len=250_000)
+        if not rec:
+            continue
+        parsed = _js_like_load(rec)
+        if isinstance(parsed, Mapping):
+            raw_p = parsed.get("p")
+            px = _series_last(raw_p) if isinstance(raw_p, (list, tuple)) else None
+            if px is None:
+                px = _payload_last(parsed)
+            _put_mark(out, ticker, px)
+
+
+def _collect_mark(
+    out: dict[str, float],
+    obj: Any,
+    ticker_hint: str | None = None,
+    *,
+    _depth: int = 0,
+) -> None:
+    if _depth > 6 or obj is None:
+        return
+    if isinstance(obj, Mapping):
+        hint = ticker_hint
+        for key in ("t", "ticker", "symbol", "d", "name"):
+            raw = obj.get(key)
+            if isinstance(raw, str) and _looks_like_ticker(raw):
+                hint = raw
+                break
+        px = mark_of(obj)
+        if hint:
+            _put_mark(out, str(hint), px)
+        if isinstance(obj.get("by"), Mapping) or any(
+            isinstance(v, Mapping) and isinstance(v.get("p"), (list, tuple)) for v in obj.values()
+        ):
+            put_px_by(out, obj)
+        for key, val in obj.items():
+            key_s = str(key)
+            if _looks_like_ticker(key_s) and not (ticker_hint and len(_short(key_s)) <= 1):
+                if isinstance(val, Mapping):
+                    _collect_mark(out, val, ticker_hint=key_s, _depth=_depth + 1)
+                elif isinstance(val, (list, tuple)):
+                    _collect_mark(out, val, ticker_hint=None, _depth=_depth + 1)
+                else:
+                    _put_mark(out, key_s, dapi_enrich.as_float(val))
+            elif isinstance(val, (Mapping, list, tuple)) and key_s.lower() not in {
+                "null_reasons",
+                "fields_used",
+                "enrich_pills",
+            }:
+                _collect_mark(out, val, ticker_hint=hint, _depth=_depth + 1)
+        return
+    if isinstance(obj, (list, tuple)):
+        if len(obj) >= 2 and isinstance(obj[0], str) and _looks_like_ticker(obj[0]):
+            _put_mark(out, str(obj[0]), dapi_enrich.as_float(obj[1]))
+        for item in obj:
+            _collect_mark(out, item, ticker_hint=ticker_hint, _depth=_depth + 1)
+
+
+def _skip_to_value_start(text: str, start: int) -> int:
+    """Skip ``window.px ||`` / comments so extract starts at ``{`` / ``[``."""
+    i = start
+    n = len(text)
+    guard = 0
+    while i < n and guard < 64:
+        guard += 1
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i >= n:
+            return i
+        if text.startswith("//", i):
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if text[i] in "{[":
+            return i
+        if text[i] == "(":
+            i += 1
+            continue
+        if text[i].isalpha() or text[i] in "_$":
+            j = i
+            while j < n and (text[j].isalnum() or text[j] in "_.$"):
+                j += 1
+            k = j
+            while k < n and text[k] in " \t\r\n":
+                k += 1
+            if text.startswith("||", k) or text.startswith("??", k):
+                i = k + 2
+                continue
+            if k < n and text[k] == "=" and not text.startswith("==", k) and not text.startswith("=>", k):
+                i = k + 1
+                continue
+            return i
+        return i
+    return i
+
+
+def _ingest_px_blob(blob: str | None, out: dict[str, float]) -> None:
+    if not blob:
+        return
+    parsed = _js_like_load(blob)
+    if parsed is not None:
+        put_px_by(out, parsed)
+        if isinstance(parsed, Mapping) and not isinstance(parsed.get("by"), Mapping):
+            put_px_by(out, {"by": parsed})
+        _collect_mark(out, parsed)
+        return
+    harvest_px_by_text(blob, out)
+
+
+def _harvest_px_by_objects(text: str, out: dict[str, float]) -> None:
+    """Pull ``px.by`` / ``by:{...}`` maps even when the assignment is ``px || {``."""
+    for m in _PX_BY_START_RE.finditer(text or ""):
+        blob = _extract_balanced(text, m.end() - 1)
+        _ingest_px_blob(blob, out)
+
+
+def _extract_balanced(text: str, start: int, max_len: int = 6_000_000) -> str | None:
+    if start >= len(text) or text[start] not in "{[":
+        return None
+    opener = text[start]
+    closer = "}" if opener == "{" else "]"
+    depth = 0
+    in_str = False
+    quote = ""
+    esc = False
+    j = start
+    n = len(text)
+    while j < n and (j - start) < max_len:
+        ch = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == quote:
+                in_str = False
+        elif ch in "'\"":
+            in_str = True
+            quote = ch
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start : j + 1]
+        j += 1
+    return None
+
+
+def _js_like_load(blob: str) -> Any:
+    s = (blob or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
+    s = re.sub(r"(^|[^:\"'])//.*?$", r"\1", s, flags=re.M)
+    s = re.sub(r"\bundefined\b|\bNaN\b", "null", s)
+
+    def _single_strings(m: re.Match[str]) -> str:
+        return json.dumps(bytes(m.group(1), "utf-8").decode("unicode_escape") if "\\" in m.group(1) else m.group(1))
+
+    try:
+        s2 = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", lambda m: json.dumps(m.group(1)), s)
+    except re.error:
+        s2 = s
+    s2 = re.sub(r"([{\[,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', s2)
+    s2 = re.sub(r",\s*([}\]])", r"\1", s2)
+    try:
+        return json.loads(s2)
+    except json.JSONDecodeError:
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            return None
+
+
+def _harvest_ticker_px_pairs(text: str, out: dict[str, float]) -> None:
+    for m in _TICKER_FIELD_RE.finditer(text or ""):
+        ticker = m.group(1)
+        if not _looks_like_ticker(ticker):
+            continue
+        window = (text or "")[m.end() : m.end() + 420]
+        px_m = _PX_FIELD_RE.search(window)
+        if px_m:
+            _put_mark(out, ticker, dapi_enrich.as_float(px_m.group(1)))
+
+
+def harvest_html_marks(html_text: str | None) -> dict[str, float]:
+    """Pull marks already on the live desk HTML so Refresh cannot wipe them.
+
+    Sources: existing ``#fd-paper-marks`` JSON, ``data-px`` on cards,
+    ``window.px.by[ticker].p[-1]`` (live print), ``window.MOM`` /
+    ``PX_LAST`` / ``px.LAST``, other JSON script tags. Card ``last`` is a
+    return and is ignored. Never treats 0 as a mark.
+    """
+    out: dict[str, float] = {}
+    text = html_text or ""
+    blob_m = _MARKS_SCRIPT_RE.search(text)
+    if blob_m:
+        raw = (blob_m.group(1) or "").replace("<\\/", "</").strip()
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, Mapping):
+            for key, val in parsed.items():
+                _put_mark(out, str(key), dapi_enrich.as_float(val))
+    for tag in _ARTICLE_OPEN_RE.finditer(text):
+        attrs = {name.lower(): val for name, val in _ATTR_RE.findall(tag.group(1) or "")}
+        ticker = attrs.get("data-t") or attrs.get("data-ticker") or attrs.get("data-name") or ""
+        px = attrs.get("data-px") or attrs.get("data-px-last") or attrs.get("data-mark")
+        _put_mark(out, ticker, dapi_enrich.as_float(px))
+    for assign in _MOM_ASSIGN_RE.finditer(text):
+        idx = _skip_to_value_start(text, assign.end())
+        blob = _extract_balanced(text, idx)
+        if not blob:
+            continue
+        _ingest_px_blob(blob, out)
+    _harvest_px_by_objects(text, out)
+    for script in _JSON_SCRIPT_RE.finditer(text):
+        raw = (script.group(1) or "").replace("<\\/", "</").strip()
+        if not raw or raw in {"{}", "[]"}:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        put_px_by(out, parsed)
+        _collect_mark(out, parsed)
+    harvest_px_by_text(text, out)
+    if len(out) < 2:
+        _harvest_ticker_px_pairs(text, out)
+    return out
+
+
+def merge_marks(*maps: Mapping[str, Any] | None) -> dict[str, float]:
+    """Later maps win when their values are finite ``> 0``."""
+    out: dict[str, float] = {}
+    for mapping in maps:
+        if not isinstance(mapping, Mapping):
+            continue
+        for key, val in mapping.items():
+            _put_mark(out, str(key), dapi_enrich.as_float(val))
     return out
 
 
 def pnl_pct(side: str | None, entry: float | None, mark: float | None) -> float | None:
-    """Signed percent. Long up = +, short down = +."""
+    """Signed percent. Long up = +, short down = +.
+
+    Missing / non-positive mark or entry → ``None`` (never treat as 0,
+    which would paint every long −100% and every short +100%).
+    """
     if side not in {"long", "short"}:
         return None
     entry_px = dapi_enrich.as_float(entry)
     mark_px = dapi_enrich.as_float(mark)
-    if entry_px is None or mark_px is None or entry_px == 0:
+    if entry_px is None or mark_px is None or entry_px <= 0 or mark_px <= 0:
         return None
     if side == "long":
         return (mark_px - entry_px) / entry_px * 100.0
@@ -357,6 +900,13 @@ def fmt_pct(value: float | None) -> str:
     if value is None:
         return "—"
     return f"{value:+.2f}%"
+
+
+def fmt_px(value: float | None) -> str:
+    px = dapi_enrich.as_float(value)
+    if px is None or px <= 0:
+        return "—"
+    return f"{px:.2f}"
 
 
 def position_of(book: Mapping[str, Any] | None, ticker: str) -> dict[str, Any] | None:
@@ -708,6 +1258,141 @@ def _date_label(value: Any) -> str:
     return text[:10]
 
 
+def _side_cell(side: str | None) -> str:
+    raw = str(side or "").strip().lower()
+    label = html.escape(raw.upper() or "—")
+    cls = "fd-paper-side"
+    if raw == "long":
+        cls += " fd-paper-up"
+    elif raw == "short":
+        cls += " fd-paper-down"
+    return f'<span class="{cls}">{label}</span>'
+
+
+def _ret_cell(ret: float | None) -> str:
+    cls = "fd-paper-num"
+    if ret is not None:
+        cls += " fd-paper-up" if ret >= 0 else " fd-paper-down"
+    return f'<span class="{cls}">{html.escape(fmt_pct(ret))}</span>'
+
+
+def _open_row_html(row: Mapping[str, Any]) -> str:
+    ticker_raw = str(row.get("ticker") or "")
+    ticker = html.escape(ticker_raw, quote=True)
+    ticker_txt = html.escape(ticker_raw)
+    mark = dapi_enrich.as_float(row.get("mark"))
+    has_mark = mark is not None and mark > 0
+    ret = row.get("pnl_pct") if has_mark else None
+    disabled = "" if has_mark else " disabled"
+    title = "" if has_mark else html.escape(NO_MARK_REASON, quote=True)
+    return (
+        f'<tr class="fd-paper-open-row" data-fd-paper-ticker="{ticker}">'
+        f'<td class="fd-paper-num">{html.escape(_date_label(row.get("opened_at")))}</td>'
+        f'<td><button type="button" class="fd-paper-ticker" data-fd-paper-ticker="{ticker}">'
+        f"{ticker_txt}</button></td>"
+        f"<td>{_side_cell(str(row.get('side') or ''))}</td>"
+        f'<td class="fd-paper-num">{html.escape(fmt_px(row.get("entry")))}</td>'
+        f'<td class="fd-paper-num">{html.escape(fmt_px(mark if has_mark else None))}</td>'
+        f"<td>{_ret_cell(ret if isinstance(ret, (int, float)) else None)}</td>"
+        f'<td><button type="button" class="fd-paper-btn fd-paper-close" data-fd-paper-close="1" '
+        f'data-fd-paper-ticker="{ticker}"{disabled} title="{title}">Close</button></td>'
+        f"</tr>"
+    )
+
+
+def _closed_row_html(row: Mapping[str, Any]) -> str:
+    ticker_raw = str(row.get("ticker") or "")
+    ticker = html.escape(ticker_raw, quote=True)
+    return (
+        f'<tr data-fd-paper-ticker="{ticker}">'
+        f'<td class="fd-paper-num">{html.escape(_date_label(row.get("opened_at")))}</td>'
+        f'<td class="fd-paper-num">{html.escape(_date_label(row.get("closed_at")))}</td>'
+        f"<td>{html.escape(ticker_raw)}</td>"
+        f"<td>{_side_cell(str(row.get('side') or ''))}</td>"
+        f'<td class="fd-paper-num">{html.escape(fmt_px(row.get("entry")))}</td>'
+        f'<td class="fd-paper-num">{html.escape(fmt_px(row.get("exit")))}</td>'
+        f"<td>{_ret_cell(_row_ret(row))}</td>"
+        f"</tr>"
+    )
+
+
+def _open_table_html(opens: Sequence[Mapping[str, Any]]) -> str:
+    if not opens:
+        return f'<p class="fd-paper-home-empty">{html.escape(EMPTY_OPENS)}</p>'
+    body = "".join(_open_row_html(row) for row in opens)
+    return (
+        '<table class="fd-paper-table" aria-label="Open paper">'
+        "<thead><tr>"
+        "<th>Date</th><th>Ticker</th><th>Side</th>"
+        "<th>Entry</th><th>Mark</th><th>Return %</th><th></th>"
+        "</tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+    )
+
+
+def _closed_table_html(closed: Sequence[Mapping[str, Any]]) -> str:
+    if not closed:
+        return f'<p class="fd-paper-home-empty">{html.escape(EMPTY_CLOSED)}</p>'
+    body = "".join(_closed_row_html(row) for row in closed)
+    return (
+        '<table class="fd-paper-table" aria-label="Closed paper">'
+        "<thead><tr>"
+        "<th>Date</th><th>Closed</th><th>Ticker</th><th>Side</th>"
+        "<th>Entry</th><th>Exit</th><th>Return %</th>"
+        "</tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+    )
+
+
+def panes_html(
+    book: Mapping[str, Any] | None = None,
+    marks: Mapping[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Paper tab pane. JS re-paints opens / scorecard / closed from localStorage."""
+    opens = open_rows(book, marks) if book else []
+    score = week_scorecard(book, now=now) if book else {
+        "count": 0,
+        "empty": True,
+        "tz": WEEK_TZ_NAME,
+    }
+    closed = closed_rows(book) if book else []
+    open_inner = _open_table_html(opens)
+    closed_inner = _closed_table_html(closed)
+    empty_cls = " fd-paper-home-empty" if score.get("empty") else ""
+    tz = html.escape(WEEK_TZ_NAME, quote=True)
+    return "\n".join(
+        [
+            f'<div id="{VIEW_ID}" class="view-pane hide" data-view="paper" hidden>',
+            '  <div class="ph">Paper</div>',
+            f'  <div class="fd-paper-tab" id="{TAB_ID}" role="region" '
+            f'aria-label="Paper book" data-week-tz="{tz}">',
+            '    <form class="fd-paper-open-form" id="fd-paper-open-form" action="javascript:void(0)">',
+            f'      <input id="{TICKER_INPUT_ID}" type="text" placeholder="TICKER" '
+            'autocomplete="off" spellcheck="false" aria-label="Ticker" />',
+            '      <button type="button" class="fd-paper-btn fd-paper-buy" data-fd-paper-open="buy">Buy</button>',
+            '      <button type="button" class="fd-paper-btn fd-paper-sell" data-fd-paper-open="sell">Sell</button>',
+            "    </form>",
+            '    <section class="fd-paper-opens-sec">',
+            '      <span class="fd-paper-home-kicker">open</span>',
+            f'      <div id="{OPENS_ID}" class="fd-paper-opens">{open_inner}</div>',
+            "    </section>",
+            '    <section class="fd-paper-week-sec">',
+            '      <span class="fd-paper-home-kicker">week</span>',
+            f'      <span id="{WEEK_ID}" class="fd-paper-home-score{empty_cls}">'
+            f"{html.escape(scorecard_line(score))}</span>",
+            "    </section>",
+            '    <section class="fd-paper-closed-sec">',
+            '      <span class="fd-paper-home-kicker">closed</span>',
+            f'      <div id="{CLOSED_ID}" class="fd-paper-closed-wrap">{closed_inner}</div>',
+            "    </section>",
+            "  </div>",
+            "</div>",
+        ]
+    )
+
+
 def position_line(pos: Mapping[str, Any] | None, mark: float | None) -> str:
     if not pos:
         return ""
@@ -814,85 +1499,6 @@ def closed_rows(book: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     return rows
 
 
-def _open_row_html(row: Mapping[str, Any]) -> str:
-    ret = row.get("pnl_pct")
-    cls = "fd-paper-chip"
-    if ret is not None:
-        cls += " fd-paper-up" if ret >= 0 else " fd-paper-down"
-    ticker = html.escape(str(row.get("ticker") or ""), quote=True)
-    label = html.escape(str(row.get("label") or ticker))
-    return (
-        f'<div class="fd-paper-open-row" data-fd-paper-ticker="{ticker}">'
-        f'<button type="button" class="{cls}" data-fd-paper-ticker="{ticker}">{label}</button>'
-        f'<button type="button" class="fd-paper-btn fd-paper-close" data-fd-paper-close="1" '
-        f'data-fd-paper-ticker="{ticker}">Close</button>'
-        f"</div>"
-    )
-
-
-def panes_html(
-    book: Mapping[str, Any] | None = None,
-    marks: Mapping[str, Any] | None = None,
-    *,
-    now: datetime | None = None,
-) -> str:
-    """Paper tab pane. JS re-paints opens / scorecard / closed from localStorage."""
-    opens = open_rows(book, marks) if book else []
-    score = week_scorecard(book, now=now) if book else {
-        "count": 0,
-        "empty": True,
-        "tz": WEEK_TZ_NAME,
-    }
-    closed = closed_rows(book) if book else []
-    if opens:
-        open_inner = "".join(_open_row_html(row) for row in opens)
-    else:
-        open_inner = f'<p class="fd-paper-home-empty">{html.escape(EMPTY_OPENS)}</p>'
-    closed_bits: list[str] = []
-    for row in closed:
-        line = (
-            f"{_date_label(row.get('closed_at'))} · {str(row.get('ticker') or '')} · "
-            f"{str(row.get('side') or '').upper()} · {fmt_pct(_row_ret(row))}"
-        )
-        closed_bits.append(f"<li>{html.escape(line)}</li>")
-    closed_items = "".join(closed_bits)
-    n_closed = len(closed)
-    summary = f"Closed trades ({n_closed})" if n_closed else "Closed trades"
-    empty_cls = " fd-paper-home-empty" if score.get("empty") else ""
-    tz = html.escape(WEEK_TZ_NAME, quote=True)
-    return "\n".join(
-        [
-            f'<div id="{VIEW_ID}" class="view-pane hide" data-view="paper" hidden>',
-            '  <div class="ph">Paper</div>',
-            f'  <div class="fd-paper-tab" id="{TAB_ID}" role="region" '
-            f'aria-label="Paper book" data-week-tz="{tz}">',
-            '    <form class="fd-paper-open-form" id="fd-paper-open-form" action="javascript:void(0)">',
-            '      <label class="fd-paper-open-label">Open',
-            f'        <input id="{TICKER_INPUT_ID}" type="text" placeholder="ticker" '
-            'autocomplete="off" spellcheck="false" />',
-            "      </label>",
-            '      <button type="button" class="fd-paper-btn fd-paper-buy" data-fd-paper-open="buy">Buy</button>',
-            '      <button type="button" class="fd-paper-btn fd-paper-sell" data-fd-paper-open="sell">Sell</button>',
-            "    </form>",
-            '    <section class="fd-paper-opens-sec">',
-            '      <span class="fd-paper-home-kicker">open</span>',
-            f'      <div id="{OPENS_ID}" class="fd-paper-opens">{open_inner}</div>',
-            "    </section>",
-            '    <section class="fd-paper-week-sec">',
-            '      <span class="fd-paper-home-kicker">week</span>',
-            f'      <span id="{WEEK_ID}" class="fd-paper-home-score{empty_cls}">'
-            f"{html.escape(scorecard_line(score))}</span>",
-            "    </section>",
-            f'    <details class="fd-paper-hist fd-paper-closed">',
-            f"      <summary>{html.escape(summary)}</summary>",
-            f'      <ul id="{CLOSED_ID}">{closed_items}</ul>',
-            "    </details>",
-            "  </div>",
-            "</div>",
-        ]
-    )
-
-
 def home_host_html(*_args: Any, **_kwargs: Any) -> str:
     """Legacy chrome strip. Always empty — Paper lives in ``#view-paper``."""
     return ""
@@ -984,14 +1590,19 @@ def strip_css() -> str:
 #{HOME_HOST_ID}, .fd-paper-home {{
   display: none !important;
 }}
-#{VIEW_ID},
 #{VIEW_ID}.hide,
-#{VIEW_ID}[hidden] {{
+#{VIEW_ID}[hidden]:not(.fd-paper-on) {{
   display: none !important;
 }}
-body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
+body[data-view="paper"] #{VIEW_ID},
+body[data-fd-paper="1"] #{VIEW_ID},
 #{VIEW_ID}.fd-paper-on {{
   display: block !important;
+  visibility: visible !important;
+}}
+body[data-view="paper"] #home,
+body[data-fd-paper="1"] #home {{
+  display: none !important;
 }}
 #{VIEW_ID} .ph {{
   font: 650 13px/1.2 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
@@ -1003,7 +1614,7 @@ body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
   display: flex;
   flex-direction: column;
   gap: 14px;
-  max-width: 720px;
+  max-width: 960px;
   font: 650 10px/1.15 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
 }}
 .fd-paper-open-form {{
@@ -1030,21 +1641,65 @@ body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
   width: 8.5em;
   text-transform: uppercase;
 }}
-.fd-paper-opens-sec, .fd-paper-week-sec {{
+.fd-paper-opens-sec, .fd-paper-week-sec, .fd-paper-closed-sec {{
   display: flex;
   flex-direction: column;
   gap: 6px;
 }}
-.fd-paper-opens {{
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.fd-paper-opens, .fd-paper-closed-wrap {{
+  display: block;
+  overflow-x: auto;
 }}
+#{VIEW_ID} table.fd-paper-table,
+.fd-paper-table {{
+  display: table !important;
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  table-layout: auto;
+}}
+#{VIEW_ID} table.fd-paper-table thead {{ display: table-header-group !important; }}
+#{VIEW_ID} table.fd-paper-table tbody {{ display: table-row-group !important; }}
+#{VIEW_ID} table.fd-paper-table tr {{ display: table-row !important; }}
+#{VIEW_ID} table.fd-paper-table th,
+#{VIEW_ID} table.fd-paper-table td {{ display: table-cell !important; }}
+.fd-paper-table th {{
+  text-align: left;
+  color: #6b7280;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 10px 6px 0;
+  border-bottom: 1px solid #1f2937;
+  white-space: nowrap;
+}}
+.fd-paper-table td {{
+  padding: 6px 10px 6px 0;
+  border-bottom: 1px solid #1f2937;
+  color: #d1d5db;
+  vertical-align: middle;
+  white-space: nowrap;
+}}
+.fd-paper-table th:last-child,
+.fd-paper-table td:last-child {{
+  padding-right: 0;
+}}
+.fd-paper-num {{
+  font-variant-numeric: tabular-nums;
+}}
+.fd-paper-ticker {{
+  background: none;
+  border: 0;
+  color: #e5e7eb;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: 0.04em;
+  padding: 0;
+}}
+.fd-paper-ticker:hover {{ color: #fff; text-decoration: underline; }}
+.fd-paper-side {{ letter-spacing: 0.04em; }}
 .fd-paper-open-row {{
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+  /* table row; keep class for JS observers */
 }}
 .fd-paper-close {{
   color: #fde68a;
@@ -1065,20 +1720,12 @@ body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
   margin-right: 2px;
 }}
 .fd-paper-chip {{
-  display: inline-block;
-  font: 650 10px/1.15 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.03em;
-  padding: 2px 7px;
-  border-radius: 3px;
-  border: 1px solid #4b5563;
-  color: #d1d5db;
-  background: #111827;
-  cursor: pointer;
-  font-variant-numeric: tabular-nums;
+  display: none !important;
 }}
-.fd-paper-chip:hover {{ color: #fff; }}
-.fd-paper-chip.fd-paper-up {{ color: #6ee7b7; border-color: #34d399; }}
-.fd-paper-chip.fd-paper-down {{ color: #fda4af; border-color: #fb7185; }}
+#{VIEW_ID} .fd-paper-chip,
+#{VIEW_ID} div.fd-paper-open-row {{
+  display: none !important;
+}}
 .fd-paper-home-empty, .fd-paper-home-score.fd-paper-home-empty {{
   color: #6b7280;
   letter-spacing: 0.03em;
@@ -1087,6 +1734,9 @@ body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
   color: #9ca3af;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.03em;
+}}
+.fd-paper-closed-sec {{
+  margin-top: 2px;
 }}
 .fd-paper-closed {{
   margin-top: 4px;
@@ -1104,11 +1754,10 @@ def strip_js() -> str:
     week_tz = json.dumps(WEEK_TZ_NAME, ensure_ascii=False)
     empty_opens = json.dumps(EMPTY_OPENS, ensure_ascii=False)
     empty_week = json.dumps(EMPTY_WEEK, ensure_ascii=False)
+    empty_closed = json.dumps(EMPTY_CLOSED, ensure_ascii=False)
     open_limit = str(int(OPEN_SHOW_MAX))
     return r"""
 (function () {
-  if (window.__FD_PAPER_BOUND__) return;
-  window.__FD_PAPER_BOUND__ = true;
   var STORAGE = """ + storage + r""";
   var DB_ID = "fd-paper-marks";
   var KIND = """ + kind + r""";
@@ -1119,6 +1768,7 @@ def strip_js() -> str:
   var OPEN_LIMIT = """ + open_limit + r""";
   var EMPTY_OPENS = """ + empty_opens + r""";
   var EMPTY_WEEK = """ + empty_week + r""";
+  var EMPTY_CLOSED = """ + empty_closed + r""";
   var HOME_ID = "fd-paper-home";
   var VIEW = "view-paper";
   var NAV_ID = "fd-nav-paper";
@@ -1128,13 +1778,17 @@ def strip_js() -> str:
   var TICKER_ID = "fd-paper-ticker";
   var NATIVE_VIEWS = """ + json.dumps(list(NATIVE_VIEW_IDS)) + r""";
   var toastTimer = null;
+  var liveMarks = window.__FD_PAPER_LIVE_MARKS__ || {};
+  window.__FD_PAPER_LIVE_MARKS__ = liveMarks;
 
   function $(id) { return document.getElementById(id); }
   function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
   function num(v) {
     if (v == null || v === "") return null;
     if (typeof v === "number") return isFinite(v) && v > 0 ? v : null;
-    var n = parseFloat(String(v).replace(/[, ]/g, ""));
+    var s = String(v).trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return null;
+    var n = parseFloat(s.replace(/[$, ]/g, ""));
     return isFinite(n) && n > 0 ? n : null;
   }
   function emptyBook() { return { version: 1, kind: KIND, positions: {}, closed: {} }; }
@@ -1155,20 +1809,82 @@ def strip_js() -> str:
     try { window.localStorage.setItem(STORAGE, JSON.stringify(book || emptyBook())); }
     catch (e) {}
   }
+  function rememberMark(ticker, px) {
+    var n = num(px);
+    var key = shortOf(ticker);
+    if (!n || !key) return n;
+    liveMarks[key] = n;
+    if (ticker && ticker !== key) liveMarks[ticker] = n;
+    return n;
+  }
+  function persistMarks() {
+    var el = $(DB_ID);
+    if (!el) {
+      el = document.createElement("script");
+      el.type = "application/json";
+      el.id = DB_ID;
+      (document.body || document.documentElement).appendChild(el);
+    }
+    var db = {};
+    try { db = JSON.parse(el.textContent || "{}") || {}; } catch (e) { db = {}; }
+    Object.keys(liveMarks).forEach(function (k) {
+      if (liveMarks[k]) db[k] = liveMarks[k];
+    });
+    try { el.textContent = JSON.stringify(db); } catch (e2) {}
+  }
   function marksDb() {
     var el = $(DB_ID);
-    if (!el) return {};
-    try { return JSON.parse(el.textContent || "{}") || {}; }
-    catch (e) { return {}; }
+    var db = {};
+    if (el) {
+      try { db = JSON.parse(el.textContent || "{}") || {}; }
+      catch (e) { db = {}; }
+    }
+    Object.keys(liveMarks).forEach(function (k) {
+      if (liveMarks[k]) db[k] = liveMarks[k];
+    });
+    return db;
+  }
+  var MARK_KEY_NORM = {papermark:1,pxlast:1,lastprice:1,lastpx:1,mark:1,markpx:1,price:1,px:1,close:1,pxclose:1,adjclose:1,lastprint:1,print:1,trdpx:1};
+  var NEST_MARK_KEYS = ["quote","ref","raw","fields","dapi","bloomberg","ohlc","last_refresh","px","PX","payload","print","prints"];
+  var MOM_BAG_KEYS = ["up","down","flags","watch","outliers","search","mom","home","all","px","PX","prints","marks","last","payload","prices"];
+  if (window.__FD_PAPER_OBS__) {
+    try { window.__FD_PAPER_OBS__.disconnect(); } catch (e0) {}
+    window.__FD_PAPER_OBS__ = null;
+  }
+  function addCards(out, arr) {
+    if (!arr) return;
+    if (Array.isArray(arr)) {
+      for (var i = 0; i < arr.length; i++) {
+        var c = arr[i];
+        if (Array.isArray(c) && c.length >= 2) out.push({ t: c[0], last: c[1], px: c[1] });
+        else out.push(c);
+      }
+      return;
+    }
+    if (typeof arr === "object") {
+      Object.keys(arr).forEach(function (k) {
+        var rec = arr[k];
+        if (Array.isArray(rec)) addCards(out, rec);
+        else if (rec && typeof rec === "object") {
+          out.push(Object.assign({ t: rec.t || rec.ticker || rec.symbol || k, ticker: k }, rec));
+        } else if (num(rec)) out.push({ t: k, last: rec, px: rec });
+      });
+    }
   }
   function momCards() {
     var mom = window.MOM || {};
-    if (Array.isArray(mom.cards)) return mom.cards;
     var out = [];
-    ["up", "down", "flags", "watch", "outliers", "search"].forEach(function (k) {
-      if (Array.isArray(mom[k])) out = out.concat(mom[k]);
-    });
-    if (Array.isArray(window.MOM_CARDS)) out = out.concat(window.MOM_CARDS);
+    addCards(out, mom.cards);
+    MOM_BAG_KEYS.forEach(function (k) { addCards(out, mom[k]); });
+    addCards(out, window.MOM_CARDS);
+    addCards(out, window.CARDS);
+    addCards(out, window.PX);
+    addCards(out, window.PRICES);
+    addCards(out, window.LAST);
+    if (mom && typeof mom === "object" && !Array.isArray(mom.cards)) addCards(out, mom);
+    var book = window.BOOK || window.NAMES || {};
+    var names = book.names || (book && !Array.isArray(book) && book.t == null ? book : null);
+    if (names && typeof names === "object" && !Array.isArray(names)) addCards(out, names);
     return out;
   }
   function findMomCard(ticker) {
@@ -1176,7 +1892,7 @@ def strip_js() -> str:
     var cards = momCards();
     for (var i = 0; i < cards.length; i++) {
       var c = cards[i] || {};
-      if (shortOf(c.t || c.ticker || c.name || c.symbol || "") === want) return c;
+      if (shortOf(c.t || c.ticker || c.d || c.name || c.symbol || "") === want) return c;
     }
     return null;
   }
@@ -1187,25 +1903,91 @@ def strip_js() -> str:
       var last = raw[raw.length - 1];
       if (Array.isArray(last)) return num(last[last.length - 1]);
       if (last && typeof last === "object") {
-        return num(last.px_last || last.PX_LAST || last.px || last.price || last.close || last.last || last.value || last.y);
+        return num(last.px_last || last.PX_LAST || last.px || last.price || last.close || last.value || last.y);
       }
       return num(last);
     }
     if (typeof raw === "object") {
-      return num(raw.px_last || raw.PX_LAST || raw.px || raw.price || raw.close || raw.last || raw.value);
+      return num(raw.px_last || raw.PX_LAST || raw.px || raw.price || raw.close || raw.value);
     }
     return num(raw);
   }
-  function markFromCard(card) {
-    if (!card) return null;
-    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","mark","mark_px","price","px","last","close","px_close","adj_close","PX_CLOSE"];
+  function markFromPxPayload(px) {
+    if (px == null) return null;
+    var direct = num(px);
+    if (direct && direct >= 5) return direct;
+    if (typeof px !== "object") return null;
+    var fromP = seriesLast(px.p) || seriesLast(px.closes);
+    if (fromP) return fromP;
+    return num(px.LAST || px.PX_LAST || px.px_last || px.CLOSE || px.close || px.value || px.price);
+  }
+  function markFromPxByRec(rec) {
+    if (rec == null) return null;
+    if (typeof rec !== "object") return num(rec);
+    return seriesLast(rec.p) || seriesLast(rec.closes) || num(rec.PX_LAST || rec.LAST);
+  }
+  function harvestPxBy(root) {
+    if (!root || typeof root !== "object") return;
+    var by = root.by || (root.px && root.px.by) || (root.PX && root.PX.by);
+    if (!by || typeof by !== "object") {
+      var keys0 = Object.keys(root);
+      var sample = keys0.length ? root[keys0[0]] : null;
+      if (sample && typeof sample === "object" && Array.isArray(sample.p)) by = root;
+      else return;
+    }
+    Object.keys(by).forEach(function (k) {
+      var t = shortOf(k);
+      var m = markFromPxByRec(by[k]);
+      if (t && m) rememberMark(t, m);
+    });
+  }
+  function markFromCard(card, depth) {
+    if (!card || typeof card !== "object") return null;
+    depth = depth || 0;
+    if (depth > 6) return null;
+    var fromP = seriesLast(card.p) || seriesLast(card.closes);
+    if (fromP) return fromP;
+    if (card.by && typeof card.by === "object") {
+      var recB = card.by[card.t] || card.by[card.ticker] || card.by[shortOf(card.t || card.ticker || "")];
+      var fromBy = markFromPxByRec(recB);
+      if (fromBy) return fromBy;
+    }
+    var payload = markFromPxPayload(card.px || card.PX || card.payload);
+    if (payload) return payload;
+    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","lastPx","pxLast","PxLast","LAST_PX","mark","mark_px","price","px","close","px_close","adj_close","PX_CLOSE","last_print","print","trd_px"];
     for (var i = 0; i < keys.length; i++) {
       var v = num(card[keys[i]]);
       if (v) return v;
     }
-    var seriesKeys = ["px_series","prices","closes","last_refresh","refresh_px"];
+    for (var k in card) {
+      if (!Object.prototype.hasOwnProperty.call(card, k)) continue;
+      var nk = String(k).toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (nk === "last") continue;
+      if (!MARK_KEY_NORM[nk]) continue;
+      var raw = card[k];
+      var nv = num(raw);
+      if (nv) return nv;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        var nested = markFromCard(raw, depth + 1);
+        if (nested) return nested;
+      }
+    }
+    for (var n = 0; n < NEST_MARK_KEYS.length; n++) {
+      var inner = card[NEST_MARK_KEYS[n]];
+      if (inner && typeof inner === "object" && inner !== card) {
+        var nestPx = markFromCard(inner, depth + 1);
+        if (nestPx) return nestPx;
+      }
+    }
+    if (card.ohlc && typeof card.ohlc === "object") {
+      var oc = num(card.ohlc.c || card.ohlc.close || card.ohlc.last);
+      if (oc) return oc;
+    }
+    var seriesKeys = ["px_series","prices","closes","p","last_refresh","refresh_px","series","hist","ys","spark"];
     for (var j = 0; j < seriesKeys.length; j++) {
-      var s = seriesLast(card[seriesKeys[j]]);
+      var sraw = card[seriesKeys[j]];
+      if (typeof sraw !== "object") continue;
+      var s = seriesLast(sraw);
       if (s) return s;
     }
     return null;
@@ -1230,20 +2012,91 @@ def strip_js() -> str:
     }
     return null;
   }
-  function markOf(ticker, node, card) {
-    var m = markFromCard(card);
-    if (m) return m;
-    m = markFromNode(node);
-    if (m) return m;
-    var db = marksDb();
+  function harvestPxMap(obj) {
+    if (!obj || typeof obj !== "object") return;
+    Object.keys(obj).forEach(function (k) {
+      var rec = obj[k];
+      var t = shortOf((rec && (rec.t || rec.ticker || rec.symbol)) || k);
+      if (!t) return;
+      var m = markFromPxPayload(rec) || (rec && typeof rec === "object" ? markFromCard(rec) : num(rec));
+      if (m) rememberMark(t, m);
+    });
+  }
+  function harvestAllMarks() {
+    try {
+      var mom = window.MOM || {};
+      harvestPxBy(window.px);
+      harvestPxBy(window.px && window.px.by);
+      harvestPxBy(window.PX);
+      harvestPxBy(window.PX && window.PX.by);
+      harvestPxBy(mom);
+      harvestPxBy(mom.px);
+      harvestPxBy(mom.payload);
+      var cards = momCards();
+      for (var i = 0; i < cards.length; i++) {
+        var c = cards[i] || {};
+        var t = shortOf(c.t || c.ticker || c.d || c.name || c.symbol || "");
+        var m = markFromCard(c);
+        if (t && m) rememberMark(t, m);
+      }
+      harvestPxMap(mom.px);
+      harvestPxMap(mom.PX);
+      harvestPxMap(mom.prints);
+      harvestPxMap(mom.marks);
+      harvestPxMap(mom.payload);
+      harvestPxMap(window.PX);
+      harvestPxMap(window.PRICES);
+      harvestPxMap(window.LAST);
+      var nodes = document.querySelectorAll("article.card, article[data-t], article[data-ticker], .grid .card, [data-px], [data-px-last]");
+      for (var j = 0; j < nodes.length; j++) {
+        var node = nodes[j];
+        var nt = shortOf(node.getAttribute && (node.getAttribute("data-t") || node.getAttribute("data-ticker") || node.getAttribute("data-name") || ""));
+        var nm = markFromNode(node);
+        if (!nm && nt) nm = markFromCard(findMomCard(nt));
+        if (nt && nm) {
+          rememberMark(nt, nm);
+          if (!node.getAttribute("data-px")) node.setAttribute("data-px", String(nm));
+        }
+      }
+      persistMarks();
+    } catch (harvestErr) {}
+    return liveMarks;
+  }
+  function markFromPxWorld(ticker) {
     var key = shortOf(ticker);
-    if (db[ticker]) return num(db[ticker]);
-    if (db[key]) return num(db[key]);
-    return markFromCard(findMomCard(ticker || key));
+    var roots = [window.px, window.PX, (window.MOM || {}).px, (window.MOM || {}).PX, (window.MOM || {}).payload, window.MOM];
+    for (var i = 0; i < roots.length; i++) {
+      var root = roots[i];
+      if (!root || typeof root !== "object") continue;
+      var by = root.by;
+      var rec = null;
+      if (by && typeof by === "object") rec = by[ticker] || by[key] || by[key + " US Equity"];
+      if (rec == null && Array.isArray(root.p)) rec = root;
+      var m = markFromPxByRec(rec);
+      if (m) return rememberMark(key, m);
+    }
+    return null;
+  }
+  function markOf(ticker, node, card) {
+    var key = shortOf(ticker);
+    var m = markFromPxWorld(key);
+    if (m) return m;
+    m = markFromCard(card);
+    if (m) return rememberMark(key || ticker, m);
+    m = markFromNode(node);
+    if (m) return rememberMark(key || ticker, m);
+    if (liveMarks[ticker]) return num(liveMarks[ticker]);
+    if (liveMarks[key]) return num(liveMarks[key]);
+    var db = marksDb();
+    if (db[ticker]) return rememberMark(key, db[ticker]);
+    if (db[key]) return rememberMark(key, db[key]);
+    m = markFromCard(findMomCard(ticker || key));
+    if (m) return rememberMark(key || ticker, m);
+    return markFromPxWorld(key);
   }
   function pnlPct(side, entry, mark) {
-    entry = Number(entry); mark = Number(mark);
-    if (!isFinite(entry) || !isFinite(mark) || entry === 0) return null;
+    entry = num(entry); mark = num(mark);
+    if (!entry || !mark) return null;
     if (side === "long") return (mark - entry) / entry * 100;
     if (side === "short") return (entry - mark) / entry * 100;
     return null;
@@ -1251,6 +2104,11 @@ def strip_js() -> str:
   function fmtPct(v) {
     if (v == null || !isFinite(v)) return "—";
     return (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+  }
+  function fmtPx(v) {
+    var n = num(v);
+    if (!n) return "—";
+    return n.toFixed(2);
   }
   function isoNow() { return new Date().toISOString().replace(/\.\d{3}Z$/, "Z"); }
   function dateLabel(v) { return String(v || "").slice(0, 10) || "—"; }
@@ -1417,39 +2275,153 @@ def strip_js() -> str:
     try { if (typeof selectTicker === "function") return selectTicker; } catch (e) {}
     return null;
   }
-  function chipEl(row, bookMark) {
+  function td(text, cls) {
+    var cell = document.createElement("td");
+    if (cls) cell.className = cls;
+    cell.textContent = text;
+    return cell;
+  }
+  function sideEl(side) {
+    var span = document.createElement("span");
+    var s = String(side || "").toLowerCase();
+    span.className = "fd-paper-side";
+    if (s === "long") span.classList.add("fd-paper-up");
+    if (s === "short") span.classList.add("fd-paper-down");
+    span.textContent = s ? s.toUpperCase() : "—";
+    return span;
+  }
+  function retEl(ret) {
+    var span = document.createElement("span");
+    span.className = "fd-paper-num";
+    if (ret != null && isFinite(ret)) span.classList.add(ret >= 0 ? "fd-paper-up" : "fd-paper-down");
+    span.textContent = fmtPct(ret);
+    return span;
+  }
+  function tickerBtn(ticker) {
     var btn = document.createElement("button");
     btn.type = "button";
-    var ticker = shortOf(row.ticker || "");
-    var mark = bookMark;
-    if (mark == null) mark = markOf(ticker, null, findMomCard(ticker));
-    var ret = pnlPct(row.side, row.entry, mark);
-    var entry = Number(row.entry);
-    btn.className = "fd-paper-chip";
-    if (ret != null) btn.classList.add(ret >= 0 ? "fd-paper-up" : "fd-paper-down");
+    btn.className = "fd-paper-ticker";
     btn.setAttribute("data-fd-paper-ticker", ticker);
-    btn.textContent = ticker + " " + String(row.side || "").toUpperCase() + " @ " +
-      (isFinite(entry) ? entry.toFixed(2) : "—") + "  " + fmtPct(ret);
+    btn.textContent = ticker;
     return btn;
   }
-  function closeBtn(ticker) {
+  function closeBtn(ticker, hasMark) {
     var btn = document.createElement("button");
     btn.type = "button";
     btn.className = "fd-paper-btn fd-paper-close";
     btn.setAttribute("data-fd-paper-close", "1");
     btn.setAttribute("data-fd-paper-ticker", ticker);
     btn.textContent = "Close";
+    btn.disabled = !hasMark;
+    btn.title = hasMark ? "Close at mark" : NO_MARK;
     return btn;
+  }
+  function openTableHead() {
+    var thead = document.createElement("thead");
+    var tr = document.createElement("tr");
+    ["Date", "Ticker", "Side", "Entry", "Mark", "Return %", ""].forEach(function (h) {
+      var th = document.createElement("th");
+      th.textContent = h;
+      tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+    return thead;
+  }
+  function closedTableHead() {
+    var thead = document.createElement("thead");
+    var tr = document.createElement("tr");
+    ["Date", "Closed", "Ticker", "Side", "Entry", "Exit", "Return %"].forEach(function (h) {
+      var th = document.createElement("th");
+      th.textContent = h;
+      tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+    return thead;
+  }
+  function openRowEl(row) {
+    var ticker = shortOf(row.ticker || "");
+    var mark = markOf(ticker, null, findMomCard(ticker));
+    var hasMark = !!num(mark);
+    var ret = hasMark ? pnlPct(row.side, row.entry, mark) : null;
+    var tr = document.createElement("tr");
+    tr.className = "fd-paper-open-row";
+    tr.setAttribute("data-fd-paper-ticker", ticker);
+    tr.appendChild(td(dateLabel(row.opened_at), "fd-paper-num"));
+    var tcell = document.createElement("td");
+    tcell.appendChild(tickerBtn(ticker));
+    tr.appendChild(tcell);
+    var scell = document.createElement("td");
+    scell.appendChild(sideEl(row.side));
+    tr.appendChild(scell);
+    tr.appendChild(td(fmtPx(row.entry), "fd-paper-num"));
+    tr.appendChild(td(hasMark ? fmtPx(mark) : "—", "fd-paper-num"));
+    var rcell = document.createElement("td");
+    rcell.appendChild(retEl(ret));
+    tr.appendChild(rcell);
+    var ccell = document.createElement("td");
+    ccell.appendChild(closeBtn(ticker, hasMark));
+    tr.appendChild(ccell);
+    return tr;
+  }
+  function closedRowEl(row) {
+    var ticker = shortOf(row.ticker || "");
+    var r = (row.ret_pct != null) ? Number(row.ret_pct) : pnlPct(row.side, row.entry, row.exit);
+    if (r != null && !isFinite(r)) r = null;
+    var tr = document.createElement("tr");
+    tr.setAttribute("data-fd-paper-ticker", ticker);
+    tr.appendChild(td(dateLabel(row.opened_at), "fd-paper-num"));
+    tr.appendChild(td(dateLabel(row.closed_at), "fd-paper-num"));
+    tr.appendChild(td(ticker));
+    var scell = document.createElement("td");
+    scell.appendChild(sideEl(row.side));
+    tr.appendChild(scell);
+    tr.appendChild(td(fmtPx(row.entry), "fd-paper-num"));
+    tr.appendChild(td(fmtPx(row.exit), "fd-paper-num"));
+    var rcell = document.createElement("td");
+    rcell.appendChild(retEl(r));
+    tr.appendChild(rcell);
+    return tr;
   }
   function stripLegacyHome() {
     var host = $(HOME_ID);
     if (host && host.parentNode) host.parentNode.removeChild(host);
   }
+  function ensureHostById(id, cls, parentSel) {
+    var el = $(id);
+    if (el && (el.tagName === "UL" || el.tagName === "OL")) {
+      var swap = document.createElement("div");
+      swap.id = id;
+      swap.className = cls || el.className || "";
+      if (el.parentNode) el.parentNode.replaceChild(swap, el);
+      el = swap;
+    }
+    if (el) return el;
+    var view = $(VIEW);
+    if (!view) return null;
+    var parent = (parentSel && view.querySelector(parentSel)) || view.querySelector(".fd-paper-tab") || view;
+    el = document.createElement("div");
+    el.id = id;
+    el.className = cls || "";
+    parent.appendChild(el);
+    return el;
+  }
+  function stripChipRows(root) {
+    var host = root || $(VIEW);
+    if (!host || !host.querySelectorAll) return;
+    var stale = host.querySelectorAll(".fd-paper-chip, div.fd-paper-open-row");
+    for (var i = 0; i < stale.length; i++) {
+      var n = stale[i];
+      if (n.closest && n.closest(".fd-paper-table")) continue;
+      if (n.parentNode) n.parentNode.removeChild(n);
+    }
+  }
   function paintTab() {
     stripLegacyHome();
-    var opensEl = $(OPENS_ID);
+    harvestAllMarks();
+    var opensEl = ensureHostById(OPENS_ID, "fd-paper-opens", ".fd-paper-opens-sec");
     var weekEl = $(WEEK_ID);
-    var closedEl = $(CLOSED_ID);
+    var closedEl = ensureHostById(CLOSED_ID, "fd-paper-closed-wrap", ".fd-paper-closed-sec");
+    stripChipRows($(VIEW));
     if (!opensEl && !$(VIEW)) return;
     var book = loadBook();
     var opens = openList(book);
@@ -1464,15 +2436,14 @@ def strip_js() -> str:
         empty.textContent = EMPTY_OPENS;
         opensEl.appendChild(empty);
       } else {
-        opens.forEach(function (row) {
-          var ticker = shortOf(row.ticker || "");
-          var wrap = document.createElement("div");
-          wrap.className = "fd-paper-open-row";
-          wrap.setAttribute("data-fd-paper-ticker", ticker);
-          wrap.appendChild(chipEl(row));
-          wrap.appendChild(closeBtn(ticker));
-          opensEl.appendChild(wrap);
-        });
+        var table = document.createElement("table");
+        table.className = "fd-paper-table";
+        table.setAttribute("aria-label", "Open paper");
+        table.appendChild(openTableHead());
+        var tbody = document.createElement("tbody");
+        opens.forEach(function (row) { tbody.appendChild(openRowEl(row)); });
+        table.appendChild(tbody);
+        opensEl.appendChild(table);
       }
     }
     if (weekEl) {
@@ -1480,17 +2451,12 @@ def strip_js() -> str:
       weekEl.textContent = scoreLine(sc);
     }
     if (closedEl) {
-      var details = closedEl.closest ? closedEl.closest("details") : null;
-      var wasOpen = details ? details.open : false;
       closedEl.innerHTML = "";
       var closedMap = (book && book.closed) || {};
       var rows = [];
       Object.keys(closedMap).forEach(function (key) {
         var items = closedMap[key] || [];
-        for (var i = 0; i < items.length; i++) {
-          var row = items[i] || {};
-          rows.push(row);
-        }
+        for (var i = 0; i < items.length; i++) rows.push(items[i] || {});
       });
       rows.sort(function (a, b) {
         var ac = String(a.closed_at || ""), bc = String(b.closed_at || "");
@@ -1498,28 +2464,39 @@ def strip_js() -> str:
         var at = String(a.ticker || ""), bt = String(b.ticker || "");
         return at < bt ? -1 : (at > bt ? 1 : 0);
       });
-      for (var j = 0; j < rows.length; j++) {
-        var c = rows[j] || {};
-        var li = document.createElement("li");
-        var r = (c.ret_pct != null) ? Number(c.ret_pct) : pnlPct(c.side, c.entry, c.exit);
-        li.textContent = dateLabel(c.closed_at) + " · " + shortOf(c.ticker || "") + " · " +
-          String(c.side || "").toUpperCase() + " · " + fmtPct(r);
-        closedEl.appendChild(li);
-      }
-      if (details) {
-        var sum = details.querySelector("summary");
-        if (sum) sum.textContent = rows.length ? ("Closed trades (" + rows.length + ")") : "Closed trades";
-        details.open = wasOpen;
+      if (!rows.length) {
+        var emptyC = document.createElement("p");
+        emptyC.className = "fd-paper-home-empty";
+        emptyC.textContent = EMPTY_CLOSED;
+        closedEl.appendChild(emptyC);
+      } else {
+        var ctable = document.createElement("table");
+        ctable.className = "fd-paper-table";
+        ctable.setAttribute("aria-label", "Closed paper");
+        ctable.appendChild(closedTableHead());
+        var cbody = document.createElement("tbody");
+        for (var j = 0; j < rows.length; j++) cbody.appendChild(closedRowEl(rows[j] || {}));
+        ctable.appendChild(cbody);
+        closedEl.appendChild(ctable);
       }
     }
+    syncOpenForm();
   }
   function paintHome() { paintTab(); }
   function hideNativeViews() {
-    for (var i = 0; i < NATIVE_VIEWS.length; i++) {
-      var el = $(NATIVE_VIEWS[i]);
-      if (!el) continue;
-      if (NATIVE_VIEWS[i] === VIEW) continue;
+    var paper = document.getElementById("view-paper");
+    var panes = document.querySelectorAll(".view-pane, #home, #search-pane");
+    for (var i = 0; i < panes.length; i++) {
+      if (panes[i] === paper || panes[i].id === "view-paper") continue;
+      panes[i].classList.add("hide");
+      panes[i].setAttribute("hidden", "hidden");
+    }
+    for (var j = 0; j < NATIVE_VIEWS.length; j++) {
+      if (NATIVE_VIEWS[j] === "view-paper") continue;
+      var el = document.getElementById(NATIVE_VIEWS[j]);
+      if (!el || el === paper) continue;
       el.classList.add("hide");
+      el.setAttribute("hidden", "hidden");
     }
   }
   function setOn(btn, on) {
@@ -1545,7 +2522,7 @@ def strip_js() -> str:
   }
   function showPaper(on) {
     stripLegacyHome();
-    var pane = $(VIEW);
+    var pane = document.getElementById("view-paper");
     if (on) {
       hideNativeViews();
       if (pane) {
@@ -1556,6 +2533,7 @@ def strip_js() -> str:
       paintTab();
       document.body.setAttribute("data-view", "paper");
       document.body.setAttribute("data-fd-paper", "1");
+      try { window.view = "paper"; } catch (eView) {}
       syncNav(true);
       return;
     }
@@ -1564,7 +2542,7 @@ def strip_js() -> str:
       pane.classList.remove("fd-paper-on");
       pane.setAttribute("hidden", "hidden");
     }
-    var home = $("home");
+    var home = document.getElementById("home");
     if (home) home.classList.remove("hide");
     document.body.removeAttribute("data-fd-paper");
     if (document.body.getAttribute("data-view") === "paper") {
@@ -1576,49 +2554,99 @@ def strip_js() -> str:
   window.__FD_PAPER_HIDE__ = function () { showPaper(false); };
   function kindOf(btn) {
     if (!btn || !btn.getAttribute) return "";
+    if (btn.closest && btn.closest("[data-fd-paper-act], [data-fd-paper-open], [data-fd-paper-close], #" + TICKER_ID + ", #fd-paper-open-form, .fd-paper-ticker, .fd-paper")) return "";
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
-    if (view === "paper" || btn.getAttribute("data-fd-paper-nav") === "1" || btn.id === NAV_ID) return "paper";
+    if (btn.id === NAV_ID || btn.getAttribute("data-fd-paper-nav") === "1") return "paper";
+    if (view === "paper" && btn.tagName === "BUTTON") return "paper";
+    var inNav = !!(btn.closest && btn.closest("#topnav, nav, .topnav"));
     var label = (btn.textContent || "").replace(/\s+/g, " ").trim();
-    if (label === "Paper") return "paper";
+    if (inNav && label === "Paper") return "paper";
     if (btn.id === "refresh" || btn.id === "options-refresh") return "";
-    if (btn.closest && btn.closest("#topnav, nav, .topnav") && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || view)) return "other";
-    if (btn.classList && (btn.classList.contains("nav-btn") || view)) return "other";
+    if (inNav && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || (view && view !== "paper"))) return "other";
     return "";
   }
-  document.addEventListener("click", function (ev) {
-    var t = ev.target && ev.target.closest ? ev.target.closest("button, [data-view], [data-fd-paper-nav]") : ev.target;
+  function isTradeEl(el) {
+    if (!el || !el.closest) return false;
+    return !!(el.closest("[data-fd-paper-act], [data-fd-paper-open], [data-fd-paper-close], #fd-paper-open-form, .fd-paper-ticker, .fd-paper"));
+  }
+  function goPaper() {
+    showPaper(true);
+    var sv = window.setView;
+    if (typeof sv === "function") {
+      try { sv("paper"); } catch (err) {}
+    }
+    showPaper(true);
+  }
+  function onNavClick(ev) {
+    if (isTradeEl(ev.target)) return;
+    var t = ev.target && ev.target.closest
+      ? ev.target.closest("#" + NAV_ID + ", [data-fd-paper-nav], #topnav button, nav button, .topnav button, button[data-view]")
+      : ev.target;
+    if (!t || (t.closest && t.closest("#" + VIEW) && !oursOf(t))) return;
     var kind = kindOf(t);
     if (!kind) return;
     if (kind === "paper") {
       ev.preventDefault();
       ev.stopPropagation();
-      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
       showPaper(true);
+      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+      goPaper();
       return;
     }
     if (kind === "other") showPaper(false);
-  }, true);
+  }
+  function onDocumentClick(ev) {
+    if (isTradeEl(ev.target)) {
+      onPaperClick(ev);
+      return;
+    }
+    onNavClick(ev);
+  }
+  window.__FD_PAPER_ON_DOC_CLICK__ = onDocumentClick;
   function installSetViewBridge() {
-    var orig = window.setView;
-    if (typeof orig !== "function" || orig.__fdPaper) return;
-    window.setView = function (v) {
+    var cur = window.setView;
+    if (typeof cur === "function" && cur.__fdPaper) return;
+    var wrapped = function (v) {
       var kind = String(v || "").toLowerCase();
       if (kind === "paper") {
         showPaper(true);
         return;
       }
       showPaper(false);
-      return orig.apply(this, arguments);
+      if (typeof wrapped._orig === "function") return wrapped._orig.apply(this, arguments);
     };
-    window.setView.__fdPaper = true;
+    wrapped._orig = cur;
+    wrapped.__fdPaper = true;
+    window.setView = wrapped;
   }
+  installSetViewBridge();
+  setTimeout(installSetViewBridge, 0);
+  setTimeout(installSetViewBridge, 25);
   function tabTicker() {
     var input = $(TICKER_ID);
     return shortOf(input && input.value);
   }
+  function syncOpenForm() {
+    var buy = document.querySelector("[data-fd-paper-open='buy']");
+    var sell = document.querySelector("[data-fd-paper-open='sell']");
+    var key = tabTicker();
+    var mark = key ? markOf(key, null, findMomCard(key)) : null;
+    var hasMark = !!num(mark);
+    [buy, sell].forEach(function (btn) {
+      if (!btn) return;
+      if (!key) {
+        btn.disabled = false;
+        btn.title = "Enter a ticker";
+        return;
+      }
+      btn.disabled = !hasMark;
+      btn.title = hasMark ? ((btn.getAttribute("data-fd-paper-open") === "buy" ? "Open long @ " : "Open short @ ") + mark) : NO_MARK;
+    });
+  }
   function applyTabTrade(ticker, act) {
     var key = shortOf(ticker);
     if (!key) { showToast("No ticker"); return; }
+    harvestAllMarks();
     var card = findMomCard(key);
     var mark = markOf(key, null, card);
     var book = loadBook();
@@ -1680,8 +2708,7 @@ def strip_js() -> str:
         posEl.classList.remove("fd-paper-up", "fd-paper-down");
       } else {
         var ret = pnlPct(pos.side, pos.entry, mark);
-        var entry = Number(pos.entry);
-        posEl.textContent = String(pos.side || "").toUpperCase() + " @ " + (isFinite(entry) ? entry.toFixed(2) : "—") + "  " + fmtPct(ret);
+        posEl.textContent = String(pos.side || "").toUpperCase() + " @ " + fmtPx(pos.entry) + "  " + fmtPct(ret);
         posEl.classList.toggle("fd-paper-up", ret != null && ret >= 0);
         posEl.classList.toggle("fd-paper-down", ret != null && ret < 0);
       }
@@ -1732,20 +2759,25 @@ def strip_js() -> str:
       applyTabTrade(tabTicker(), openBtn.getAttribute("data-fd-paper-open"));
       return;
     }
-    var closeBtn = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-close]") : null;
-    if (closeBtn) {
+    var closeBtnEl = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-close]") : null;
+    if (closeBtnEl) {
       ev.preventDefault();
       ev.stopPropagation();
       if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-      var ct = closeBtn.getAttribute("data-fd-paper-ticker") || "";
+      if (closeBtnEl.disabled) {
+        showToast(closeBtnEl.title || NO_MARK);
+        return;
+      }
+      var ct = closeBtnEl.getAttribute("data-fd-paper-ticker") || "";
       var bookC = loadBook();
       var posC = (bookC.positions || {})[shortOf(ct)];
       var actC = posC && posC.side === "short" ? "buy" : "sell";
       applyTabTrade(ct, actC);
       return;
     }
-    var chip = ev.target && ev.target.closest ? ev.target.closest("#" + VIEW + " [data-fd-paper-ticker]") : null;
-    if (chip && !chip.getAttribute("data-fd-paper-close") && !chip.getAttribute("data-fd-paper-act")) {
+    var chip = ev.target && ev.target.closest ? ev.target.closest("#" + VIEW + " .fd-paper-ticker, #" + VIEW + " [data-fd-paper-ticker]") : null;
+    if (chip && !chip.getAttribute("data-fd-paper-close") && !chip.getAttribute("data-fd-paper-act") && !chip.getAttribute("data-fd-paper-open")) {
+      if (chip.tagName === "TR" || chip.tagName === "TABLE") return;
       ev.preventDefault();
       ev.stopPropagation();
       if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
@@ -1767,6 +2799,7 @@ def strip_js() -> str:
     if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
     if (!btn || btn.disabled) return;
     ev.preventDefault();
+    harvestAllMarks();
     var node = (host && host.closest("article, .card")) || (btn.closest && btn.closest("article, .card"));
     var t = tickerOf(node, null);
     var card = findMomCard(t);
@@ -1803,6 +2836,7 @@ def strip_js() -> str:
     if (painting) return;
     painting = true;
     try {
+      harvestAllMarks();
       var nodes = document.querySelectorAll("article.card, article[data-t], article[data-ticker], .grid .card, .grid.dense .card");
       for (var i = 0; i < nodes.length; i++) hydrateCard(nodes[i], null);
       paintTab();
@@ -1833,7 +2867,10 @@ def strip_js() -> str:
     }
   }
   function observe() {
-    if (window.__FD_PAPER_OBS__) return;
+    if (window.__FD_PAPER_OBS__) {
+      try { window.__FD_PAPER_OBS__.disconnect(); } catch (eObs) {}
+      window.__FD_PAPER_OBS__ = null;
+    }
     if (!document.body) return;
     window.__FD_PAPER_OBS__ = new MutationObserver(function (muts) {
       if (painting) return;
@@ -1864,12 +2901,12 @@ def strip_js() -> str:
     wrapCardHTML();
     installSetViewBridge();
     stripLegacyHome();
+    harvestAllMarks();
     paintAll();
     observe();
-    if (!window.__FD_PAPER_CLICK__) {
-      window.__FD_PAPER_CLICK__ = true;
-      document.addEventListener("click", onPaperClick, true);
-    }
+    bindOpenForm();
+  }
+  function bindOpenForm() {
     var form = $("fd-paper-open-form");
     if (form && !form.__fdPaperBound) {
       form.__fdPaperBound = true;
@@ -1878,6 +2915,13 @@ def strip_js() -> str:
         applyTabTrade(tabTicker(), "buy");
       });
     }
+    var input = $(TICKER_ID);
+    if (input && !input.__fdPaperBound) {
+      input.__fdPaperBound = true;
+      input.addEventListener("input", syncOpenForm);
+      input.addEventListener("change", syncOpenForm);
+    }
+    syncOpenForm();
   }
   window.__FD_PAPER_APPLY__ = applyClick;
   window.__FD_PAPER_PNL__ = pnlPct;
@@ -1888,7 +2932,19 @@ def strip_js() -> str:
   window.__FD_PAPER_PAINT_TAB__ = paintTab;
   window.__FD_PAPER_SCORECARD__ = weekScorecard;
   window.__FD_PAPER_WEEK_START__ = weekStartMs;
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install);
+  window.__FD_PAPER_HARVEST__ = harvestAllMarks;
+  window.__FD_PAPER_ON_DOC_CLICK__ = onDocumentClick;
+  if (!window.__FD_PAPER_DOC_CLICK__) {
+    window.__FD_PAPER_DOC_CLICK__ = true;
+    document.addEventListener("click", function (ev) {
+      if (typeof window.__FD_PAPER_ON_DOC_CLICK__ === "function") window.__FD_PAPER_ON_DOC_CLICK__(ev);
+    }, true);
+  }
+  window.__FD_PAPER_BOUND__ = true;
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () {
+    installSetViewBridge();
+    install();
+  });
   else install();
   setTimeout(install, 0);
 })();
@@ -1956,6 +3012,31 @@ def _strip_home_host(html_text: str) -> str:
     return text
 
 
+_PAPER_BTN_OPEN_RE = re.compile(
+    r"<button\b([^>]*\b(?:id=[\"']fd-nav-paper[\"']|data-view=[\"']paper[\"']|"
+    r"data-fd-paper-nav=[\"']1[\"'])[^>]*)>",
+    re.I,
+)
+
+
+def _paper_onclick_attr() -> str:
+    return (
+        ' onclick="if(window.setView)window.setView(\'paper\');'
+        'else if(window.__FD_PAPER_SHOW__)window.__FD_PAPER_SHOW__();return false;"'
+    )
+
+
+def _ensure_nav_onclick(html_text: str) -> str:
+    """Existing Paper nav buttons must call setView('paper') / __FD_PAPER_SHOW__."""
+
+    def add_onclick(match: re.Match[str]) -> str:
+        attrs = match.group(1) or ""
+        attrs = re.sub(r"\s+onclick=(?:\"[^\"]*\"|'[^']*')", "", attrs, flags=re.I)
+        return f"<button{attrs}{_paper_onclick_attr()}>"
+
+    return _PAPER_BTN_OPEN_RE.sub(add_onclick, html_text or "", count=3)
+
+
 def _has_nav_button(html_text: str) -> bool:
     text = html_text or ""
     patterns = (
@@ -1968,17 +3049,18 @@ def _has_nav_button(html_text: str) -> bool:
 
 def _ensure_nav(html_text: str) -> str:
     if _has_nav_button(html_text):
-        return html_text
+        return _ensure_nav_onclick(html_text)
     pair = "\n  " + BTN_PAPER
     m = _EXPERIMENTAL_BTN_RE.search(html_text)
     if m:
-        return html_text[: m.end()] + pair + html_text[m.end() :]
+        return _ensure_nav_onclick(html_text[: m.end()] + pair + html_text[m.end() :])
     m = _OPTIONS_VIEW_BTN_RE.search(html_text)
     if m:
-        return html_text[: m.end()] + pair + html_text[m.end() :]
+        return _ensure_nav_onclick(html_text[: m.end()] + pair + html_text[m.end() :])
     if "<nav" in html_text.lower():
-        return re.sub(r"(</nav>)", pair + r"\n\1", html_text, count=1, flags=re.I)
-    return pair + "\n" + html_text
+        text = re.sub(r"(</nav>)", pair + r"\n\1", html_text, count=1, flags=re.I)
+        return _ensure_nav_onclick(text)
+    return _ensure_nav_onclick(pair + "\n" + html_text)
 
 
 def _patch_setview_allowlist(html_text: str) -> str:
@@ -1995,8 +3077,19 @@ def _patch_setview_allowlist(html_text: str) -> str:
 def _early_return_snippet(marker: str, param: str) -> str:
     return (
         f"{marker}"
-        f"if({param}===\"paper\"){{"
+        f"if(String({param}||\"\").toLowerCase()===\"paper\"){{"
+        f"try{{window.view=\"paper\";}}catch(_v){{}}"
+        f"if(document.body){{document.body.setAttribute(\"data-view\",\"paper\");"
+        f"document.body.setAttribute(\"data-fd-paper\",\"1\");}}"
+        f"var _panes=document.querySelectorAll(\".view-pane,#home,#search-pane\");"
+        f"for(var _i=0;_i<_panes.length;_i++){{"
+        f"if(_panes[_i].id===\"view-paper\")continue;"
+        f"_panes[_i].classList.add(\"hide\");"
+        f"_panes[_i].setAttribute(\"hidden\",\"hidden\");}}"
         f"if(window.__FD_PAPER_SHOW__)window.__FD_PAPER_SHOW__();"
+        f"else{{var _p=document.getElementById(\"view-paper\");"
+        f"if(_p){{_p.classList.remove(\"hide\");_p.classList.add(\"fd-paper-on\");"
+        f"_p.removeAttribute(\"hidden\");}}}}"
         f"if(typeof syncNav===\"function\")syncNav();"
         f"return;}}"
     )
@@ -2009,19 +3102,31 @@ def _replace_or_inject_early_return(
     fn_re: re.Pattern[str],
 ) -> str:
     text = html_text or ""
-    existing = re.search(
-        re.escape(marker) + r'if\((\w+)==="paper".*?return;\}',
-        text,
+    snippet_re = re.compile(
+        re.escape(marker)
+        + r'if\((?:String\((\w+)\|\|""\)\.toLowerCase\(\)|(\w+))===["\']paper["\'].*?return;\}',
         re.S,
     )
-    if existing:
-        return text[: existing.start()] + _early_return_snippet(marker, existing.group(1)) + text[existing.end() :]
+
+    def replace_existing(match: re.Match[str]) -> str:
+        param = match.group(1) or match.group(2)
+        return _early_return_snippet(marker, param)
+
+    text = snippet_re.sub(replace_existing, text)
 
     def inject(match: re.Match[str]) -> str:
-        head, param = match.group(1), match.group(2)
+        head = match.group(1)
+        param = match.group(2) or match.group(3)
+        if not param:
+            return match.group(0)
+        after = match.group(0)
+        # Skip heads that already carry our marker immediately after `{`.
+        end = match.end()
+        if text[end : end + len(marker)] == marker:
+            return after
         return f"{head}{_early_return_snippet(marker, param)}"
 
-    return fn_re.sub(inject, text, count=1)
+    return fn_re.sub(inject, text)
 
 
 def _hideall_snippet() -> str:
@@ -2117,37 +3222,69 @@ def _ensure_db(html_text: str, marks: Mapping[str, Any] | None) -> str:
     return html_text + tag
 
 
+_ANY_SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>\s*", re.I | re.S)
+
+
+def _strip_stale_paper_scripts(html_text: str) -> str:
+    """Drop leftover paper IIFEs that are not ``#fd-paper-js`` (old chip painter)."""
+    text = html_text or ""
+    chunks: list[str] = []
+    last = 0
+    for match in _ANY_SCRIPT_RE.finditer(text):
+        attrs = match.group(1) or ""
+        body = match.group(2) or ""
+        if re.search(rf'\bid=["\']{JS_SCRIPT_ID}["\']', attrs, re.I):
+            continue
+        stale = (
+            "__FD_PAPER_APPLY__" in body
+            or ("fd-paper-book" in body and "function paintTab" in body)
+            or ("function chipEl" in body and "fd-paper-chip" in body)
+        )
+        if not stale:
+            continue
+        chunks.append(text[last : match.start()])
+        last = match.end()
+    if not last:
+        return text
+    chunks.append(text[last:])
+    return "".join(chunks)
+
+
 def _ensure_js(html_text: str) -> str:
     script = f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
+    text = _strip_stale_paper_scripts(html_text or "")
     text, n = re.subn(
         rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
         lambda _m: script,
-        html_text,
-        count=1,
+        text,
+        count=0,
         flags=re.I | re.S,
     )
     if n:
         return text
-    if "</body>" in html_text:
-        return html_text.replace("</body>", script + "</body>", 1)
-    return html_text + script
+    if "</body>" in text:
+        return text.replace("</body>", script + "</body>", 1)
+    return text + script
 
 
 def ensure_embedded(html_text: str, marks: Mapping[str, Any] | None = None) -> str:
-    """CSS + marks db + Paper tab + cardHTML wrap JS. Safe on live ~2.7MB HTML.
+    """CSS + marks db + Paper tab + cardHTML wrap JS. Patches live HTML in place.
 
-    ``marks=None`` still injects JS/CSS so Buy/Sell hydrate from ``MOM.cards`` /
-    localStorage after Refresh. Pass ``marks_db(cards, book=book)`` on a write.
-    ``#view-paper`` is a top-nav tab (not a home chrome strip) and reads
-    ``fd-paper-book``. Leftover ``#fd-paper-home`` is stripped.
+    Never replaces the dense desk with skinny ``render_html``. ``marks=None``
+    or ``{}`` still injects JS/CSS and **rebuilds** ``#fd-paper-marks`` from
+    live ``window.px.by[ticker].p[-1]`` (including ``window.px = window.px ||
+    {by:…}``), then ``PX_LAST`` / ``px.LAST``. Card ``last`` is a return and
+    is ignored. Breakout / Experimental hosts are left in place. Pass
+    ``marks_db(cards, book=book, html=html)`` on Refresh so prints win.
     """
     text = html_text or ""
+    harvested = harvest_html_marks(text)
+    merged = merge_marks(harvested, marks)
     text = _strip_home_host(text)
     text = _ensure_nav(text)
     text = _ensure_css(text)
     text = _patch_setview(text)
     text = _ensure_panes(text, replace=True)
-    if marks is not None or not re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', text, re.I):
-        text = _ensure_db(text, marks if marks is not None else {})
+    text = _ensure_db(text, merged)
     text = _ensure_js(text)
     return text

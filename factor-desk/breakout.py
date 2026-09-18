@@ -768,11 +768,18 @@ def strip_js() -> str:
       else if (oursOf(b, "breakout") || oursOf(b, "breakdown")) setOn(b, false);
     }}
   }}
+  function hideBbPanes() {{
+    var paneBo = $(VIEW_BO), paneBd = $(VIEW_BD);
+    if (paneBo) paneBo.classList.add("hide");
+    if (paneBd) paneBd.classList.add("hide");
+    document.body.removeAttribute("data-fd-bb");
+    syncNav("");
+  }}
   function show(kind) {{
-    hideNativeViews();
     hideLegacy();
-    var data = db();
     if (kind === "breakout" || kind === "breakdown") {{
+      hideNativeViews();
+      var data = db();
       var pane = $(kind === "breakout" ? VIEW_BO : VIEW_BD);
       var grid = $(kind === "breakout" ? GRID_BO : GRID_BD);
       if (pane) pane.classList.remove("hide");
@@ -782,8 +789,7 @@ def strip_js() -> str:
       syncNav(kind);
       return;
     }}
-    document.body.removeAttribute("data-fd-bb");
-    syncNav("");
+    hideBbPanes();
   }}
   window.__FD_BB_SHOW__ = show;
   window.__FD_BB_SYNC_NAV__ = syncNav;
@@ -792,9 +798,13 @@ def strip_js() -> str:
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
     if (view === "breakout" || btn.getAttribute("data-fd-breakout") === "1" || btn.id === "fd-nav-breakout") return "breakout";
     if (view === "breakdown" || btn.getAttribute("data-fd-breakdown") === "1" || btn.id === "fd-nav-breakdown") return "breakdown";
+    if (view === "paper" || view === "experimental") return "";
+    if (btn.id === "fd-nav-paper" || btn.getAttribute("data-fd-paper-nav") === "1") return "";
+    if (btn.id === "fd-nav-experimental" || btn.getAttribute("data-fd-sscore") === "1") return "";
     var label = (btn.textContent || "").replace(/\s+/g, " ").trim();
     if (label === "Breakout") return "breakout";
     if (label === "Breakdown") return "breakdown";
+    if (label === "Paper" || label === "Experimental" || label === "Exp") return "";
     if (btn.id === "refresh" || btn.id === "options-refresh") return "";
     if (btn.closest && btn.closest("#topnav, nav, .topnav") && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || view)) return "other";
     if (btn.classList && (btn.classList.contains("nav-btn") || view)) return "other";
@@ -823,7 +833,11 @@ def strip_js() -> str:
         syncNav(kind);
         return;
       }}
-      show("");
+      if (kind === "paper" || kind === "experimental" || kind === "exp") {{
+        hideBbPanes();
+        return orig.apply(this, arguments);
+      }}
+      hideBbPanes();
       return orig.apply(this, arguments);
     }};
     window.setView.__fdBb = true;

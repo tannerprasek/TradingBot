@@ -30,8 +30,13 @@ class PnlSignTests(unittest.TestCase):
     def test_long_down_is_minus(self) -> None:
         self.assertAlmostEqual(pt.pnl_pct("long", 50.0, 45.0), -10.0)
 
-    def test_short_up_is_minus(self) -> None:
-        self.assertAlmostEqual(pt.pnl_pct("short", 50.0, 55.0), -10.0)
+    def test_missing_or_zero_mark_is_none_not_100(self) -> None:
+        self.assertIsNone(pt.pnl_pct("long", 13.63, None))
+        self.assertIsNone(pt.pnl_pct("long", 13.63, 0))
+        self.assertIsNone(pt.pnl_pct("short", 617.64, None))
+        self.assertIsNone(pt.pnl_pct("short", 617.64, 0))
+        self.assertNotEqual(pt.fmt_pct(pt.pnl_pct("long", 13.63, 0)), "-100.00%")
+        self.assertNotEqual(pt.fmt_pct(pt.pnl_pct("short", 617.64, 0)), "+100.00%")
 
     def test_closed_short_keeps_sign(self) -> None:
         row = pt.close_position(
@@ -116,6 +121,252 @@ class MarkTests(unittest.TestCase):
         )
         self.assertEqual(db["AAPL"], 12.0)
         self.assertEqual(db["MSFT"], 400.0)
+
+    def test_harvest_html_keeps_data_px_and_existing_db(self) -> None:
+        html = """<html><body>
+        <article class="card" data-t="CNH" data-px="13.63">CNH</article>
+        <script type="application/json" id="fd-paper-marks">{"PWR":617.64}</script>
+        </body></html>"""
+        harvested = pt.harvest_html_marks(html)
+        self.assertEqual(harvested["CNH"], 13.63)
+        self.assertEqual(harvested["PWR"], 617.64)
+        merged = pt.merge_marks(harvested, {"PWR": 0, "AAPL": 12.0})
+        self.assertEqual(merged["PWR"], 617.64)  # 0 must not wipe a real mark
+        self.assertEqual(merged["AAPL"], 12.0)
+
+    def test_ensure_embedded_none_does_not_wipe_marks(self) -> None:
+        html = """<!DOCTYPE html><html><head></head><body>
+        <article class="card" data-t="IQV" data-px="269.02">IQV</article>
+        </body></html>"""
+        out = pt.ensure_embedded(html, None)
+        blob = re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(blob)
+        self.assertEqual(json.loads(blob.group(1))["IQV"], 269.02)
+
+    def test_harvest_live_mom_last_and_px_last(self) -> None:
+        html = """<!DOCTYPE html><html><body>
+<script>
+window.px = { by: {
+  CNH: { b: 13.5, o: 13.4, p: [13.1, 13.63], r: 0.012, last: 0.012 },
+  WFC: { p: [80, 86.81], r: 0.01, last: 0.01 }
+} };
+window.MOM = { cards: [
+  { t: "CNH", last: 0.012 },
+  { t: "PWR", PX_LAST: 555.88 },
+  { t: "IQV", px: { LAST: 269.02 } }
+], up: [{ t: "WFC", last: 0.01 }] };
+MOM.cards = window.MOM.cards;
+</script>
+<script type="application/json" id="fd-paper-marks">{}</script>
+</body></html>"""
+        harvested = pt.harvest_html_marks(html)
+        self.assertEqual(harvested["CNH"], 13.63)
+        self.assertEqual(harvested["PWR"], 555.88)
+        self.assertEqual(harvested["IQV"], 269.02)
+        self.assertEqual(harvested["WFC"], 86.81)
+        self.assertNotEqual(harvested.get("CNH"), 0.012)
+        out = pt.ensure_embedded(html, {})
+        blob = re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(blob)
+        db = json.loads(blob.group(1))
+        self.assertEqual(db["CNH"], 13.63)
+        self.assertEqual(db["PWR"], 555.88)
+        js = pt.strip_js()
+        self.assertIn("fd-paper-table", js)
+        self.assertIn("Date", js)
+        self.assertIn("harvestAllMarks", js)
+        self.assertIn("harvestPxBy", js)
+        self.assertIn("markFromPxWorld", js)
+        self.assertIn("MARK_KEY_NORM", js)
+        self.assertIn("markFromPxPayload", js)
+        self.assertIn("ensureHostById", js)
+        self.assertIn("stripChipRows", js)
+        self.assertNotIn("entry = Number(entry); mark = Number(mark);", js)
+
+    def test_marks_db_nested_raw_px_last(self) -> None:
+        db = pt.marks_db(
+            [],
+            book={"names": {"AAPL US Equity": {"raw": {"PX_LAST": 190.5}}}},
+        )
+        self.assertEqual(db["AAPL"], 190.5)
+
+    def test_mark_of_px_payload_last(self) -> None:
+        self.assertEqual(pt.mark_of({"t": "IQV", "px": {"LAST": 269.02}}), 269.02)
+        self.assertEqual(pt.mark_of({"raw": {"PX_LAST": 190.5}}), 190.5)
+        self.assertIsNone(pt.mark_of({"px": {"LAST": 0}}))
+
+    def test_px_by_series_last_not_return_field(self) -> None:
+        rec = {"b": 13.5, "o": 13.4, "p": [13.1, 13.63], "r": 0.012, "h": 13.7, "hi": 13.8, "last": 0.012}
+        self.assertEqual(pt.mark_of(rec), 13.63)
+        self.assertIsNone(pt.mark_of({"t": "CNH", "last": 0.012}))
+        html = (
+            "<script>window.px = { by: { "
+            "CNH: { p: [13.1, 13.63], last: 0.012, r: 0.012 }, "
+            "PWR: { p: [600, 629.65], last: -0.02, r: -0.02 } "
+            "} };</script>"
+            '<script>window.MOM = { cards: [{ t: "CNH", last: 0.012 }] };</script>'
+        )
+        db = pt.marks_db([], book=None, html=html)
+        self.assertEqual(db["CNH"], 13.63)
+        self.assertEqual(db["PWR"], 629.65)
+        self.assertNotEqual(db.get("CNH"), 0.012)
+        aliases = pt.marks_db([], book=None, html=html.replace("CNH:", '"CNH US Equity":'))
+        self.assertEqual(aliases["CNH"], 13.63)
+        hot = (
+            '<script type="application/json" id="fd-paper-marks">'
+            '{"CNH":13.63,"PWR":629.65}</script>'
+            "<script>window.MOM={cards:[{t:'CNH',last:0.012}]};</script>"
+        )
+        kept = pt.ensure_embedded(hot, {})
+        kept_db = json.loads(re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            kept,
+            re.I | re.S,
+        ).group(1))
+        self.assertEqual(kept_db["CNH"], 13.63)
+        self.assertEqual(kept_db["PWR"], 629.65)
+        js = pt.strip_js()
+        self.assertIn("harvestPxBy", js)
+        self.assertIn("markFromPxByRec", js)
+        self.assertIn("fd-paper-table", js)
+        self.assertIn('"Date"', js)
+
+    def test_marks_db_harvests_html_when_cards_empty(self) -> None:
+        html = (
+            "<script>window.px = { by: { CNH: { p: [13.1, 14.99], last: 0.01 }, "
+            "PWR: { LAST: 555.88, p: [500, 555.88] } } };</script>"
+            '<script type="application/json" id="fd-paper-marks">{}</script>'
+        )
+        db = pt.marks_db([], book=None, html=html)
+        self.assertEqual(db["CNH"], 14.99)
+        self.assertEqual(db["PWR"], 555.88)
+        self.assertNotIn("LAST", db)
+        self.assertNotIn("CARDS", db)
+
+    def test_refresh_rebuilds_marks_from_px_or_equals(self) -> None:
+        """Live desk uses window.px = window.px || {by:...}; empty #fd-paper-marks."""
+        html = """<!DOCTYPE html><html><head></head><body>
+<nav><button data-view="options">Options</button></nav>
+<div id="view-breakout" class="view-pane">BB-KEEP</div>
+<div id="view-experimental" class="view-pane">EX-KEEP</div>
+<div id="view-paper" data-view="paper">
+  <div class="fd-paper-open-row"><button class="fd-paper-chip">CNH LONG @ 13.63 -100.00%</button></div>
+</div>
+<script>
+window.px = window.px || { by: {
+  CNH: { b: 13.5, o: 13.4, p: [13.1, 13.63], r: 0.012, h: 13.7, hi: 13.8, last: 0.012 },
+  PWR: { b: 600, o: 610, p: [600, 629.65], r: -0.02, last: -0.02 }
+} };
+window.MOM = { cards: [{ t: "CNH", last: 0.012 }, { t: "PWR", last: -0.02 }] };
+</script>
+<script type="application/json" id="fd-paper-marks">{}</script>
+</body></html>"""
+        db = pt.marks_db([], book=None, html=html)
+        self.assertEqual(db["CNH"], 13.63)
+        self.assertEqual(db["PWR"], 629.65)
+        self.assertNotEqual(db.get("CNH"), 0.012)
+        out = pt.ensure_embedded(html, {})
+        blob = re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(blob)
+        filled = json.loads(blob.group(1))
+        self.assertEqual(filled["CNH"], 13.63)
+        self.assertEqual(filled["PWR"], 629.65)
+        self.assertIn("fd-paper-table", out)
+        self.assertIn('"Date"', out)
+        self.assertIn('"Ticker"', out)
+        self.assertIn('"Side"', out)
+        self.assertIn('"Entry"', out)
+        self.assertIn('"Mark"', out)
+        self.assertIn('"Return %"', out)
+        self.assertIn("no open paper", out)
+        self.assertNotIn("CNH LONG @ 13.63 -100.00%", out)
+        self.assertIn("BB-KEEP", out)
+        self.assertIn("EX-KEEP", out)
+        self.assertIn('id="view-breakout"', out)
+        self.assertIn('id="view-experimental"', out)
+        self.assertIn("markFromPxWorld", out)
+        again = pt.ensure_embedded(out, {})
+        again_db = json.loads(re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            again,
+            re.I | re.S,
+        ).group(1))
+        self.assertEqual(again_db["CNH"], 13.63)
+        self.assertEqual(again.count('id="view-breakout"'), 1)
+        self.assertEqual(again.count('id="view-experimental"'), 1)
+        self.assertEqual(again.count('id="view-paper"'), 1)
+
+    def test_nested_brace_px_rec_still_uses_p_last(self) -> None:
+        html = (
+            "<script>window.px.by = { "
+            "CNH: { meta: { src: 'dapi' }, p: [12, 13.63], last: 0.012 } "
+            "};</script>"
+            '<script type="application/json" id="fd-paper-marks">{}</script>'
+        )
+        db = pt.marks_db([], book=None, html=html)
+        self.assertEqual(db["CNH"], 13.63)
+
+    def test_ensure_embedded_strips_stale_chip_script(self) -> None:
+        html = """<!DOCTYPE html><html><head></head><body>
+<nav><button data-view="options">Options</button></nav>
+<div id="view-paper" data-view="paper">
+  <div class="fd-paper-open-row"><button class="fd-paper-chip">CNH LONG @ 13.63 -100.00%</button></div>
+</div>
+<script>
+window.MOM={cards:[{t:"CNH",px:{LAST:14.99}}]};
+</script>
+<script>
+function paintTab(){}
+var STORAGE = "fd-paper-book";
+window.__FD_PAPER_APPLY__ = function () {};
+function chipEl(row){ var b=document.createElement("button"); b.className="fd-paper-chip"; return b; }
+</script>
+</body></html>"""
+        out = pt.ensure_embedded(html, {})
+        self.assertEqual(out.count('id="fd-paper-js"'), 1)
+        self.assertEqual(out.count("window.__FD_PAPER_APPLY__"), 1)
+        self.assertNotIn("function chipEl(row)", out)
+        self.assertNotIn("CNH LONG @ 13.63 -100.00%", out)
+        self.assertIn("markFromPxPayload", out)
+        self.assertIn("#view-paper .fd-paper-chip", out)
+        blob = re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(blob)
+        self.assertEqual(json.loads(blob.group(1))["CNH"], 14.99)
+
+    def test_ensure_embedded_replaces_chip_strip_with_table(self) -> None:
+        html = """<!DOCTYPE html><html><head></head><body>
+<nav><button data-view="options">Options</button></nav>
+<div id="view-paper" data-view="paper">
+  <div class="fd-paper-open-row"><button class="fd-paper-chip">CNH LONG @ 13.63 -100.00%</button></div>
+</div>
+<script>window.px={by:{CNH:{p:[13.1,14.99],last:0.01}}};window.MOM={cards:[{t:"CNH",last:0.01}]};</script>
+</body></html>"""
+        out = pt.ensure_embedded(html, {})
+        self.assertIn('id="fd-paper-opens"', out)
+        self.assertIn("fd-paper-table", out)
+        self.assertIn('"Date"', pt.strip_js())
+        self.assertNotIn("CNH LONG @ 13.63 -100.00%", out)
+        self.assertEqual(json.loads(re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        ).group(1))["CNH"], 14.99)
 
 
 class WeekScorecardTests(unittest.TestCase):
@@ -212,11 +463,12 @@ class PaperTabTests(unittest.TestCase):
         html = pt.panes_html(pt.empty_book(), {})
         self.assertIn("no open paper", html)
         self.assertIn("no closed yet this week", html)
+        self.assertIn("no closed paper", html)
         self.assertIn('id="view-paper"', html)
         self.assertIn('data-view="paper"', html)
         self.assertIn("America/Edmonton", html)
         self.assertIn("data-fd-paper-open", html)
-        self.assertIn("Closed trades", html)
+        self.assertIn("closed", html.lower())
         self.assertEqual(pt.home_host_html(pt.empty_book(), {}), "")
 
     def test_open_rows_list_every_position(self) -> None:
@@ -227,9 +479,52 @@ class PaperTabTests(unittest.TestCase):
         self.assertEqual(len(opens), 15)
         html = pt.panes_html(book, {f"T{i:02d}": 11.0 for i in range(15)})
         self.assertNotIn("more 3", html)
-        self.assertEqual(html.count("data-fd-paper-ticker="), 45)  # row + chip + Close per open
+        self.assertIn("fd-paper-table", html)
+        self.assertIn(">Date</th>", html)
+        self.assertIn(">Ticker</th>", html)
+        self.assertIn(">Side</th>", html)
+        self.assertIn(">Mark</th>", html)
+        self.assertIn(">Return %</th>", html)
+        self.assertEqual(html.count("data-fd-paper-ticker="), 45)  # row + ticker + Close per open
         self.assertEqual(html.count("data-fd-paper-close="), 15)
         self.assertIn(">Close</button>", html)
+
+    def test_missing_mark_shows_dash_not_fake_100(self) -> None:
+        book = pt.empty_book()
+        pt.apply_click(book, "CNH", "buy", 13.63, when="2026-09-17T00:00:00Z")
+        pt.apply_click(book, "PWR", "sell", 617.64, when="2026-09-17T01:00:00Z")
+        rows = {r["ticker"]: r for r in pt.open_rows(book, {})}
+        self.assertIsNone(rows["CNH"]["mark"])
+        self.assertIsNone(rows["CNH"]["pnl_pct"])
+        self.assertIsNone(rows["PWR"]["pnl_pct"])
+        html = pt.panes_html(book, {})
+        self.assertNotIn("100.00%", html)
+        self.assertNotIn("-100.00%", html)
+        self.assertIn("—", html)
+        self.assertIn("disabled", html)
+        self.assertIn(pt.NO_MARK_REASON, html)
+        live = pt.panes_html(book, {"CNH": 14.993, "PWR": 555.876})
+        self.assertIn("+10.00%", live)
+        self.assertIn("+10.00%", live)  # short also profits when mark < entry
+        self.assertIn("14.99", live)
+        self.assertNotIn("disabled", live.split("CNH", 1)[-1].split("</tr>", 1)[0])
+
+    def test_closed_table_is_html_table(self) -> None:
+        book = pt.empty_book()
+        pt.apply_click(book, "CNH", "buy", 13.63, when="2026-09-17T00:00:00Z")
+        pt.apply_click(book, "CNH", "sell", 14.99, when="2026-09-18T00:00:00Z")
+        html = pt.panes_html(book, {})
+        self.assertIn('aria-label="Closed paper"', html)
+        self.assertIn(">Date</th>", html)
+        self.assertIn(">Closed</th>", html)
+        self.assertIn(">Ticker</th>", html)
+        self.assertIn(">Side</th>", html)
+        self.assertIn(">Entry</th>", html)
+        self.assertIn(">Exit</th>", html)
+        self.assertIn(">Return %</th>", html)
+        self.assertIn("fd-paper-table", html)
+        self.assertIn("CNH", html)
+        self.assertNotIn("-100.00%", html)
 
     def test_ensure_embedded_injects_paper_tab_not_chrome_strip(self) -> None:
         html = """<!DOCTYPE html><html><head></head><body>
@@ -279,6 +574,17 @@ function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</art
         self.assertIn("data-fd-paper-close", js)
         self.assertIn("data-fd-paper-open", js)
         self.assertIn("Already long — sell to close", js)
+        self.assertIn("fd-paper-table", js)
+        self.assertIn("harvestAllMarks", js)
+        self.assertIn("isTradeEl", js)
+        self.assertIn("__FD_PAPER_ON_DOC_CLICK__", js)
+        self.assertIn("entry = num(entry); mark = num(mark);", js)
+        self.assertNotIn("entry = Number(entry); mark = Number(mark);", js)
+        self.assertIn("addCards(out, mom.cards);", js)
+        self.assertIn("MOM_BAG_KEYS", js)
+        self.assertIn("markFromPxPayload", js)
+        self.assertIn("ensureHostById", js)
+        self.assertIn("no closed paper", out)
         self.assertIn("Previous trades", out)
         self.assertIn(">Buy</button>", pt.chrome_html("AAPL", mark=12.0))
         again = pt.ensure_embedded(out, None)
@@ -291,6 +597,72 @@ function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</art
         exp_at = again.find('data-view="experimental"')
         self.assertGreater(paper_at, nav_at)
         self.assertGreater(paper_at, exp_at)
+
+    def test_paper_nav_setview_does_not_fall_through_to_home(self) -> None:
+        html = """<!DOCTYPE html><html><head></head><body>
+<nav>
+  <button data-view="home">Home</button>
+  <button data-view="options">Options</button>
+</nav>
+<div id="home">HOME</div>
+<div id="view-paper" class="view-pane hide" hidden>OLD</div>
+<script>
+function hideAllPanes() {
+  ["home","view-mom-up","view-mom-down","view-outliers","view-options"].forEach(function(id){
+    var el = document.getElementById(id);
+    if (el) el.classList.add("hide");
+  });
+}
+function paintView(v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+}
+function setView(v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+  hideAllPanes();
+  paintView(v);
+  paint();
+}
+window.setView = function (v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+};
+</script>
+</body></html>"""
+        out = pt.ensure_embedded(html, {})
+        setview_head = out.split("function setView")[1][:900]
+        self.assertIn("__FD_PAPER_SHOW__", setview_head)
+        self.assertIn(pt.SETVIEW_MARKER, setview_head)
+        self.assertLess(
+            setview_head.find("__FD_PAPER_SHOW__"),
+            setview_head.find('v = "home"'),
+        )
+        self.assertIn("|paper", out)
+        self.assertIn("setView('paper')", out)
+        self.assertIn("__FD_PAPER_SHOW__", out)
+        js = pt.strip_js()
+        self.assertIn("stopImmediatePropagation", js)
+        self.assertIn('document.getElementById("view-paper")', js)
+        self.assertIn('var pane = document.getElementById("view-paper")', js)
+        nav = js[js.find('if (kind === "paper")') : js.find('if (kind === "paper")') + 400]
+        self.assertLess(nav.find("showPaper(true)"), nav.find("stopImmediatePropagation"))
+        self.assertIn('sv("paper")', js)
+        self.assertIn("installSetViewBridge", js)
+        self.assertIn("__fdPaper", js)
+        self.assertIn("goPaper", js)
+        go = js[js.find("function goPaper") : js.find("function onNavClick")]
+        self.assertIn('sv("paper")', go)
+        self.assertNotIn("sv.__fdPaper", go)
+        self.assertGreaterEqual(go.count("showPaper(true)"), 2)
+        self.assertIn("fd-paper-table", js)
+        self.assertIn('"Date"', js)
+        pane = out[out.find('id="view-paper"') : out.find('id="view-paper"') + 900]
+        self.assertIn("fd-paper-tab", pane)
+        self.assertIn("data-fd-paper-open", pane)
+        self.assertIn("data-fd-paper-open", out)
+        btn = re.search(r"<button\b[^>]*id=[\"']fd-nav-paper[\"'][^>]*>", out, re.I)
+        self.assertIsNotNone(btn)
+        self.assertIn("setView('paper')", btn.group(0))
+        assign_head = out.split("window.setView = function")[1][:500]
+        self.assertIn("__FD_PAPER_SHOW__", assign_head)
 
     def test_inline_close_uses_opposite_click(self) -> None:
         book = pt.empty_book()
@@ -332,8 +704,10 @@ window.MOM = { cards: [{ t: "AAPL", px_last: 12 }] };
         self.assertIn("No mark price", js)
         self.assertIn("var painting = false", js)
         self.assertIn("if (painting) return", js)
-        self.assertIn("__FD_PAPER_CLICK__", js)
+        self.assertIn("__FD_PAPER_DOC_CLICK__", js)
         self.assertIn("onPaperClick", js)
+        self.assertIn("onDocumentClick", js)
+        self.assertIn("harvestAllMarks", js)
         chrome = pt.chrome_html("AAPL", mark=None)
         self.assertIn("disabled", chrome)
         self.assertIn("No mark price", chrome)
@@ -390,7 +764,8 @@ window.MOM = { cards: [{ t: "AAPL", ticker: "AAPL US Equity", px_last: 12.5, sco
             self.assertIn('id="fd-nav-paper"', text)
             self.assertNotIn('id="fd-paper-home"', text)
             self.assertIn("no open paper", text)
-            self.assertIn("no closed yet this week", text)
+            self.assertIn("no closed paper", text)
+            self.assertIn("fd-paper-table", text)
             self.assertIn("fd-paper-book", text)
             self.assertIn("data-fd-paper-act", text)
             self.assertIn("data-fd-paper-open", text)
