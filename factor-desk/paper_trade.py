@@ -20,8 +20,9 @@ P&L (1 unit notional)
 
 Mark price (first finite > 0)
 -----------------------------
-card ``price`` / ``px`` / ``px_last`` / ``PX_LAST`` / last Refresh print /
-last point of ``px_series``, then ``#fd-paper-marks``, then ``MOM.cards``.
+card ``px_last`` / ``PX_LAST`` / live ``px.by[ticker].p[-1]`` (not card
+``last``, which is a return) / last Refresh print / last point of
+``px_series``, then ``#fd-paper-marks``, then ``MOM.cards``.
 Missing mark → buttons disabled, ``title`` explains why.
 
 Paper tab (not a home chrome strip)
@@ -159,7 +160,8 @@ EMPTY_OPENS = "no open paper"
 EMPTY_WEEK = "no closed yet this week"
 EMPTY_CLOSED = "no closed paper"
 
-# First finite > 0 wins. Live Refresh often writes px / PX_LAST / last.
+# First finite > 0 wins. Live desk print is px.by[ticker].p[-1].
+# Card ``last`` is a return — never a mark.
 MARK_KEYS: tuple[str, ...] = (
     "paper_mark",
     "px_last",
@@ -171,13 +173,11 @@ MARK_KEYS: tuple[str, ...] = (
     "pxLast",
     "PxLast",
     "LAST_PX",
-    "Last",
     "LAST",
     "mark",
     "mark_px",
     "price",
     "px",
-    "last",
     "close",
     "px_close",
     "adj_close",
@@ -354,17 +354,14 @@ def mark_of(card: Mapping[str, Any] | None) -> float | None:
     payload = _payload_last(card)
     if payload is not None:
         return payload
-    skip_last = isinstance(card.get("p"), (list, tuple)) or card.get("r") is not None
     for key in MARK_KEYS:
         raw = card.get(key)
         if isinstance(raw, Mapping):
             continue
-        if skip_last and str(key).lower() == "last":
+        if str(key).lower() == "last":
             continue
         px = dapi_enrich.as_float(raw)
         if px is not None and px > 0:
-            if str(key).lower() == "last" and px < 5:
-                continue
             return px
     # Case-insensitive Last / PX_LAST on live MOM cards.
     lowered = {str(k).lower(): v for k, v in card.items()}
@@ -372,12 +369,10 @@ def mark_of(card: Mapping[str, Any] | None) -> float | None:
         raw = lowered.get(key.lower())
         if isinstance(raw, Mapping):
             continue
-        if skip_last and str(key).lower() == "last":
+        if str(key).lower() == "last":
             continue
         px = dapi_enrich.as_float(raw)
         if px is not None and px > 0:
-            if str(key).lower() == "last" and px < 5:
-                continue
             return px
     for key in SERIES_KEYS:
         raw = card.get(key)
@@ -424,9 +419,11 @@ def marks_db(
 ) -> dict[str, float]:
     """ticker / short → mark, for ``#fd-paper-marks`` after Refresh.
 
-    Walks card rows, enrichment ``book.names`` (including nested ``PX_LAST`` /
-    ``raw``), and optionally live HTML ``window.MOM`` so a Desktop Refresh of
-    the ~4.8MB desk still fills prints when enrich cards have no ``px_last``.
+    Walks live HTML ``window.px.by[ticker].p[-1]`` (the dense-desk print),
+    then card / enrichment ``PX_LAST`` / ``raw``. Card ``last`` is a return
+    and is never stored. Short aliases (``CNH US Equity`` → ``CNH``) are
+    filled alongside the long name so Refresh cannot wipe a hot-filled
+    ``#fd-paper-marks``.
     """
     out: dict[str, float] = {}
     if html:
@@ -434,15 +431,18 @@ def marks_db(
     for card in cards or []:
         if not isinstance(card, Mapping):
             continue
+        put_px_by(out, card)
         _collect_mark(out, card)
     names = (book or {}).get("names") if isinstance(book, Mapping) else None
     if isinstance(names, dict):
         for ticker, rec in names.items():
             if isinstance(rec, Mapping):
+                put_px_by(out, rec)
                 _collect_mark(out, rec, ticker_hint=str(ticker))
             else:
                 _put_mark(out, str(ticker), dapi_enrich.as_float(rec))
     elif isinstance(book, Mapping):
+        put_px_by(out, book)
         _collect_mark(out, book)
     return out
 
@@ -534,9 +534,15 @@ _TICKER_FIELD_RE = re.compile(
 )
 _PX_FIELD_RE = re.compile(
     r"""["']?(?:PX_LAST|px_last|LAST_PRICE|last_px|last_price|lastPx|pxLast|"""
-    r"""paper_mark|mark_px|price|px|Last|LAST|last|close)["']?\s*:\s*"""
+    r"""paper_mark|mark_px|price|PX_CLOSE|adj_close)["']?\s*:\s*"""
     r"""["']?([0-9]+(?:\.[0-9]+)?)["']?""",
     re.I,
+)
+_PX_BY_P_RE = re.compile(
+    r"""(?:["']([A-Z][A-Z0-9./-]{0,11})(?:\s+US\s+Equity)?["']|"""
+    r"""(?:^|[{\,])\s*([A-Z][A-Z0-9./]{1,11}))\s*:\s*"""
+    r"""\{[^{}]{0,500}?\bp\s*:\s*\[([^\[\]]{1,12000})\]""",
+    re.I | re.S,
 )
 
 
@@ -545,6 +551,50 @@ def _looks_like_ticker(value: str) -> bool:
     if not short or short in _STRUCT_KEYS:
         return False
     return bool(_TICKER_TOKEN_RE.fullmatch(short))
+
+
+def put_px_by(out: dict[str, float], obj: Any, *, _depth: int = 0) -> None:
+    """Fill ``out`` from ``px.by[ticker].p[-1]`` (and short aliases)."""
+    if _depth > 5 or not isinstance(obj, Mapping):
+        return
+    by = obj.get("by") if isinstance(obj.get("by"), Mapping) else None
+    if by is None:
+        values = [v for v in obj.values() if isinstance(v, Mapping)]
+        hits = sum(1 for v in values if isinstance(v.get("p"), (list, tuple)))
+        if hits and hits >= max(1, len(values) // 4):
+            by = obj
+    if isinstance(by, Mapping):
+        for ticker, rec in by.items():
+            if isinstance(rec, Mapping):
+                raw_p = rec.get("p")
+                px = _series_last(raw_p) if isinstance(raw_p, (list, tuple)) else None
+                if px is None:
+                    px = _payload_last(rec)
+                _put_mark(out, str(ticker), px)
+            else:
+                _put_mark(out, str(ticker), dapi_enrich.as_float(rec))
+    for nest in ("px", "PX", "payload"):
+        inner = obj.get(nest)
+        if isinstance(inner, Mapping) and inner is not obj:
+            put_px_by(out, inner, _depth=_depth + 1)
+
+
+def _last_number(blob: str) -> float | None:
+    nums = re.findall(r"[0-9]+(?:\.[0-9]+)?", blob or "")
+    if not nums:
+        return None
+    return dapi_enrich.as_float(nums[-1])
+
+
+def harvest_px_by_text(text: str, out: dict[str, float]) -> None:
+    """Regex fallback when ``window.px = {by:{...}}`` is too JS-y to JSON.load."""
+    for m in _PX_BY_P_RE.finditer(text or ""):
+        ticker = m.group(1) or m.group(2) or ""
+        if not _looks_like_ticker(ticker):
+            continue
+        px = _last_number(m.group(3) or "")
+        if px is not None and px > 0:
+            _put_mark(out, ticker, px)
 
 
 def _collect_mark(
@@ -566,6 +616,10 @@ def _collect_mark(
         px = mark_of(obj)
         if hint:
             _put_mark(out, str(hint), px)
+        if isinstance(obj.get("by"), Mapping) or any(
+            isinstance(v, Mapping) and isinstance(v.get("p"), (list, tuple)) for v in obj.values()
+        ):
+            put_px_by(out, obj)
         for key, val in obj.items():
             key_s = str(key)
             if _looks_like_ticker(key_s) and not (ticker_hint and len(_short(key_s)) <= 1):
@@ -574,7 +628,7 @@ def _collect_mark(
                 elif isinstance(val, (list, tuple)):
                     _collect_mark(out, val, ticker_hint=None, _depth=_depth + 1)
                 else:
-                    _put_mark(out, key_s, dapi_enrich.as_float(val) or mark_of({"last": val}))
+                    _put_mark(out, key_s, dapi_enrich.as_float(val))
             elif isinstance(val, (Mapping, list, tuple)) and key_s.lower() not in {
                 "null_reasons",
                 "fields_used",
@@ -663,8 +717,9 @@ def harvest_html_marks(html_text: str | None) -> dict[str, float]:
     """Pull marks already on the live desk HTML so Refresh cannot wipe them.
 
     Sources: existing ``#fd-paper-marks`` JSON, ``data-px`` on cards,
-    ``window.MOM`` / ``MOM.cards`` (last / PX_LAST / px), other JSON script
-    tags, then nearby ticker/price pairs. Never treats 0 as a mark.
+    ``window.px.by[ticker].p[-1]`` (live print), ``window.MOM`` /
+    ``PX_LAST`` / ``px.LAST``, other JSON script tags. Card ``last`` is a
+    return and is ignored. Never treats 0 as a mark.
     """
     out: dict[str, float] = {}
     text = html_text or ""
@@ -692,9 +747,10 @@ def harvest_html_marks(html_text: str | None) -> dict[str, float]:
             continue
         parsed = _js_like_load(blob)
         if parsed is not None:
+            put_px_by(out, parsed)
             _collect_mark(out, parsed)
         else:
-            _harvest_ticker_px_pairs(blob, out)
+            harvest_px_by_text(blob, out)
     for script in _JSON_SCRIPT_RE.finditer(text):
         raw = (script.group(1) or "").replace("<\\/", "</").strip()
         if not raw or raw in {"{}", "[]"}:
@@ -703,7 +759,9 @@ def harvest_html_marks(html_text: str | None) -> dict[str, float]:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             continue
+        put_px_by(out, parsed)
         _collect_mark(out, parsed)
+    harvest_px_by_text(text, out)
     if len(out) < 2:
         _harvest_ticker_px_pairs(text, out)
     return out
@@ -1672,7 +1730,7 @@ def strip_js() -> str:
     });
     return db;
   }
-  var MARK_KEY_NORM = {papermark:1,pxlast:1,lastprice:1,lastpx:1,last:1,mark:1,markpx:1,price:1,px:1,close:1,pxclose:1,adjclose:1,lastprint:1,print:1,trdpx:1};
+  var MARK_KEY_NORM = {papermark:1,pxlast:1,lastprice:1,lastpx:1,mark:1,markpx:1,price:1,px:1,close:1,pxclose:1,adjclose:1,lastprint:1,print:1,trdpx:1};
   var NEST_MARK_KEYS = ["quote","ref","raw","fields","dapi","bloomberg","ohlc","last_refresh","px","PX","payload","print","prints"];
   var MOM_BAG_KEYS = ["up","down","flags","watch","outliers","search","mom","home","all","px","PX","prints","marks","last","payload","prices"];
   if (window.__FD_PAPER_OBS__) {
@@ -1782,24 +1840,19 @@ def strip_js() -> str:
     }
     var payload = markFromPxPayload(card.px || card.PX || card.payload);
     if (payload) return payload;
-    var skipLast = Array.isArray(card.p) || card.r != null;
-    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","lastPx","pxLast","PxLast","LAST_PX","Last","LAST","mark","mark_px","price","px","close","px_close","adj_close","PX_CLOSE","last_print","print","trd_px"];
-    if (!skipLast) keys.push("last");
+    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","lastPx","pxLast","PxLast","LAST_PX","LAST","mark","mark_px","price","px","close","px_close","adj_close","PX_CLOSE","last_print","print","trd_px"];
     for (var i = 0; i < keys.length; i++) {
       var v = num(card[keys[i]]);
-      if (v && !(String(keys[i]).toLowerCase() === "last" && v < 5)) return v;
+      if (v) return v;
     }
     for (var k in card) {
       if (!Object.prototype.hasOwnProperty.call(card, k)) continue;
       var nk = String(k).toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (nk === "last") continue;
       if (!MARK_KEY_NORM[nk]) continue;
-      if (nk === "last" && skipLast) continue;
       var raw = card[k];
       var nv = num(raw);
-      if (nv) {
-        if (nk === "last" && nv < 5) continue;
-        return nv;
-      }
+      if (nv) return nv;
       if (raw && typeof raw === "object" && !Array.isArray(raw)) {
         var nested = markFromCard(raw, depth + 1);
         if (nested) return nested;

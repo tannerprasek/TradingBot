@@ -150,20 +150,25 @@ class MarkTests(unittest.TestCase):
     def test_harvest_live_mom_last_and_px_last(self) -> None:
         html = """<!DOCTYPE html><html><body>
 <script>
+window.px = { by: {
+  CNH: { b: 13.5, o: 13.4, p: [13.1, 13.63], r: 0.012, last: 0.012 },
+  WFC: { p: [80, 86.81], r: 0.01, last: 0.01 }
+} };
 window.MOM = { cards: [
-  { t: "CNH", last: 14.99 },
+  { t: "CNH", last: 0.012 },
   { t: "PWR", PX_LAST: 555.88 },
   { t: "IQV", px: { LAST: 269.02 } }
-], up: [{ t: "WFC", Last: 86.81 }] };
+], up: [{ t: "WFC", last: 0.01 }] };
 MOM.cards = window.MOM.cards;
 </script>
 <script type="application/json" id="fd-paper-marks">{}</script>
 </body></html>"""
         harvested = pt.harvest_html_marks(html)
-        self.assertEqual(harvested["CNH"], 14.99)
+        self.assertEqual(harvested["CNH"], 13.63)
         self.assertEqual(harvested["PWR"], 555.88)
         self.assertEqual(harvested["IQV"], 269.02)
         self.assertEqual(harvested["WFC"], 86.81)
+        self.assertNotEqual(harvested.get("CNH"), 0.012)
         out = pt.ensure_embedded(html, {})
         blob = re.search(
             r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
@@ -172,12 +177,13 @@ MOM.cards = window.MOM.cards;
         )
         self.assertIsNotNone(blob)
         db = json.loads(blob.group(1))
-        self.assertEqual(db["CNH"], 14.99)
+        self.assertEqual(db["CNH"], 13.63)
         self.assertEqual(db["PWR"], 555.88)
         js = pt.strip_js()
         self.assertIn("fd-paper-table", js)
         self.assertIn("Opened", js)
         self.assertIn("harvestAllMarks", js)
+        self.assertIn("harvestPxBy", js)
         self.assertIn("MARK_KEY_NORM", js)
         self.assertIn("markFromPxPayload", js)
         self.assertIn("ensureHostById", js)
@@ -211,14 +217,31 @@ MOM.cards = window.MOM.cards;
         self.assertEqual(db["CNH"], 13.63)
         self.assertEqual(db["PWR"], 629.65)
         self.assertNotEqual(db.get("CNH"), 0.012)
+        aliases = pt.marks_db([], book=None, html=html.replace("CNH:", '"CNH US Equity":'))
+        self.assertEqual(aliases["CNH"], 13.63)
+        hot = (
+            '<script type="application/json" id="fd-paper-marks">'
+            '{"CNH":13.63,"PWR":629.65}</script>'
+            "<script>window.MOM={cards:[{t:'CNH',last:0.012}]};</script>"
+        )
+        kept = pt.ensure_embedded(hot, {})
+        kept_db = json.loads(re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            kept,
+            re.I | re.S,
+        ).group(1))
+        self.assertEqual(kept_db["CNH"], 13.63)
+        self.assertEqual(kept_db["PWR"], 629.65)
         js = pt.strip_js()
         self.assertIn("harvestPxBy", js)
         self.assertIn("markFromPxByRec", js)
+        self.assertIn("fd-paper-table", js)
+        self.assertIn('"Opened"', js)
 
     def test_marks_db_harvests_html_when_cards_empty(self) -> None:
         html = (
-            "<script>window.MOM = { cards: [{ t: 'CNH', last: 14.99 }], "
-            "px: { PWR: { LAST: 555.88 } } };</script>"
+            "<script>window.px = { by: { CNH: { p: [13.1, 14.99], last: 0.01 }, "
+            "PWR: { LAST: 555.88, p: [500, 555.88] } } };</script>"
             '<script type="application/json" id="fd-paper-marks">{}</script>'
         )
         db = pt.marks_db([], book=None, html=html)
@@ -264,7 +287,7 @@ function chipEl(row){ var b=document.createElement("button"); b.className="fd-pa
 <div id="view-paper" data-view="paper">
   <div class="fd-paper-open-row"><button class="fd-paper-chip">CNH LONG @ 13.63 -100.00%</button></div>
 </div>
-<script>window.MOM={cards:[{t:"CNH",last:14.99}]};</script>
+<script>window.px={by:{CNH:{p:[13.1,14.99],last:0.01}}};window.MOM={cards:[{t:"CNH",last:0.01}]};</script>
 </body></html>"""
         out = pt.ensure_embedded(html, {})
         self.assertIn('id="fd-paper-opens"', out)
