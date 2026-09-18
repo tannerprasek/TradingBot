@@ -576,7 +576,7 @@ Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping
 | --- | --- |
 | `paper_trade.py` | **recopy** — Paper tab **HTML table** (Date / Ticker / Side / Entry / Mark / Return % / Close, not chips); Refresh rebuilds `#fd-paper-marks` from `px.by[ticker].p[-1]`; missing mark → `—` never ±100%; Buy/Sell/Close use dollar marks; capture Paper click `showPaper(true)` then `stopImmediatePropagation`; strips leftover chip JS |
 | `s_score.py` | **recopy** — Experimental `kindOf` returns `""` for Paper/Breakout/Breakdown; `show(false)` must not unhide `#home` when `data-fd-paper` / `#view-paper.fd-paper-on` |
-| `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; `kindOf` returns `""` for Paper/Experimental (not `"other"`); `setView('paper')` must not `show("")`/`hideNativeViews`; dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
+| `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; `kindOf` returns `""` for Paper/Experimental (not `"other"`); non-BB `setView` only `hideBbPanes` then `orig.apply` (never `hideNativeViews` on Paper); dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/PAPER-TRADE.md` | optional, for the desk |
 

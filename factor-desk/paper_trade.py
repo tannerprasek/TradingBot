@@ -2572,11 +2572,10 @@ def strip_js() -> str:
   function goPaper() {
     showPaper(true);
     var sv = window.setView;
-    if (typeof sv === "function" && sv.__fdPaper) {
+    if (typeof sv === "function") {
       try { sv("paper"); } catch (err) {}
-    } else if (window.__FD_PAPER_SHOW__) {
-      window.__FD_PAPER_SHOW__();
     }
+    showPaper(true);
   }
   function onNavClick(ev) {
     if (isTradeEl(ev.target)) return;

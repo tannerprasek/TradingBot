@@ -648,6 +648,10 @@ window.setView = function (v) {
         self.assertIn("installSetViewBridge", js)
         self.assertIn("__fdPaper", js)
         self.assertIn("goPaper", js)
+        go = js[js.find("function goPaper") : js.find("function onNavClick")]
+        self.assertIn('sv("paper")', go)
+        self.assertNotIn("sv.__fdPaper", go)
+        self.assertGreaterEqual(go.count("showPaper(true)"), 2)
         self.assertIn("fd-paper-table", js)
         self.assertIn('"Date"', js)
         pane = out[out.find('id="view-paper"') : out.find('id="view-paper"') + 900]

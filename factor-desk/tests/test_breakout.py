@@ -269,9 +269,15 @@ function syncNav() {}
         self.assertIn('if (view === "paper" || view === "experimental") return "";', kind)
         self.assertIn("fd-nav-paper", kind)
         self.assertIn("data-fd-paper-nav", kind)
+        show_fn = js[js.find("function show(kind)") : js.find("window.__FD_BB_SHOW__")]
+        self.assertGreater(show_fn.find("hideNativeViews()"), show_fn.find('kind === "breakout"'))
+        self.assertIn("hideBbPanes", show_fn)
         bridge = js[js.find("function installSetViewBridge") :]
-        self.assertLess(bridge.find('kind === "paper"'), bridge.find('show("");'))
+        self.assertIn('kind === "paper"', bridge)
         self.assertIn('kind === "experimental"', bridge)
+        self.assertIn("hideBbPanes", bridge)
+        self.assertNotIn('show("");', bridge)
+        self.assertIn("orig.apply", bridge)
         self.assertIn("window.__FD_BB_SHOW__", js)
         self.assertIn('classList.add("hide")', js)
         self.assertIn("view-mom-up", js)

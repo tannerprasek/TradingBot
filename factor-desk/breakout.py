@@ -768,11 +768,18 @@ def strip_js() -> str:
       else if (oursOf(b, "breakout") || oursOf(b, "breakdown")) setOn(b, false);
     }}
   }}
+  function hideBbPanes() {{
+    var paneBo = $(VIEW_BO), paneBd = $(VIEW_BD);
+    if (paneBo) paneBo.classList.add("hide");
+    if (paneBd) paneBd.classList.add("hide");
+    document.body.removeAttribute("data-fd-bb");
+    syncNav("");
+  }}
   function show(kind) {{
-    hideNativeViews();
     hideLegacy();
-    var data = db();
     if (kind === "breakout" || kind === "breakdown") {{
+      hideNativeViews();
+      var data = db();
       var pane = $(kind === "breakout" ? VIEW_BO : VIEW_BD);
       var grid = $(kind === "breakout" ? GRID_BO : GRID_BD);
       if (pane) pane.classList.remove("hide");
@@ -782,8 +789,7 @@ def strip_js() -> str:
       syncNav(kind);
       return;
     }}
-    document.body.removeAttribute("data-fd-bb");
-    syncNav("");
+    hideBbPanes();
   }}
   window.__FD_BB_SHOW__ = show;
   window.__FD_BB_SYNC_NAV__ = syncNav;
@@ -828,14 +834,10 @@ def strip_js() -> str:
         return;
       }}
       if (kind === "paper" || kind === "experimental" || kind === "exp") {{
-        var paneBo = $(VIEW_BO), paneBd = $(VIEW_BD);
-        if (paneBo) paneBo.classList.add("hide");
-        if (paneBd) paneBd.classList.add("hide");
-        document.body.removeAttribute("data-fd-bb");
-        syncNav("");
+        hideBbPanes();
         return orig.apply(this, arguments);
       }}
-      show("");
+      hideBbPanes();
       return orig.apply(this, arguments);
     }};
     window.setView.__fdBb = true;
