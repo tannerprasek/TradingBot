@@ -54,7 +54,7 @@ factor-desk/
 Refresh: `prices → dapi_enrich (~50–60%) → rebuild`. Options pulse is a separate **Options Refresh** button (`/options-refresh`, or `options=1`).
 Optional: `GET/POST /refresh?intraday=1` (default off). See [docs/DAPI-ENRICH.md](docs/DAPI-ENRICH.md).
 GICS sector chips read `gics_sector_name` already on the enrich file; optional one-shot `python dapi_enrich.py --gics-once` (not part of Refresh). `write_combined` re-embeds filled `#gics-sector-db` + strip JS on every HTML write. See [docs/GICS-FILTER.md](docs/GICS-FILTER.md).
-Home cards: momentum streak vs score 5 (`↑12d>5` / `↓8d<5`). Name-drill charts color close green/red vs SMA50/SMA200. See [docs/MOM-STREAK.md](docs/MOM-STREAK.md).
+Home cards: momentum streak vs score 5 (`↑12d>5` / `↓8d<5`). Name-drill charts wrap live `paintPxChart` so close is green/red vs SMA50/SMA200. See [docs/MOM-STREAK.md](docs/MOM-STREAK.md).
 Breakout / Breakdown tabs (mid-score climbers / crackers), a since-last-Refresh delta strip, and optional Desk Analyst hitch pills: [docs/BREAKOUT-BREAKDOWN.md](docs/BREAKOUT-BREAKDOWN.md).
 Paper Buy/Sell on dense MOM cards plus a Home open-book / week-scorecard strip (localStorage, 1 unit, no brokerage): [docs/PAPER-TRADE.md](docs/PAPER-TRADE.md).
 Experimental residual S-score (Avellaneda–Lee layer on existing SparsePCA residuals; pointers only, own top-nav tab): [docs/S-SCORE.md](docs/S-SCORE.md).

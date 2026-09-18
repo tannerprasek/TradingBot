@@ -383,9 +383,9 @@ Button talks to `http://127.0.0.1:8765` like Refresh. Restart the sidecar after 
 
 ---
 
-## 8) Chart tag-trigger polish + streak bounds
+## 8) Chart tag-trigger polish + streak bounds + MA-regime ``paintPxChart`` wrap
 
-Copy `chart_marks.py` next to live `desk_dash.py`. End of live `write_combined`:
+Copy **`chart_marks.py`** next to live `desk_dash.py`. Do **not** replace live `factorbook.html` with a generator rebuild. End of live `write_combined` (if the hook is missing):
 
 ```python
 import chart_marks
@@ -396,7 +396,9 @@ html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
 # _ensure_options_refresh_ui(html)  # keep Options Refresh on Refresh rewrites
 ```
 
-Overlay JS polishes existing `.tag-label` / `[data-tag-trigger]` / `.chart-anno` captions (cluster + collapse), draws streak start/end diamonds from `#fd-chart-db`, and recolors live name-drill polylines green/red by SMA50/SMA200 (Positive: close > both MAs) with thin 50-day (blue) / 200-day (maroon) overlays plus a `Positive ↑ / Negative ↓` legend. Generator `svg.fd-chart` is already painted in Python (`data-fd-trend=1`). It does not change score v2. Recopy `chart_marks.py` after this change.
+**Desktop sync:** recopy `chart_marks.py` → Refresh / `write_combined` so `chart_marks.ensure_embedded` re-injects CSS + overlay JS. Hard-refresh the desk. Never wholesale-replace the live ~4.8MB HTML from the skinny generator.
+
+Overlay JS wraps live **`paintPxChart(wrap)`** (reads `[data-px-json]`, paints `[data-px-svg]`). The solid white `#e6edf3` price path is hidden and replaced with segmented green/red using `S.s50` / `S.s200` (Positive: close > SMA50 AND close > SMA200). Native SMA20/50/200 + 52w high stay; the wrap does not pile on duplicate MAs. `padR` 8 → 36 (and CSS height ~300px / max-width) so the last print + marker are not clipped and the ribbon aspect eases. 1W/1M/YTD/Trend chips get compact padding/contrast. Generator `svg.fd-chart` is already painted in Python (`data-fd-trend=1`). Recopy `chart_marks.py` after this change.
 
 Also copy `mom_streak.py` (now has `streak_span` / `mom_streak_start` / `mom_streak_end`).
 

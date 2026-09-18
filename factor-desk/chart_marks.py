@@ -7,8 +7,10 @@ This module does three things on every ``write_combined``:
    clutter) so they stay readable without burying the price series.
 2. Add **streak begin / end** marks for the Feature A run vs score 5.
    Same overlay language as tag triggers, different glyph/color.
-3. Color the close path **green / red** by a simple MA regime and overlay
-   SMA50 (blue) + SMA200 (maroon), matching the 2/10 yield-curve chart.
+3. Color the close path **green / red** by a simple MA regime. Live Desktop
+   name-drill charts are drawn by ``paintPxChart`` (SVG ``[data-px-svg]`` +
+   JSON ``[data-px-json]``). Overlay JS wraps that function — it does not
+   regenerate skinny HTML. Generator ``svg.fd-chart`` still paints in Python.
 
 Trend v1 (daily close series): Positive (green) iff close > SMA50 AND
 close > SMA200; otherwise Negative (red). If the series is shorter than
@@ -16,8 +18,12 @@ close > SMA200; otherwise Negative (red). If the series is shorter than
 the default stroke (no regime). Path is split into contiguous segments
 so color flips over time. No arrows / callouts.
 
+Live ``paintPxChart`` already draws SMA20/50/200 + 52w high; the wrap
+segments the white ``#e6edf3`` price path and does not pile on duplicate
+MAs. ``padR`` is enlarged so the last print / marker is not clipped.
+
 Skinny generator cards get a compact SVG sparkline when a price (or score)
-series is available. Live ~2.7MB HTML is patched: overlay JS + JSON db.
+series is available. Live ~4.8MB HTML is patched: overlay JS + JSON db.
 """
 
 from __future__ import annotations
@@ -60,6 +66,13 @@ COLOR_NEG = "#ef4444"
 COLOR_MA50 = "#3b82f6"
 COLOR_MA200 = "#9f1239"
 COLOR_NA = "#93c5fd"
+# Live Desktop paintPxChart (factorbook.html) — do not assume generator SVG.
+LIVE_PX_W = 760
+LIVE_PX_H = 220
+LIVE_PX_H_NEW = 300
+LIVE_PX_PAD_R = 8
+LIVE_PX_PAD_R_NEW = 36
+LIVE_PX_PRICE = "#e6edf3"
 
 TAG_KEYS = ("tag_triggers", "tags", "digest_tags", "chart_tags", "triggered_tags")
 PX_SERIES_KEYS = ("px_series", "prices", "closes", "px_hist", "history", "px")
@@ -126,6 +139,22 @@ def trend_flags(
         else:
             flags.append(trend_flag(close, fast_ma[i], None))
     return flags, fast_ma, slow_ma
+
+
+def padded_x(
+    x: float,
+    *,
+    pad_l: float,
+    width: float,
+    old_pad_r: float,
+    new_pad_r: float,
+) -> float:
+    """Re-map a plot x from a tight ``padR`` to a roomier right gutter."""
+    old_inner = float(width) - float(pad_l) - float(old_pad_r)
+    new_inner = float(width) - float(pad_l) - float(new_pad_r)
+    if old_inner <= 0 or new_inner <= 0:
+        return float(x)
+    return float(pad_l) + (float(x) - float(pad_l)) * new_inner / old_inner
 
 
 def trend_segments(flags: Sequence[str | None]) -> list[tuple[str, int, int]]:
@@ -787,12 +816,35 @@ def strip_css() -> str:
   position: absolute; inset: 0; width: 100%; height: 100%;
   pointer-events: none; overflow: visible;
 }
+/* Live paintPxChart host: taller plot, less ribbon stretch, room on the right. */
+[data-px-svg], svg[data-px-svg], #detail-chart [data-px-svg], #name-chart [data-px-svg],
+#fd-name-drill svg, .name-chart [data-px-svg], .detail-chart [data-px-svg] {
+  display: block;
+  width: 100% !important;
+  max-width: 1100px;
+  height: 320px !important;
+  min-height: 300px;
+  overflow: visible !important;
+}
+#detail-chart, #name-chart, #fd-name-drill, .name-chart, .detail-chart, [data-px-chart] {
+  max-width: 1040px;
+  overflow: visible;
+}
+[data-px-svg] [data-fd-trend-src], [data-fd-trend-src] {
+  display: none !important;
+  stroke: none !important;
+  opacity: 0 !important;
+}
 .fd-chart-line {
-  stroke: #93c5fd; stroke-width: 1.25; fill: none;
+  stroke: #93c5fd; stroke-width: 1.6; fill: none;
   stroke-linejoin: round; stroke-linecap: round;
 }
-.fd-chart-line-pos { stroke: #22c55e; }
-.fd-chart-line-neg { stroke: #ef4444; }
+.fd-chart-line-pos, [data-px-svg] .fd-chart-line-pos, [data-px-svg] [data-fd-trend-seg="pos"] {
+  stroke: #22c55e !important; fill: none !important;
+}
+.fd-chart-line-neg, [data-px-svg] .fd-chart-line-neg, [data-px-svg] [data-fd-trend-seg="neg"] {
+  stroke: #ef4444 !important; fill: none !important;
+}
 .fd-chart-ma50 {
   stroke: #3b82f6; stroke-width: 1; fill: none;
   stroke-linejoin: round; stroke-linecap: round;
@@ -809,14 +861,41 @@ def strip_css() -> str:
 .fd-chart-legend-pos { fill: #22c55e; }
 .fd-chart-legend-neg { fill: #ef4444; }
 .fd-chart-legend-slash, .fd-chart-legend-note, .fd-chart-legend-ma { fill: #9ca3af; }
-.fd-chart-legend-html {
+.fd-chart-legend-html, .fd-px-leg-trend {
+  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
   font: 650 11px/1.2 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
-  color: #9ca3af; letter-spacing: 0.02em; margin: 0 0 6px;
+  color: #9ca3af; letter-spacing: 0.02em; margin: 0 8px 0 0;
 }
-.fd-chart-legend-html .pos { color: #22c55e; }
-.fd-chart-legend-html .neg { color: #ef4444; }
+.fd-chart-legend-html .pos, .fd-px-leg-trend .pos { color: #22c55e; }
+.fd-chart-legend-html .neg, .fd-px-leg-trend .neg { color: #ef4444; }
+.fd-chart-legend-html .slash { color: #6b7280; }
+.fd-chart-legend-html .note { color: #9ca3af; font-weight: 600; }
 .fd-chart-legend-html .ma50 { color: #3b82f6; }
 .fd-chart-legend-html .ma200 { color: #9f1239; }
+[data-px-leg] {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+  font: 600 11px/1.2 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  color: #9ca3af; margin: 6px 0 2px;
+}
+.fd-px-chip-row {
+  display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px;
+  margin: 0 0 8px;
+}
+.fd-px-chip {
+  display: inline-flex; flex-direction: column; justify-content: center; gap: 3px;
+  min-width: 68px; padding: 5px 9px 6px;
+  border-radius: 6px; border: 1px solid #243244; background: #0f1720;
+}
+.fd-px-chip .k {
+  font: 650 9px/1 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  color: #9ca3af; letter-spacing: 0.06em; text-transform: uppercase;
+}
+.fd-px-chip .v {
+  font: 700 13px/1.2 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  font-variant-numeric: tabular-nums; color: #e5e7eb;
+}
+.fd-px-chip .v.up, .fd-px-chip .v.pos { color: #22c55e; }
+.fd-px-chip .v.dn, .fd-px-chip .v.neg { color: #ef4444; }
 .fd-chart-mark { pointer-events: auto; }
 .fd-chart-mark-tag path {
   fill: #fbbf24; stroke: #92400e; stroke-width: 0.6;
@@ -858,22 +937,31 @@ def strip_css() -> str:
 
 
 def overlay_js() -> str:
-    """Polish live tag-trigger labels + overlay streak bounds + MA-regime coloring.
+    """Polish live tag-trigger labels + wrap ``paintPxChart`` for MA-regime coloring.
 
-    Idempotent. Recolors live name-drill polylines in place (same geometry) with
-    Positive/Negative segments and SMA50/SMA200 overlays. Generator ``svg.fd-chart``
-    is already painted in Python (``data-fd-trend=1``) so JS leaves those alone.
+    Live Desktop name-drill charts are ``paintPxChart(wrap)`` writing into
+    ``[data-px-svg]`` from ``[data-px-json]`` (Price path ``#e6edf3`` + SMA20/50/200).
+    Overlay JS wraps that function so the white path is replaced with segmented
+    green/red, ``padR`` is enlarged, and 1W/1M/YTD/Trend chips are cleaned up.
+    Generator ``svg.fd-chart`` is already painted in Python (``data-fd-trend=1``).
     """
     return r"""
 (function () {
   if (window.__FD_CHART_MARKS__) return;
   window.__FD_CHART_MARKS__ = true;
   var TAG_SEL = "[data-tag-trigger], .tag-trigger, .tag-mark, .chart-anno, .anno-label, .tag-label, text.tag-label";
-  var CHART_SEL = "svg.fd-chart, canvas, svg.chart, svg.spark, .px-chart, [data-chart], .price-chart, #detail-chart, #name-chart, #px-chart, .name-chart, .detail-chart";
-  var DETAIL_SEL = "#fd-name-drill, #detail-chart, #name-chart, #px-chart, #chart-main, .name-chart, .detail-chart";
+  var CHART_SEL = "svg.fd-chart, canvas, svg.chart, svg.spark, .px-chart, [data-chart], .price-chart, #detail-chart, #name-chart, #px-chart, .name-chart, .detail-chart, [data-px-svg], [data-px-chart]";
+  var DETAIL_SEL = "#fd-name-drill, #detail-chart, #name-chart, #px-chart, #chart-main, .name-chart, .detail-chart, [data-px-svg], [data-px-chart]";
   var CLUSTER = 12;
   var SMA_FAST = 50;
   var SMA_SLOW = 200;
+  var LIVE_PX_W = 760;
+  var LIVE_PX_H = 220;
+  var LIVE_PX_H_NEW = 300;
+  var LIVE_PX_PAD_R = 8;
+  var LIVE_PX_PAD_R_NEW = 36;
+  var LIVE_PX_PRICE = "#e6edf3";
+  var restylingPx = false;
 
   function db() {
     var el = document.getElementById("fd-chart-db");
@@ -1084,11 +1172,446 @@ def overlay_js() -> str:
       return pts;
     }
     var d = el.getAttribute("d") || "";
-    if (!d || /[CcQqSsAa]/.test(d)) return pts;
-    var re = /[ML]\s*(-?\d*\.?\d+)\s*,?\s*(-?\d*\.?\d+)/gi;
-    var m;
-    while ((m = re.exec(d))) pts.push({x: parseFloat(m[1]), y: parseFloat(m[2])});
+    if (!d) return pts;
+    var tokens = d.replace(/,/g, " ").match(/[MmLlHhVvZz]|-?\d*\.?\d+(?:e[-+]?\d+)?/g);
+    if (!tokens || !tokens.length) return pts;
+    var i = 0, x = 0, y = 0, mode = "M";
+    while (i < tokens.length) {
+      var t = tokens[i];
+      if (/^[MmLlHhVvZz]$/.test(t)) {
+        if (/[CcQqSsAaTt]/.test(t)) return [];
+        mode = t;
+        i++;
+        if (t === "Z" || t === "z") continue;
+      } else if (/^[CcQqSsAaTt]$/.test(mode)) {
+        return [];
+      }
+      if (mode === "H" || mode === "h") {
+        var hx = parseFloat(tokens[i++]);
+        if (!isFinite(hx)) break;
+        x = mode === "h" ? x + hx : hx;
+        pts.push({x: x, y: y});
+        continue;
+      }
+      if (mode === "V" || mode === "v") {
+        var vy = parseFloat(tokens[i++]);
+        if (!isFinite(vy)) break;
+        y = mode === "v" ? y + vy : vy;
+        pts.push({x: x, y: y});
+        continue;
+      }
+      var nx = parseFloat(tokens[i]), ny = parseFloat(tokens[i + 1]);
+      if (!isFinite(nx) || !isFinite(ny)) break;
+      i += 2;
+      if (mode === "m" || mode === "l") { nx += x; ny += y; }
+      x = nx; y = ny;
+      pts.push({x: x, y: y});
+      if (mode === "M") mode = "L";
+      if (mode === "m") mode = "l";
+    }
     return pts;
+  }
+  function isPxHost(node) {
+    if (!node) return false;
+    if (node.hasAttribute && (node.hasAttribute("data-px-svg") || node.hasAttribute("data-px-json") || node.hasAttribute("data-px-chart"))) return true;
+    if (node.querySelector && node.querySelector("[data-px-svg], [data-px-json]")) return true;
+    if (node.closest && node.closest("[data-px-svg], [data-px-chart], [data-px-json]")) return true;
+    return false;
+  }
+  function resolvePxWrap(node) {
+    if (!node) return document;
+    if (node.querySelector && node.querySelector("[data-px-svg], [data-px-json]")) return node;
+    if (node.closest) {
+      var host = node.closest("[data-px-chart], [data-px-wrap], #detail-chart, #name-chart, .name-chart, .detail-chart, #fd-name-drill");
+      if (host) return host;
+    }
+    var svg = resolvePxSvg(node);
+    return (svg && svg.parentElement) || node;
+  }
+  function resolvePxSvg(node) {
+    if (!node) return null;
+    if (node.getAttribute && node.getAttribute("data-px-svg") != null && (node.tagName === "svg" || node.tagName === "SVG")) return node;
+    if (node.querySelector) {
+      var svg = node.querySelector("svg[data-px-svg], [data-px-svg] svg, svg.px, [data-px-svg]");
+      if (svg && (svg.tagName === "svg" || svg.tagName === "SVG")) return svg;
+      if (svg && svg.querySelector) {
+        var inner = svg.querySelector("svg");
+        if (inner) return inner;
+      }
+    }
+    return (node.tagName === "svg" || node.tagName === "SVG") ? node : null;
+  }
+  function parsePxJson(wrap) {
+    var host = resolvePxWrap(wrap);
+    var el = host && host.querySelector ? host.querySelector("[data-px-json]") : null;
+    if (!el && wrap && wrap.hasAttribute && wrap.hasAttribute("data-px-json")) el = wrap;
+    if (!el) return null;
+    var raw = el.textContent || el.getAttribute("data-px-json") || "";
+    try { return JSON.parse(raw) || null; } catch (e) { return null; }
+  }
+  function arrOf(S, keys) {
+    if (!S) return [];
+    for (var i = 0; i < keys.length; i++) {
+      var a = S[keys[i]];
+      if (Array.isArray(a)) return a.map(function (v) { return (v == null || v === "") ? null : +v; });
+    }
+    return [];
+  }
+  function strokeOf(el) {
+    var a = ((el.getAttribute && el.getAttribute("stroke")) || "").toLowerCase().replace(/\s/g, "");
+    if (a && a !== "currentcolor" && a !== "none") return a;
+    try {
+      var cs = window.getComputedStyle(el);
+      return ((cs && cs.stroke) || "").toLowerCase().replace(/\s/g, "");
+    } catch (e2) {
+      return ((el.style && el.style.stroke) || "").toLowerCase().replace(/\s/g, "");
+    }
+  }
+  function isPriceStroke(s) {
+    return /#e6edf3|#e5e7eb|#eef2f6|#f8fafc|#fff|#ffffff|white|rgb\(\s*230\s*,\s*237\s*,\s*243\s*\)/.test(s || "");
+  }
+  function isMaStroke(s) {
+    return /#3b82f6|#60a5fa|#2563eb|#9f1239|#94a3b8|#9ca3af|#cbd5e1|#64748b|#f59e0b|#eab308|#fbbf24|#d4a017|#facc15|#88a/.test(s || "");
+  }
+  function findPricePath(svg) {
+    if (!svg || !svg.querySelectorAll) return null;
+    var nodes = svg.querySelectorAll("path, polyline");
+    var white = null, whiteN = 0, best = null, bestN = 0;
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (isTrendGlyph(el)) continue;
+      if (el.getAttribute && el.getAttribute("data-fd-trend-src") === "1") {
+        if (!white) white = el;
+        continue;
+      }
+      var pts = parsePoints(el);
+      if (pts.length < 2) continue;
+      var st = strokeOf(el);
+      if (isPriceStroke(st) && pts.length >= whiteN) { white = el; whiteN = pts.length; }
+      if (!isMaStroke(st) && pts.length > bestN) { best = el; bestN = pts.length; }
+    }
+    return white || best;
+  }
+  function flagsFromSeries(px, s50, s200) {
+    var flags = [];
+    var computed50 = (!s50 || !s50.length) ? smaArr(px.map(function (v) { return v == null ? 0 : v; }), SMA_FAST) : s50;
+    var computed200 = (s200 && s200.length) ? s200 : (px.length >= SMA_SLOW ? smaArr(px.map(function (v) { return v == null ? 0 : v; }), SMA_SLOW) : []);
+    for (var i = 0; i < px.length; i++) {
+      if (px[i] == null || !isFinite(px[i])) { flags.push(null); continue; }
+      var a = computed50[i] != null && isFinite(computed50[i]) ? computed50[i] : null;
+      var b = computed200[i] != null && isFinite(computed200[i]) ? computed200[i] : null;
+      // Live path: if SMA200 is not ready for this bar, fall back to SMA50-only
+      // (same as a <200 series) so the visible drill is green/red, not a third color.
+      flags.push(trendFlag(px[i], a, b));
+    }
+    return flags;
+  }
+  function drawnFlags(px, s50, s200) {
+    var full = flagsFromSeries(px, s50, s200);
+    var out = [];
+    for (var i = 0; i < full.length; i++) {
+      if (px[i] == null || !isFinite(px[i])) continue;
+      out.push(full[i]);
+    }
+    return out;
+  }
+  function pathFromPts(chunk) {
+    var d = "";
+    for (var i = 0; i < chunk.length; i++) {
+      d += (i ? "L" : "M") + chunk[i].x.toFixed(2) + "," + chunk[i].y.toFixed(2);
+    }
+    return d;
+  }
+  function hidePricePath(el) {
+    if (!el) return;
+    el.setAttribute("data-fd-trend-src", "1");
+    el.setAttribute("stroke", "none");
+    el.setAttribute("opacity", "0");
+    el.setAttribute("display", "none");
+    el.style.stroke = "none";
+    el.style.opacity = "0";
+    el.style.display = "none";
+    el.style.visibility = "hidden";
+  }
+  function remapAttrX(el, names, padL, oldInner, newInner) {
+    names.forEach(function (name) {
+      var raw = el.getAttribute(name);
+      if (raw == null || raw === "") return;
+      var n = parseFloat(raw);
+      if (!isFinite(n)) return;
+      el.setAttribute(name, String(padL + (n - padL) * newInner / oldInner));
+    });
+  }
+  function remapPathD(el, padL, oldInner, newInner) {
+    var pts = parsePoints(el);
+    if (pts.length < 2) return;
+    var next = pts.map(function (p) {
+      return {x: padL + (p.x - padL) * newInner / oldInner, y: p.y};
+    });
+    if ((el.tagName || "").toLowerCase() === "polyline" || (el.tagName || "").toLowerCase() === "polygon") {
+      el.setAttribute("points", next.map(function (p) { return p.x.toFixed(2) + "," + p.y.toFixed(2); }).join(" "));
+    } else {
+      el.setAttribute("d", pathFromPts(next));
+    }
+  }
+  function expandPadR(svg, pts) {
+    if (!svg || !pts || pts.length < 2) return pts;
+    var vb = svg.viewBox && svg.viewBox.baseVal;
+    var W = (vb && vb.width) ? vb.width : (parseFloat(svg.getAttribute("width")) || LIVE_PX_W);
+    var xs = pts.map(function (p) { return p.x; });
+    var padL = Math.min.apply(null, xs);
+    var maxX = Math.max.apply(null, xs);
+    var oldPadR = Math.max(0, W - maxX);
+    if (oldPadR >= LIVE_PX_PAD_R_NEW - 1) return pts;
+    var oldInner = W - padL - oldPadR;
+    var newInner = W - padL - LIVE_PX_PAD_R_NEW;
+    if (oldInner <= 0 || newInner <= 0) return pts;
+    var nodes = svg.querySelectorAll("path, polyline, polygon, line, circle, ellipse, text, rect");
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.getAttribute && el.getAttribute("data-fd-trend-legend")) continue;
+      var tag = (el.tagName || "").toLowerCase();
+      if (tag === "path" || tag === "polyline" || tag === "polygon") remapPathD(el, padL, oldInner, newInner);
+      else if (tag === "line") remapAttrX(el, ["x1", "x2"], padL, oldInner, newInner);
+      else if (tag === "circle" || tag === "ellipse") remapAttrX(el, ["cx"], padL, oldInner, newInner);
+      else if (tag === "text") remapAttrX(el, ["x"], padL, oldInner, newInner);
+      else if (tag === "rect") remapAttrX(el, ["x"], padL, oldInner, newInner);
+    }
+    return pts.map(function (p) {
+      return {x: padL + (p.x - padL) * newInner / oldInner, y: p.y};
+    });
+  }
+  function applyAspect(svg) {
+    if (!svg) return;
+    svg.setAttribute("overflow", "visible");
+    svg.style.overflow = "visible";
+    var vb = svg.viewBox && svg.viewBox.baseVal;
+    var W = (vb && vb.width) ? vb.width : LIVE_PX_W;
+    var H = (vb && vb.height) ? vb.height : LIVE_PX_H;
+    if (H && H <= LIVE_PX_H + 1) {
+      svg.setAttribute("height", String(LIVE_PX_H_NEW));
+    }
+    svg.style.width = "100%";
+    svg.style.maxWidth = "1100px";
+    svg.style.height = "320px";
+    if (W) svg.setAttribute("viewBox", "0 0 " + W + " " + (vb && vb.height ? vb.height : LIVE_PX_H));
+    svg.setAttribute("preserveAspectRatio", "none");
+  }
+  function ensureHtmlLegend(wrap, svg) {
+    var host = resolvePxWrap(wrap);
+    var leg = host.querySelector && host.querySelector("[data-px-leg]");
+    if (svg) {
+      Array.prototype.forEach.call(svg.querySelectorAll("[data-fd-trend-legend]"), function (n) {
+        n.setAttribute("opacity", "0");
+        n.style.display = "none";
+      });
+    }
+    if (host.querySelector && host.querySelector("[data-fd-trend-legend='html']")) return;
+    var row = document.createElement("div");
+    row.className = "fd-chart-legend-html fd-px-leg-trend";
+    row.setAttribute("data-fd-trend-legend", "html");
+    row.innerHTML = '<span class="pos">Positive ↑</span><span class="slash">/</span><span class="neg">Negative ↓</span><span class="note">price vs SMA50/SMA200</span>';
+    if (leg) {
+      leg.insertBefore(row, leg.firstChild);
+      return;
+    }
+    var svgEl = svg || resolvePxSvg(host);
+    if (svgEl && svgEl.parentNode) svgEl.parentNode.insertBefore(row, svgEl);
+    else if (host.insertBefore) host.insertBefore(row, host.firstChild);
+  }
+  function polishChips(wrap) {
+    var host = resolvePxWrap(wrap);
+    if (!host || !host.querySelectorAll) return;
+    var labels = host.querySelectorAll("span, small, div, b, label, em, [data-range], [data-ret]");
+    var found = 0;
+    for (var i = 0; i < labels.length; i++) {
+      var el = labels[i];
+      if (el.closest && el.closest("nav, .topnav, #gics-filter-strip, [data-px-leg], [data-px-svg]")) continue;
+      if (el.getAttribute("data-fd-chip") === "1") continue;
+      if (el.childElementCount > 2) continue;
+      var t = (el.childElementCount ? (el.firstChild && el.firstChild.nodeType === 3 ? el.firstChild.textContent : "") : (el.textContent || "")).trim();
+      if (!/^(1W|1M|1Y|3M|6M|YTD|Trend)$/i.test(t)) continue;
+      var box = el.parentElement;
+      if (!box) continue;
+      box.classList.add("fd-px-chip");
+      if (box.parentElement) box.parentElement.classList.add("fd-px-chip-row");
+      el.classList.add("k");
+      el.setAttribute("data-fd-chip", "1");
+      box.setAttribute("data-fd-chip", "1");
+      var sib = el.nextElementSibling;
+      if (sib) {
+        sib.classList.add("v");
+        var vt = (sib.textContent || "").trim();
+        if (/^-/.test(vt)) sib.classList.add("dn");
+        else if (/^\+/.test(vt)) sib.classList.add("up");
+      }
+      found++;
+    }
+    return found;
+  }
+  function restylePxChart(wrap) {
+    if (restylingPx) return;
+    var host = resolvePxWrap(wrap);
+    var svg = resolvePxSvg(host) || resolvePxSvg(wrap);
+    if (!svg) return;
+    restylingPx = true;
+    try {
+      applyAspect(svg);
+      polishChips(host);
+      var src = findPricePath(svg);
+      if (!src) { ensureHtmlLegend(host, svg); return; }
+      if (src.getAttribute("data-fd-trend-src") === "1" && svg.querySelector("[data-fd-trend-seg]")) {
+        ensureHtmlLegend(host, svg);
+        return;
+      }
+      Array.prototype.forEach.call(svg.querySelectorAll("[data-fd-trend-seg]"), function (n) { n.remove(); });
+      var pts = parsePoints(src);
+      if (pts.length < 2) { ensureHtmlLegend(host, svg); return; }
+      pts = expandPadR(svg, pts);
+      src = findPricePath(svg) || src;
+      pts = parsePoints(src);
+      var S = parsePxJson(host);
+      var px = arrOf(S, ["px", "PX", "close", "closes", "price", "prices"]);
+      var s50 = arrOf(S, ["s50", "S50", "sma50", "SMA50", "ma50"]);
+      var s200 = arrOf(S, ["s200", "S200", "sma200", "SMA200", "ma200"]);
+      var flags;
+      if (px.length) {
+        flags = drawnFlags(px, s50, s200);
+        if (flags.length !== pts.length) {
+          var ys = pts.map(function (p) { return -p.y; });
+          flags = flagsFromSeries(ys, smaArr(ys, SMA_FAST), ys.length >= SMA_SLOW ? smaArr(ys, SMA_SLOW) : []);
+        }
+      } else {
+        var ys2 = pts.map(function (p) { return -p.y; });
+        flags = flagsFromSeries(ys2, smaArr(ys2, SMA_FAST), ys2.length >= SMA_SLOW ? smaArr(ys2, SMA_SLOW) : []);
+      }
+      hidePricePath(src);
+      if (!flags.some(function (f) { return f === "pos" || f === "neg"; })) {
+        ensureHtmlLegend(host, svg);
+        return;
+      }
+      var parent = src.parentNode || svg;
+      var start = 0;
+      var cur = flags[0] || "na";
+      function emit(kind, a, b) {
+        if (kind === "na") return;
+        var chunk = slicePts(pts, a, b);
+        if (chunk.length < 2) return;
+        var el = svgEl("path");
+        var cls = "fd-chart-line" + (kind === "pos" ? " fd-chart-line-pos" : kind === "neg" ? " fd-chart-line-neg" : "");
+        el.setAttribute("class", cls);
+        el.setAttribute("fill", "none");
+        el.setAttribute("stroke", kind === "pos" ? "#22c55e" : kind === "neg" ? "#ef4444" : "#93c5fd");
+        el.setAttribute("stroke-width", "1.7");
+        el.setAttribute("stroke-linejoin", "round");
+        el.setAttribute("stroke-linecap", "round");
+        el.setAttribute("data-fd-trend-seg", kind);
+        el.setAttribute("d", pathFromPts(chunk));
+        parent.appendChild(el);
+      }
+      for (var j = 1; j < flags.length; j++) {
+        var kind = flags[j] || "na";
+        if (kind !== cur) { emit(cur, start, j - 1); start = j; cur = kind; }
+      }
+      emit(cur, start, flags.length - 1);
+      ensureHtmlLegend(host, svg);
+    } finally {
+      restylingPx = false;
+    }
+  }
+  function patchPaintSource(fn) {
+    try {
+      var src = Function.prototype.toString.call(fn);
+      if (!src || src.indexOf("[native code]") >= 0) return null;
+      if (src.indexOf("__fdPxPatched") >= 0) return fn;
+      var next = src
+        .replace(/\bpadR\s*=\s*8\b/g, "padR=36")
+        .replace(/\bH\s*=\s*220\b/g, "H=300");
+      if (next === src) return null;
+      var expr = /^\s*function(\s+[A-Za-z0-9_$]+)?\s*\(/.test(next) ? "(" + next + ")" : next;
+      var patched = (0, eval)(expr);
+      if (typeof patched !== "function") return null;
+      patched.__fdPxPatched = true;
+      return patched;
+    } catch (e) { return null; }
+  }
+  function wrapPaintFn(orig) {
+    if (typeof orig !== "function" || orig.__fdPxTrend) return orig;
+    var body = patchPaintSource(orig) || orig;
+    var wrapped = function (wrap) {
+      var ret = body.apply(this, arguments);
+      try { restylePxChart(wrap); } catch (e) {}
+      return ret;
+    };
+    wrapped.__fdPxTrend = true;
+    wrapped.__fdPxOrig = orig;
+    wrapped.__fdPxBody = body;
+    return wrapped;
+  }
+  function wrapPaintPxChart() {
+    function install() {
+      var orig = window.paintPxChart;
+      try { if (typeof orig !== "function" && typeof paintPxChart === "function") orig = paintPxChart; } catch (e) {}
+      if (typeof orig !== "function") return false;
+      if (orig.__fdPxTrend) return true;
+      var wrapped = wrapPaintFn(orig);
+      window.paintPxChart = wrapped;
+      try { paintPxChart = wrapped; } catch (e2) {}
+      return true;
+    }
+    install();
+    if (window.__FD_PX_WRAP__) return;
+    window.__FD_PX_WRAP__ = true;
+    try {
+      var current = window.paintPxChart;
+      Object.defineProperty(window, "paintPxChart", {
+        configurable: true,
+        enumerable: true,
+        get: function () { return current; },
+        set: function (v) { current = wrapPaintFn(v); }
+      });
+    } catch (e3) {}
+    if (!install()) {
+      var n = 0;
+      var t = setInterval(function () {
+        n++;
+        if (install() || n > 40) clearInterval(t);
+      }, 50);
+    }
+  }
+  function observePxCharts() {
+    if (window.__FD_PX_OBS__ || !document.documentElement) return;
+    window.__FD_PX_OBS__ = new MutationObserver(function (muts) {
+      if (restylingPx) return;
+      var seen = [];
+      function add(svg) {
+        if (!svg || seen.indexOf(svg) >= 0) return;
+        seen.push(svg);
+      }
+      for (var i = 0; i < muts.length; i++) {
+        var t = muts[i].target;
+        if (t && t.getAttribute && t.getAttribute("data-px-svg") != null) add(t.tagName === "svg" || t.tagName === "SVG" ? t : t.querySelector && t.querySelector("svg"));
+        if (t && t.closest) {
+          var svg = t.closest("[data-px-svg]");
+          if (svg) add(svg.tagName === "svg" || svg.tagName === "SVG" ? svg : svg.querySelector && svg.querySelector("svg"));
+        }
+        var added = muts[i].addedNodes || [];
+        for (var j = 0; j < added.length; j++) {
+          var n = added[j];
+          if (!n || n.nodeType !== 1) continue;
+          if (n.getAttribute && n.getAttribute("data-fd-trend-seg")) continue;
+          if (n.getAttribute && n.getAttribute("data-px-svg") != null) add(n.tagName === "svg" || n.tagName === "SVG" ? n : n.querySelector && n.querySelector("svg"));
+          if (n.querySelector) {
+            var s = n.querySelector("[data-px-svg]");
+            if (s) add(s.tagName === "svg" || s.tagName === "SVG" ? s : s.querySelector && s.querySelector("svg"));
+          }
+        }
+      }
+      seen.forEach(function (svg) {
+        if (svg) restylePxChart(svg.parentElement || svg);
+      });
+    });
+    window.__FD_PX_OBS__.observe(document.documentElement, {childList: true, subtree: true});
   }
   function isTrendGlyph(el) {
     if (!el || !el.getAttribute) return false;
@@ -1168,6 +1691,7 @@ def overlay_js() -> str:
   }
   function drawTrend(chart) {
     if (!chart || chart.tagName === "CANVAS") return;
+    if (isPxHost(chart)) { restylePxChart(chart); return; }
     if (chart.getAttribute && chart.getAttribute("data-fd-trend") === "1") return;
     if (chart.classList && chart.classList.contains("fd-chart") && chart.querySelector("[data-fd-trend-seg], [data-fd-ma]")) return;
     var src = sourcePoly(chart);
@@ -1263,11 +1787,16 @@ def overlay_js() -> str:
     var map = db();
     polishTags(document);
     wrapSelect();
+    wrapPaintPxChart();
+    observePxCharts();
+    var pxNodes = document.querySelectorAll("[data-px-svg], [data-px-chart]");
+    for (var p = 0; p < pxNodes.length; p++) restylePxChart(pxNodes[p]);
     var charts = document.querySelectorAll(CHART_SEL);
     for (var i = 0; i < charts.length; i++) {
       var chart = charts[i];
       if (chart.closest && chart.closest("nav, .topnav")) continue;
       polishTags(chart);
+      if (isPxHost(chart)) continue;
       drawTrend(chart);
       var rec = recOf(tickerOf(chart), map);
       if (rec) drawStreak(chart, rec);

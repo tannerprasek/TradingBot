@@ -216,6 +216,86 @@ class WriteCombinedChartTests(unittest.TestCase):
             self.assertIn("class=\"chart\"", text)
             self.assertIn("trendFlag", text)
             self.assertIn("fd-chart-line-pos", text)
+            self.assertIn("wrapPaintPxChart", text)
+            self.assertIn("data-px-svg", text)
+
+
+class LivePaintPxChartTests(unittest.TestCase):
+    def test_looks_like_live_desk_from_paint_px_chart(self) -> None:
+        html = (
+            "<html><body><script>function paintPxChart(wrap){var padR=8;}</script>"
+            '<svg data-px-svg viewBox="0 0 760 220"></svg>'
+            '<script type="application/json" data-px-json>{"px":[1,2]}</script>'
+            "</body></html>"
+        )
+        self.assertTrue(desk_dash.looks_like_live_desk(html))
+        skinny = "<html><body><h1>Factor Desk</h1></body></html>"
+        self.assertFalse(desk_dash.looks_like_live_desk(skinny))
+
+    def test_write_combined_patches_paint_px_chart_keeps_tabs(self) -> None:
+        body = """<!DOCTYPE html>
+<html><head><title>Factor Desk</title></head>
+<body>
+<nav>
+  <button id="refresh">Refresh</button>
+  <button>Momentum Up</button>
+  <button>Momentum Down</button>
+  <button>Outliers</button>
+  <button>Options</button>
+  <button>Breakout</button>
+  <button>Breakdown</button>
+  <button>Paper</button>
+  <button>Experimental</button>
+</nav>
+<section id="detail-chart" data-px-chart="1">
+  <div>
+    <div><span>1W</span><b>+1.69%</b></div>
+    <div><span>1M</span><b>+1.95%</b></div>
+    <div><span>YTD</span><b>-28.08%</b></div>
+    <div><span>Trend</span><b>+0.5</b></div>
+  </div>
+  <script type="application/json" data-px-json>{"px":[10,11,12],"s50":[9,10,11],"s200":[8,9,10]}</script>
+  <svg data-px-svg viewBox="0 0 760 220" width="760" height="220"></svg>
+  <div data-px-leg>Price SMA20 SMA50 SMA200 52w high</div>
+</section>
+<script>
+function paintPxChart(wrap){
+  var W=760, H=220, padR=8, padL=44;
+  var svg = wrap.querySelector('[data-px-svg]');
+  var S = JSON.parse(wrap.querySelector('[data-px-json]').textContent);
+  function pathFrom(arr){
+    var d='';
+    for (var i=0;i<arr.length;i++) d += (d?'L':'M')+(padL+i)+','+(100-arr[i]);
+    return d;
+  }
+  svg.innerHTML = '<path stroke="#e6edf3" fill="none" d="'+pathFrom(S.px)+'"/>';
+}
+</script>
+</body></html>"""
+        pad = 1_100_000 - len(body.encode("utf-8"))
+        live = body + ("<!--" + ("P" * max(pad, 1)) + "-->")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "factorbook.html"
+            dest.write_text(live, encoding="utf-8")
+            rec = de.build_name_record("AAPL US Equity", {"GICS_SECTOR_NAME": "Information Technology"})
+            rec["mom_score"] = 8
+            book = {"asof": "test", "names": {"AAPL US Equity": rec}, "meta": {}}
+            out = desk_dash.write_combined(dest, root=root, book=book)
+            text = out.read_text(encoding="utf-8")
+            self.assertGreater(out.stat().st_size, 1_000_000)
+            self.assertIn("function paintPxChart", text)
+            self.assertIn("var W=760, H=220, padR=8", text)
+            self.assertIn("data-px-svg", text)
+            self.assertIn("data-px-json", text)
+            self.assertIn(">Paper</button>", text)
+            self.assertIn(">Experimental</button>", text)
+            self.assertIn(">Breakout</button>", text)
+            self.assertIn("wrapPaintPxChart", text)
+            self.assertIn("restylePxChart", text)
+            self.assertIn("#e6edf3", text)
+            self.assertIn("fd-chart-marks-js", text)
+            self.assertNotIn('id="home"', text)
 
 
 class MaTrendTests(unittest.TestCase):
@@ -297,6 +377,36 @@ class MaTrendTests(unittest.TestCase):
         self.assertIn('data-fd-ma="50"', detail)
         self.assertIn('data-fd-ma="200"', detail)
         self.assertIn("fd-chart-detail[data-fd-trend]", cm.overlay_js())
+
+    def test_padded_x_opens_right_gutter(self) -> None:
+        last = cm.padded_x(752.0, pad_l=44.0, width=760.0, old_pad_r=8.0, new_pad_r=36.0)
+        self.assertLess(last, 752.0)
+        self.assertAlmostEqual(last, 44.0 + (752.0 - 44.0) * (760.0 - 44.0 - 36.0) / (760.0 - 44.0 - 8.0))
+        self.assertEqual(
+            cm.padded_x(44.0, pad_l=44.0, width=760.0, old_pad_r=8.0, new_pad_r=36.0),
+            44.0,
+        )
+
+    def test_overlay_wraps_paint_px_chart(self) -> None:
+        js = cm.overlay_js()
+        css = cm.strip_css()
+        self.assertIn("wrapPaintPxChart", js)
+        self.assertIn("paintPxChart", js)
+        self.assertIn("data-px-svg", js)
+        self.assertIn("data-px-json", js)
+        self.assertIn("data-px-leg", js)
+        self.assertIn("#e6edf3", js)
+        self.assertIn("padR=36", js)
+        self.assertIn("H=300", js)
+        self.assertIn("restylePxChart", js)
+        self.assertIn("s50", js)
+        self.assertIn("s200", js)
+        self.assertIn("fd-px-chip", js)
+        self.assertIn("close > s50 && close > s200", js)
+        self.assertIn("[data-px-svg]", css)
+        self.assertIn("fd-px-chip", css)
+        self.assertIn("height: 320px", css)
+        self.assertNotIn("function paintPxChart(wrap)", js)
 
 
 if __name__ == "__main__":

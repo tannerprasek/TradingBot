@@ -44,7 +44,7 @@ Home-card charts keep **tag-trigger** marks (already on the live desk) and add *
 
 Daily close series. **Positive (green):** `close > SMA50 AND close > SMA200`. **Negative (red):** otherwise (close at or below either MA). The path is split into contiguous green/red segments so color flips over time. SMA50 is a thin blue overlay; SMA200 is maroon. If the series is shorter than 200, SMA200 is omitted and color is close vs SMA50 only. If shorter than 50, the default stroke stays (no regime). No arrows or callouts. Legend on the name-drill chart: `Positive ↑ / Negative ↓ Trend Signals`.
 
-`desk_dash.write_combined` always re-embeds `#fd-chart-db` + overlay JS (`chart_marks.ensure_embedded`) **and** `_ensure_options_refresh_ui`, so a Refresh rewrite cannot drop the marks or the Options Refresh button. See [chart_marks.py](../chart_marks.py). Live name-drill charts are recolored in place from the plotted polyline (same rule); generator `svg.fd-chart` is painted in Python.
+`desk_dash.write_combined` always re-embeds `#fd-chart-db` + overlay JS (`chart_marks.ensure_embedded`) **and** `_ensure_options_refresh_ui`, so a Refresh rewrite cannot drop the marks or the Options Refresh button. See [chart_marks.py](../chart_marks.py). Live Desktop name-drill charts are **`paintPxChart`** (SVG `[data-px-svg]` + JSON `[data-px-json]`, not generator `svg.fd-chart`). Overlay JS **wraps `paintPxChart`**: hide the white `#e6edf3` price path, draw green/red segments from `S.px` vs `S.s50`/`S.s200`, enlarge `padR`, and polish 1W/1M/YTD/Trend chips. Do not wholesale-replace live ~4.8MB HTML. Generator `svg.fd-chart` is painted in Python.
 
 ## Rebuild path
 
@@ -60,3 +60,5 @@ Daily close series. **Positive (green):** `close > SMA50 AND close > SMA200`. **
 ## Desktop sync
 
 Copy `mom_streak.py` next to live `desk_dash.py`. See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §6. Do not replace FLAGS/WATCH/MOM ranking logic.
+
+For MA-regime name-drill coloring: recopy **`chart_marks.py` only**, then Refresh so `ensure_embedded` re-injects the `paintPxChart` wrap. Do **not** wholesale-replace live `factorbook.html` from the skinny generator.
