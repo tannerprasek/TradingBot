@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -315,6 +317,31 @@ class MaTrendTests(unittest.TestCase):
         self.assertEqual(cm.trend_flag(1.1, 1.0, None), "pos")
         self.assertEqual(cm.trend_flag(0.9, 1.0, None), "neg")
 
+    def test_rising_series_all_pos_no_red(self) -> None:
+        closes = [10.0 + i * 0.5 for i in range(250)]
+        flags, _s50, _s200 = cm.trend_flags(closes)
+        colored = [f for f in flags if f is not None]
+        self.assertTrue(colored)
+        self.assertTrue(all(f == "pos" for f in colored))
+        self.assertNotIn("neg", flags)
+
+    def test_dip_above_both_mas_stays_pos(self) -> None:
+        closes = [100.0] * 200 + [120.0, 118.0, 110.0, 105.0, 108.0]
+        flags, s50, s200 = cm.trend_flags(closes)
+        tail = flags[-5:]
+        self.assertEqual(tail, ["pos", "pos", "pos", "pos", "pos"])
+        self.assertNotIn("neg", tail)
+        for i, close in enumerate(closes[-5:], start=len(closes) - 5):
+            self.assertGreater(close, s50[i])
+            self.assertGreater(close, s200[i])
+
+    def test_align_flags_length_mismatch(self) -> None:
+        self.assertEqual(cm.align_flags(["pos"] * 10, 7), ["pos"] * 7)
+        self.assertEqual(cm.align_flags(["pos", "neg"], 5), ["pos", "neg", "neg", "neg", "neg"])
+        self.assertEqual(cm.align_flags([], 3), ["na", "na", "na"])
+        self.assertEqual(cm.align_flags(["pos", None], 4), ["pos", None, "na", "na"])
+        self.assertEqual(cm.align_flags(["neg"] * 3, 0), [])
+
     def test_short_series_colors_vs_sma50_only(self) -> None:
         closes = [10.0 + i * 0.1 for i in range(60)]
         flags, s50, s200 = cm.trend_flags(closes)
@@ -396,7 +423,7 @@ class MaTrendTests(unittest.TestCase):
         self.assertIn("data-px-json", js)
         self.assertIn("data-px-leg", js)
         self.assertIn("#e6edf3", js)
-        self.assertIn("padR=36", js)
+        self.assertIn("padR=8", js)
         self.assertIn("H=300", js)
         self.assertIn("restylePxChart", js)
         self.assertIn("s50", js)
@@ -406,6 +433,8 @@ class MaTrendTests(unittest.TestCase):
         self.assertIn("restorePricePath", js)
         self.assertIn("maUsable", js)
         self.assertIn("failOpenPricePath", js)
+        self.assertIn("alignFlags", js)
+        self.assertIn("pinVolNote", js)
         self.assertNotIn("__FD_CHART_MA_FORCE__", js)
         wrapfn = js.split("function wrapPaintFn")[1].split("function wrapPaintPxChart")[0]
         self.assertIn("failOpenPricePath", wrapfn)
@@ -413,14 +442,68 @@ class MaTrendTests(unittest.TestCase):
         hide_at = restyle.rfind("hidePricePath(src)")
         emit_at = restyle.find("parent.appendChild")
         self.assertGreater(hide_at, emit_at)
-        self.assertIn("if (emitted > 0) hidePricePath(src)", restyle)
+        self.assertIn("if (drew) hidePricePath(src)", restyle)
         self.assertIn("restorePricePath(src)", restyle)
+        self.assertNotIn("-p.y", restyle)
+        self.assertNotIn("return -p.y", restyle)
+        self.assertIn("alignFlags(flags, pts.length)", restyle)
+        self.assertNotIn("expandPadR(svg, pts)", restyle)
+        self.assertIn(".px-leg .volnote", css)
+        self.assertIn("clip-path: none", css)
         self.assertIn(":has([data-fd-trend-seg])", css)
         self.assertNotIn("[data-px-svg] [data-fd-trend-src], [data-fd-trend-src]", css.replace("\n", " "))
         self.assertIn("[data-px-svg]", css)
         self.assertIn("fd-px-chip", css)
         self.assertIn("height: 320px", css)
         self.assertNotIn("function paintPxChart(wrap)", js)
+
+    def _overlay_helpers(self) -> str:
+        js = cm.overlay_js()
+        names = ("smaArr", "trendFlag", "maUsable", "flagsFromSeries", "drawnFlags", "alignFlags")
+        chunks: list[str] = []
+        for name in names:
+            token = f"function {name}"
+            start = js.find(token)
+            self.assertGreaterEqual(start, 0, name)
+            nxt = js.find("\n  function ", start + len(token))
+            self.assertGreater(nxt, start, name)
+            chunks.append(js[start:nxt])
+        return "var SMA_FAST = 50, SMA_SLOW = 200;\n" + "\n".join(chunks)
+
+    def test_js_flags_from_real_series_not_pixel_y(self) -> None:
+        body = r"""
+        var px = [];
+        for (var i = 0; i < 250; i++) px.push(10 + i * 0.5);
+        var s50 = smaArr(px, 50), s200 = smaArr(px, 200);
+        var flags = flagsFromSeries(px, s50, s200);
+        var colored = flags.filter(function (f) { return f === "pos" || f === "neg"; });
+        if (!colored.length) { console.error("no colored"); process.exit(2); }
+        if (colored.some(function (f) { return f !== "pos"; })) { console.error("had red"); process.exit(3); }
+        var aligned = alignFlags(flags, 180);
+        if (aligned.length !== 180) { console.error("align len"); process.exit(4); }
+        if (aligned.some(function (f) { return f === "neg"; })) { console.error("align red"); process.exit(5); }
+        var dip = [];
+        for (var j = 0; j < 200; j++) dip.push(100);
+        dip.push(120, 118, 110, 105, 108);
+        var dipFlags = flagsFromSeries(dip, smaArr(dip, 50), smaArr(dip, 200)).slice(-5);
+        if (dipFlags.some(function (f) { return f !== "pos"; })) { console.error("dip red " + JSON.stringify(dipFlags)); process.exit(6); }
+        var mismatch = alignFlags(flagsFromSeries(px, s50, s200), px.length + 10);
+        if (mismatch.length !== px.length + 10) { console.error("pad len"); process.exit(7); }
+        console.log(JSON.stringify({colored: colored.length, aligned: aligned.length, dip: dipFlags, pad: mismatch.length}));
+        """
+        helpers = self._overlay_helpers()
+        proc = subprocess.run(
+            ["node", "-e", helpers + "\n" + body],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertGreater(payload["colored"], 0)
+        self.assertEqual(payload["aligned"], 180)
+        self.assertEqual(payload["dip"], ["pos"] * 5)
+        self.assertEqual(payload["pad"], 260)
 
 
 if __name__ == "__main__":

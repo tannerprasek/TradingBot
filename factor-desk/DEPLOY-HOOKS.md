@@ -406,7 +406,7 @@ PowerShell equivalent: `.\scripts\sync_live_paintpx.ps1` after the two `.py` fil
 
 5. The script **refuses** if `factorbook.html` is missing, **&lt; 1MB**, or has no `paintPxChart` / `[data-px-svg]` / `[data-px-json]`. It will not write skinny generator output.
 6. Confirm the printout still lists Paper / Experimental / Breakout / `fd-paper-marks`. A backup is `factorbook.html.bak-paintpx` next to the live HTML.
-7. Hard-reload the desk (Ctrl+F5). Open a name: price path is visible; green when `close > SMA50 AND close > SMA200`, else red; if wrap cannot segment, the original white `#e6edf3` path stays. Native SMA overlays stay; last print not clipped (`padR` 8→36); 1W/1M/YTD chips cleaned up. **Paper** tab shows `#view-paper` (Buy/Sell + tables), not Home.
+7. Hard-reload the desk (Ctrl+F5). Open a name: price path is visible; green when `close > SMA50 AND close > SMA200`, else red; if wrap cannot segment, the original white `#e6edf3` path stays. Native SMA overlays stay; series draws to the right edge (`padR` small, no pixel-Y SMA fallback); `volume n/a` stays in `.px-leg .volnote`. **Paper** tab shows `#view-paper` (Buy/Sell + tables), not Home.
 
 **Do not** copy generated `factorbook.html` from git. **Do not** `python desk_dash.py` / `python write_dash.py` against the live folder.
 
@@ -450,7 +450,7 @@ html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
 # _ensure_options_refresh_ui(html)  # keep Options Refresh on Refresh rewrites
 ```
 
-Do **not** wholesale replace live `desk_dash.py`. Overlay JS wraps **`paintPxChart(wrap)`** (reads `[data-px-json]`, paints `[data-px-svg]`). Green/red segments use `S.px` vs `S.s50` / `S.s200` (Positive: close > SMA50 AND close > SMA200; compute SMA50 from `px` if `s50` is missing). The solid white `#e6edf3` price path is hidden **only after** at least one segment is appended; if wrap cannot segment, restore the original path. Native SMA20/50/200 + 52w high stay; the wrap does not pile on duplicate MAs. `padR` 8 → 36 (and CSS height ~300px / max-width) so the last print + marker are not clipped and the ribbon aspect eases. 1W/1M/YTD/Trend chips get compact padding/contrast. Generator `svg.fd-chart` is already painted in Python (`data-fd-trend=1`).
+Do **not** wholesale replace live `desk_dash.py`. Overlay JS wraps **`paintPxChart(wrap)`** (reads `[data-px-json]`, paints `[data-px-svg]`). Green/red segments use `S.px` vs `S.s50` / `S.s200` (Positive: close > SMA50 AND close > SMA200; compute SMA50 from `px` if `s50` is missing). Length mismatch **slices/pads flags** — it never recomputes SMAs from SVG pixel Y (`-p.y`). The solid white `#e6edf3` price path is hidden **only after** at least one `[data-fd-trend-seg]` is appended (`if (drew) hidePricePath`); if wrap cannot segment, restore the original path. Native SMA20/50/200 + 52w high stay; the wrap does not pile on duplicate MAs. `padR` stays small so the series draws to the right edge (no gray clip band). `volume n/a` stays in `.px-leg .volnote`. 1W/1M/YTD/Trend chips get compact padding/contrast. Generator `svg.fd-chart` is already painted in Python (`data-fd-trend=1`).
 
 Also copy `mom_streak.py` if streak begin/end marks are missing (`streak_span` / `mom_streak_start` / `mom_streak_end`).
 

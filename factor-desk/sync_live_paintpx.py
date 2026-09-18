@@ -43,7 +43,7 @@ PRESERVE_TOKENS = (
 WRAP_NEEDLES = (
     "wrapPaintPxChart",
     "paintPxChart",
-    "padR=36",
+    "alignFlags",
     "close > s50 && close > s200",
     "#e6edf3",
     "restylePxChart",

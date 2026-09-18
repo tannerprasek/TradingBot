@@ -20,7 +20,8 @@ so color flips over time. No arrows / callouts.
 
 Live ``paintPxChart`` already draws SMA20/50/200 + 52w high; the wrap
 segments the white ``#e6edf3`` price path and does not pile on duplicate
-MAs. ``padR`` is enlarged so the last print / marker is not clipped.
+MAs. Trend flags come only from real ``px`` / SMA50 / SMA200 (never SVG
+pixel-Y). ``padR`` stays small so the series draws to the right edge.
 
 Skinny generator cards get a compact SVG sparkline when a price (or score)
 series is available. Live ~4.8MB HTML is patched: overlay JS + JSON db.
@@ -73,7 +74,7 @@ LIVE_PX_W = 760
 LIVE_PX_H = 220
 LIVE_PX_H_NEW = 300
 LIVE_PX_PAD_R = 8
-LIVE_PX_PAD_R_NEW = 36
+LIVE_PX_PAD_R_NEW = 8
 LIVE_PX_PRICE = "#e6edf3"
 
 TAG_KEYS = ("tag_triggers", "tags", "digest_tags", "chart_tags", "triggered_tags")
@@ -141,6 +142,25 @@ def trend_flags(
         else:
             flags.append(trend_flag(close, fast_ma[i], None))
     return flags, fast_ma, slow_ma
+
+
+def align_flags(flags: Sequence[str | None], n: int) -> list[str | None]:
+    """Match flag length to plotted points. Never invent SMAs from pixel Y.
+
+    Longer than ``n`` → keep the tail (plotted window is the latest prints).
+    Shorter → pad with the last known flag, else ``"na"``.
+    """
+    out = list(flags or [])
+    if n <= 0:
+        return []
+    if len(out) == n:
+        return out
+    if len(out) > n:
+        return out[len(out) - n :]
+    pad: str | None = out[-1] if out else "na"
+    if pad is None:
+        pad = "na"
+    return out + [pad] * (n - len(out))
 
 
 def padded_x(
@@ -827,10 +847,24 @@ def strip_css() -> str:
   height: 320px !important;
   min-height: 300px;
   overflow: visible !important;
+  clip-path: none !important;
 }
 #detail-chart, #name-chart, #fd-name-drill, .name-chart, .detail-chart, [data-px-chart] {
   max-width: 1040px;
   overflow: visible;
+  clip-path: none;
+}
+/* volume n/a stays in the HTML legend — never centered over the plot */
+.px-leg .volnote, [data-px-leg] .volnote {
+  display: inline !important;
+  position: static !important;
+  left: auto !important;
+  right: auto !important;
+  transform: none !important;
+}
+[data-px-svg] .volnote, svg[data-px-svg] .volnote,
+[data-px-svg] text.volnote, svg[data-px-svg] text.volnote {
+  display: none !important;
 }
 [data-px-svg]:has([data-fd-trend-seg]) [data-fd-trend-src],
 svg:has([data-fd-trend-seg]) [data-fd-trend-src] {
@@ -946,8 +980,9 @@ def overlay_js() -> str:
     ``[data-px-svg]`` from ``[data-px-json]`` (Price path ``#e6edf3`` + SMA20/50/200).
     Overlay JS wraps that function so the white ``#e6edf3`` path is replaced
     with segmented green/red **only after** at least one segment is appended.
-    If wrap/parse fails, the original white path is restored. ``padR`` is
-    enlarged, and 1W/1M/YTD/Trend chips are cleaned up.
+    If wrap/parse fails, the original white path is restored. Flags come from
+    real ``px`` / SMA series only (length mismatch pads/slices — never pixel-Y
+    SMAs). ``padR`` stays small; 1W/1M/YTD/Trend chips are cleaned up.
     Generator ``svg.fd-chart`` is already painted in Python (``data-fd-trend=1``).
     """
     return r"""
@@ -964,7 +999,7 @@ def overlay_js() -> str:
   var LIVE_PX_H = 220;
   var LIVE_PX_H_NEW = 300;
   var LIVE_PX_PAD_R = 8;
-  var LIVE_PX_PAD_R_NEW = 36;
+  var LIVE_PX_PAD_R_NEW = 8;
   var LIVE_PX_PRICE = "#e6edf3";
   var restylingPx = false;
 
@@ -1379,6 +1414,16 @@ def overlay_js() -> str:
     }
     return out;
   }
+  function alignFlags(flags, n) {
+    flags = flags ? flags.slice() : [];
+    if (!(n > 0)) return [];
+    if (flags.length === n) return flags;
+    if (flags.length > n) return flags.slice(flags.length - n);
+    var pad = flags.length ? flags[flags.length - 1] : "na";
+    if (pad == null) pad = "na";
+    while (flags.length < n) flags.push(pad);
+    return flags;
+  }
   function pathFromPts(chunk) {
     var d = "";
     for (var i = 0; i < chunk.length; i++) {
@@ -1464,6 +1509,8 @@ def overlay_js() -> str:
     if (!svg) return;
     svg.setAttribute("overflow", "visible");
     svg.style.overflow = "visible";
+    svg.removeAttribute("clip-path");
+    svg.style.clipPath = "none";
     var vb = svg.viewBox && svg.viewBox.baseVal;
     var W = (vb && vb.width) ? vb.width : LIVE_PX_W;
     var H = (vb && vb.height) ? vb.height : LIVE_PX_H;
@@ -1497,6 +1544,27 @@ def overlay_js() -> str:
     var svgEl = svg || resolvePxSvg(host);
     if (svgEl && svgEl.parentNode) svgEl.parentNode.insertBefore(row, svgEl);
     else if (host.insertBefore) host.insertBefore(row, host.firstChild);
+  }
+  function pinVolNote(host, svg) {
+    if (svg && svg.querySelectorAll) {
+      Array.prototype.forEach.call(svg.querySelectorAll("text, .volnote"), function (n) {
+        var cls = (n.getAttribute && n.getAttribute("class")) || "";
+        var t = (n.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+        if (/\bvolnote\b/.test(cls) || /volume\s*n\/?a/.test(t)) {
+          n.setAttribute("display", "none");
+          if (n.style) n.style.display = "none";
+        }
+      });
+    }
+    var leg = host && host.querySelector && host.querySelector(".px-leg, [data-px-leg]");
+    if (!leg || !leg.querySelectorAll) return;
+    Array.prototype.forEach.call(leg.querySelectorAll(".volnote"), function (n) {
+      if (n.style) {
+        n.style.display = "";
+        n.style.position = "static";
+        n.style.transform = "none";
+      }
+    });
   }
   function polishChips(wrap) {
     var host = resolvePxWrap(wrap);
@@ -1538,18 +1606,16 @@ def overlay_js() -> str:
       applyAspect(svg);
       polishChips(host);
       var src = findPricePath(svg);
-      if (!src) { ensureHtmlLegend(host, svg); return; }
+      if (!src) { ensureHtmlLegend(host, svg); pinVolNote(host, svg); return; }
       if (src.getAttribute("data-fd-trend-src") === "1" && svg.querySelector("[data-fd-trend-seg]")) {
         ensureHtmlLegend(host, svg);
+        pinVolNote(host, svg);
         return;
       }
       if (src.getAttribute("data-fd-trend-src") === "1") restorePricePath(src);
       Array.prototype.forEach.call(svg.querySelectorAll("[data-fd-trend-seg]"), function (n) { n.remove(); });
       var pts = parsePoints(src);
-      if (pts.length < 2) { restorePricePath(src); ensureHtmlLegend(host, svg); return; }
-      pts = expandPadR(svg, pts);
-      src = findPricePath(svg) || src;
-      pts = parsePoints(src);
+      if (pts.length < 2) { restorePricePath(src); ensureHtmlLegend(host, svg); pinVolNote(host, svg); return; }
       var S = parsePxJson(host);
       var px = arrOf(S, ["px", "PX", "close", "closes", "price", "prices"]);
       var s50 = arrOf(S, ["s50", "S50", "sma50", "SMA50", "ma50"]);
@@ -1558,19 +1624,18 @@ def overlay_js() -> str:
         s50 = smaArr(px.map(function (v) { return v == null ? 0 : v; }), SMA_FAST);
       }
       var flags;
-      if (px.length) {
-        flags = drawnFlags(px, s50, s200);
-        if (flags.length !== pts.length) {
-          var ys = pts.map(function (p) { return -p.y; });
-          flags = flagsFromSeries(ys, smaArr(ys, SMA_FAST), ys.length >= SMA_SLOW ? smaArr(ys, SMA_SLOW) : []);
-        }
-      } else {
-        var ys2 = pts.map(function (p) { return -p.y; });
-        flags = flagsFromSeries(ys2, smaArr(ys2, SMA_FAST), ys2.length >= SMA_SLOW ? smaArr(ys2, SMA_SLOW) : []);
+      if (!px.length) {
+        restorePricePath(src);
+        ensureHtmlLegend(host, svg);
+        pinVolNote(host, svg);
+        return;
       }
+      flags = flagsFromSeries(px, s50, s200);
+      flags = alignFlags(flags, pts.length);
       if (!flags.some(function (f) { return f === "pos" || f === "neg"; })) {
         restorePricePath(src);
         ensureHtmlLegend(host, svg);
+        pinVolNote(host, svg);
         return;
       }
       var parent = src.parentNode || svg;
@@ -1600,9 +1665,11 @@ def overlay_js() -> str:
       }
       emit(cur, start, flags.length - 1);
       // Never hide #e6edf3 until at least one green/red segment is in the SVG.
-      if (emitted > 0) hidePricePath(src);
+      var drew = emitted > 0;
+      if (drew) hidePricePath(src);
       else restorePricePath(src);
       ensureHtmlLegend(host, svg);
+      pinVolNote(host, svg);
       failOpenPricePath(host);
     } finally {
       restylingPx = false;
@@ -1614,7 +1681,7 @@ def overlay_js() -> str:
       if (!src || src.indexOf("[native code]") >= 0) return null;
       if (src.indexOf("__fdPxPatched") >= 0) return fn;
       var next = src
-        .replace(/\bpadR\s*=\s*8\b/g, "padR=36")
+        .replace(/\bpadR\s*=\s*36\b/g, "padR=8")
         .replace(/\bH\s*=\s*220\b/g, "H=300");
       if (next === src) return null;
       var expr = /^\s*function(\s+[A-Za-z0-9_$]+)?\s*\(/.test(next) ? "(" + next + ")" : next;
