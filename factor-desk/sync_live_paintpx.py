@@ -49,6 +49,7 @@ WRAP_NEEDLES = (
     "restylePxChart",
     "restorePricePath",
     "maUsable",
+    "failOpenPricePath",
 )
 COS_PY_FILES = ("chart_marks.py", "sync_live_paintpx.py")
 DESKTOP_DIR_DEFAULT = Path(r"C:\Users\MLP\Desktop")

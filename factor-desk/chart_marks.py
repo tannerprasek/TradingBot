@@ -832,7 +832,8 @@ def strip_css() -> str:
   max-width: 1040px;
   overflow: visible;
 }
-[data-px-svg] [data-fd-trend-src], [data-fd-trend-src] {
+[data-px-svg]:has([data-fd-trend-seg]) [data-fd-trend-src],
+svg:has([data-fd-trend-seg]) [data-fd-trend-src] {
   display: none !important;
   stroke: none !important;
   opacity: 0 !important;
@@ -1602,6 +1603,7 @@ def overlay_js() -> str:
       if (emitted > 0) hidePricePath(src);
       else restorePricePath(src);
       ensureHtmlLegend(host, svg);
+      failOpenPricePath(host);
     } finally {
       restylingPx = false;
     }
@@ -1622,6 +1624,31 @@ def overlay_js() -> str:
       return patched;
     } catch (e) { return null; }
   }
+  function failOpenPricePath(wrap) {
+    try {
+      var forceKey = "__FD_CHART_" + "MA_FORCE__";
+      if (window[forceKey]) window[forceKey] = false;
+    } catch (e0) {}
+    var host = resolvePxWrap(wrap);
+    var svg = resolvePxSvg(host) || resolvePxSvg(wrap);
+    if (!svg || !svg.querySelectorAll) return;
+    var segs = svg.querySelector("[data-fd-trend-seg='pos'], [data-fd-trend-seg='neg']");
+    if (segs) return;
+    var nodes = svg.querySelectorAll("path, polyline");
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (!el.getAttribute) continue;
+      if (el.getAttribute("data-fd-trend-seg")) continue;
+      var hid = el.getAttribute("data-fd-trend-src") === "1";
+      var st = (el.getAttribute("data-fd-trend-stroke") || strokeOf(el) || "").toLowerCase();
+      var gone = hid ||
+        el.getAttribute("display") === "none" ||
+        (el.style && (el.style.display === "none" || el.style.visibility === "hidden"));
+      if (hid || (gone && (isPriceStroke(st) || st === "none" || st === ""))) {
+        restorePricePath(el);
+      }
+    }
+  }
   function wrapPaintFn(orig) {
     if (typeof orig !== "function" || orig.__fdPxTrend) return orig;
     var body = patchPaintSource(orig) || orig;
@@ -1631,7 +1658,10 @@ def overlay_js() -> str:
         host = (this && this.nodeType === 1) ? this : null;
       }
       var ret = body.apply(this, arguments);
-      try { restylePxChart(host || wrap || this); } catch (e) {}
+      try {
+        restylePxChart(host || wrap || this);
+      } catch (e) {}
+      try { failOpenPricePath(host || wrap || this); } catch (e2) {}
       return ret;
     };
     wrapped.__fdPxTrend = true;

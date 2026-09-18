@@ -282,6 +282,9 @@ function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</art
             nav.find("showPaper(true)"),
         )
         self.assertIn('kind === "paper"', js)
+        show = js.split("function showPaper")[1].split("window.__FD_PAPER_SHOW__")[0]
+        self.assertIn('getElementById("view-paper")', show)
+        self.assertNotIn("$(VIEW)", show)
         self.assertIn("selectTicker", js)
         self.assertIn("data-fd-paper-close", js)
         self.assertIn("data-fd-paper-open", js)

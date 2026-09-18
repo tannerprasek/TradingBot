@@ -1450,7 +1450,7 @@ def strip_js() -> str:
     var opensEl = $(OPENS_ID);
     var weekEl = $(WEEK_ID);
     var closedEl = $(CLOSED_ID);
-    if (!opensEl && !$(VIEW)) return;
+    if (!opensEl && !document.getElementById("view-paper")) return;
     var book = loadBook();
     var opens = openList(book);
     var sc = weekScorecard(book);
@@ -1545,7 +1545,7 @@ def strip_js() -> str:
   }
   function showPaper(on) {
     stripLegacyHome();
-    var pane = $(VIEW);
+    var pane = document.getElementById("view-paper");
     if (on) {
       hideNativeViews();
       if (pane) {

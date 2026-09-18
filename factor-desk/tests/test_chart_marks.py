@@ -405,13 +405,18 @@ class MaTrendTests(unittest.TestCase):
         self.assertIn("close > s50 && close > s200", js)
         self.assertIn("restorePricePath", js)
         self.assertIn("maUsable", js)
+        self.assertIn("failOpenPricePath", js)
         self.assertNotIn("__FD_CHART_MA_FORCE__", js)
+        wrapfn = js.split("function wrapPaintFn")[1].split("function wrapPaintPxChart")[0]
+        self.assertIn("failOpenPricePath", wrapfn)
         restyle = js.split("function restylePxChart")[1].split("function patchPaintSource")[0]
         hide_at = restyle.rfind("hidePricePath(src)")
         emit_at = restyle.find("parent.appendChild")
         self.assertGreater(hide_at, emit_at)
         self.assertIn("if (emitted > 0) hidePricePath(src)", restyle)
         self.assertIn("restorePricePath(src)", restyle)
+        self.assertIn(":has([data-fd-trend-seg])", css)
+        self.assertNotIn("[data-px-svg] [data-fd-trend-src], [data-fd-trend-src]", css.replace("\n", " "))
         self.assertIn("[data-px-svg]", css)
         self.assertIn("fd-px-chip", css)
         self.assertIn("height: 320px", css)
