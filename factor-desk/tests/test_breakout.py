@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 import book_delta  # noqa: E402
 import breakout as bo  # noqa: E402
+import card_render as cr  # noqa: E402
 import dapi_enrich as de  # noqa: E402
 import desk_dash  # noqa: E402
 import mom_streak as ms  # noqa: E402
@@ -521,18 +522,17 @@ function syncNav() {}
         self.assertIn("view-breakout", js)
         self.assertIn("view-breakdown", js)
         self.assertIn("search-pane", js)
-        self.assertIn("__FD_BB_RENDER_ROW__", js)
+        self.assertIn("__FD_FIND_CARD__", js)
         self.assertIn("__FD_RENDER_CARD__", js)
-        self.assertIn("momCardForRow", js)
-        self.assertIn("__FD_BB_USE_CARDHTML__", js)
+        self.assertIn("__FD_BB_RENDER_ROW__", js)
+        self.assertIn("callCardHTML", js)
+        self.assertIn("__FD_BB_CARDHTML__", js)
         self.assertIn(bo.JS_VER, js)
         self.assertIn("window.cardHTML", js)
-        self.assertIn("liveCardHTML", js)
+        self.assertIn("function callCardHTML", js)
         self.assertIn("selectTicker", js)
         self.assertIn("isNavControl", js)
-        self.assertIn("momCardForRow", js)
-        self.assertIn("findMomCard", js)
-        self.assertIn("#breakout-grid article.card", js)
+        self.assertIn('closest("article.card, .card")', js)
         self.assertNotIn('closest("button, [data-view], [data-fd-breakout], [data-fd-breakdown]")', js)
         self.assertIn("fmtPct", js)
         self.assertIn("fmtAtr", js)
@@ -542,6 +542,9 @@ function syncNav() {}
         self.assertNotIn("fd-bb-card", js)
         self.assertNotIn('key: "fd-bb"', js)
         self.assertNotIn("cls: \"fd-bb-why\"", js)
+        self.assertNotIn("denseHTML", js)
+        self.assertNotIn("__FD_BB_NO_CARDHTML_FALLBACK__", js)
+        self.assertNotIn("__FD_BB_PORTABLE_FIX__", js)
         self.assertIn('class="btn nav-btn"', out)
 
     def test_panes_html_emits_view_shells_not_stubs(self) -> None:
@@ -614,9 +617,9 @@ function syncNav() {}
 (function () {
   if (window.__FD_BB_BOUND__) return;
   window.__FD_BB_BOUND__ = true;
-  window.__FD_BB_NO_CARDHTML_FALLBACK__ = true;
   function renderRow(row) {
-    return denseHTML(row);
+    var fn = window.cardHTML;
+    return fn(row);
   }
 })();
 </script>
@@ -627,6 +630,7 @@ function syncNav() {}
 {old_js}
 </body></html>"""
         self.assertEqual(html.count("id=\"fd-breakout-js\""), 1)
+        self.assertIn("window.cardHTML", html)
         out = bo.ensure_embedded(html, None)
         scripts = re.findall(
             r'<script\b[^>]*id=["\']fd-breakout-js["\'][^>]*>(.*?)</script>',
@@ -636,10 +640,11 @@ function syncNav() {}
         self.assertEqual(len(scripts), 1, "duplicate fd-breakout-js left behind")
         js = scripts[0]
         self.assertIn(bo.JS_VER, js)
-        self.assertIn("__FD_BB_USE_CARDHTML__", js)
+        self.assertIn("__FD_BB_CARDHTML__", js)
+        self.assertIn("callCardHTML", js)
         self.assertIn("window.cardHTML", js)
-        self.assertIn("momCardForRow", js)
-        self.assertIn("findMomCard", js)
+        self.assertNotIn("denseHTML", js)
+        self.assertNotIn("__FD_BB_NO_CARDHTML_FALLBACK__", js)
         db_blob = re.search(
             r'<script\b[^>]*id=["\']fd-breakout-db["\'][^>]*>(.*?)</script>',
             out,
@@ -739,9 +744,9 @@ function syncNav() {}
         self.assertIsNotNone(bb_js)
         self.assertIn("cardHTML", bb_js.group(1))
         self.assertIn("function renderRow", bb_js.group(1))
-        render = bb_js.group(1).split("function renderRow", 1)[1][:800]
-        self.assertIn("liveCardHTML", render)
-        self.assertIn("momCardForRow", render)
+        render = bb_js.group(1).split("function renderRow", 1)[1][:700]
+        self.assertIn("callCardHTML", render)
+        self.assertNotIn("denseHTML", render)
 
     def test_ensure_embedded_none_enriches_existing_db_from_html_map(self) -> None:
         html = (
@@ -786,27 +791,30 @@ function syncNav() {}
         )
         self.assertIsNotNone(js)
         self.assertIn("cardHTML", js.group(1))
-        self.assertIn("momCardForRow", js.group(1))
 
-    def test_strip_js_paints_via_cardhtml_like_mom_up(self) -> None:
+    def test_strip_js_calls_live_cardhtml(self) -> None:
         js = bo.strip_js()
-        self.assertIn("window.cardHTML", js)
-        self.assertIn("liveCardHTML", js)
-        self.assertIn("momCardForRow", js)
-        self.assertIn("findMomCard", js)
+        self.assertIn("cardHTML", js)
+        self.assertIn("callCardHTML", js)
+        self.assertIn("momCardFor", js)
+        self.assertIn("rewriteAtr", js)
+        self.assertNotIn("denseHTML", js)
+        self.assertNotIn("hasGhostMatrix", js)
+        self.assertIn("fmtPct", js)
         self.assertIn("fmtAtr", js)
-        self.assertIn("Math.abs(n) < 1", js)
         self.assertIn("selectTicker", js)
         self.assertIn("function renderRow", js)
-        render = js.split("function renderRow", 1)[1][:900]
-        self.assertIn("liveCardHTML", render)
-        self.assertIn("fn(card)", render)
-        self.assertNotIn("tryPortable", js)
-        self.assertNotIn("hasGhostMatrix", js)
+        render = js.split("function renderRow", 1)[1][:800]
+        self.assertIn("callCardHTML", render)
+        self.assertNotIn("denseHTML", render)
+        self.assertNotIn("tryPortable", render)
+        src = Path(bo.__file__).read_text(encoding="utf-8")
+        js_block = src.split("def strip_js()", 1)[1].split("def panes_html", 1)[0]
+        self.assertIn("window.cardHTML", js_block)
+        self.assertIn("callCardHTML", js_block)
         self.assertNotIn('closest("button, [data-view], [data-fd-breakout], [data-fd-breakdown]")', js)
-        self.assertIn("#breakout-grid article.card", js)
 
-    def test_jsdom_cardhtml_matches_mom_up_and_click_drills(self) -> None:
+    def test_jsdom_cardhtml_paints_mom_chrome(self) -> None:
         node = shutil.which("node")
         if not node:
             self.skipTest("node not installed")
@@ -827,54 +835,52 @@ function syncNav() {}
         live = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"></head>
 <body>
-<nav id="topnav">
+<nav>
   <button class="btn" data-view="home">Home</button>
   <button class="btn">Momentum Down</button>
 </nav>
 <div id="home">FLAGS</div>
 <div id="breakout-grid" class="grid dense"></div>
 <script>
+window.__cardHTMLCalls = [];
 window.MOM = { cards: [], up: [
-  {t:"SPCX", d:"SPCX", ticker:"SPCX US Equity", score:9, blurb:"climber",
-   enrich_pills:[{key:"mom-streak",label:"↑3d>5",cls:"mom-streak-up"}],
-   "metrics":{"r20_pct":0.1277, "rs_63":0.04, "atr_pct":2.3, "day_pct":0.012}}
+  {t:"SPCX", d:"SPCX", ticker:"SPCX US Equity", score:9, mom_streak_label:"↑3d>5",
+   "metrics":{"r20_pct":0.1277, "rs_63":0.04, "atr_pct":2.3}}
 ], down: [] };
-function fmtPct(x, d) {
-  d = (d == null) ? 1 : d;
-  if (x == null || x === "") return "—";
-  var n = Number(x);
-  if (!isFinite(n)) return "—";
-  return (n * 100).toFixed(d) + "%";
-}
-function fmtAtr(x) {
-  if (x == null || x === "") return "—";
-  var n = Number(x);
-  if (!isFinite(n)) return "—";
-  if (Math.abs(n) < 1) return (n * 100).toFixed(1) + "%";
-  return n.toFixed(1) + "%";
-}
 function cardHTML(c) {
   c = c || {};
+  window.__cardHTMLCalls.push(c.t || c.d || "");
+  var t = c.t || c.d || "";
   var m = c.metrics || {};
-  var pills = (c.enrich_pills || []).map(function (p) {
-    return '<span class="badge spike-chip">' + (p.label || "") + "</span>";
-  }).join("");
-  return '<article class="card" data-t="' + (c.t || "") + '">' +
-    "<header><h2>" + (c.t || "") + '</h2><span class="sc">' + (c.score != null ? c.score : "") + "</span>" +
-    '<div class="pills">' + pills + "</div></header>" +
-    '<div class="status">active</div>' +
-    '<div class="stats"><span>Day ' + fmtPct(m.day_pct) + "</span>" +
-    "<span>R20 " + fmtPct(m.r20_pct) + "</span>" +
-    "<span>RS63 " + fmtPct(m.rs_63) + "</span>" +
-    "<span>ATR% " + fmtAtr(m.atr_pct) + "</span></div>" +
-    '<div class="blurb">' + (c.blurb || "") + "</div>" +
-    '<div class="fd-paper"><button data-fd-paper-act="buy">Buy</button><button data-fd-paper-act="sell">Sell</button></div>' +
-    "</article>";
+  function fmtPct(x) {
+    if (x == null || x === "") return "—";
+    var n = Number(x);
+    if (!isFinite(n)) return "—";
+    return (n * 100).toFixed(1) + "%";
+  }
+  function fmtN(x) {
+    if (x == null || x === "") return "—";
+    return String(x);
+  }
+  var score = c.score != null ? c.score : "";
+  return '<article class="card" data-t="'+t+'">' +
+    '<header><h2>'+t+'</h2><span class="sc">'+score+'</span>' +
+    '<span class="status">Weak / fading</span>' +
+    '<span class="streak">'+(c.mom_streak_label || "")+'</span></header>' +
+    '<div class="trend">Trending down</div>' +
+    '<div class="digest"><div>MA FAN</div><div>CLOSE HI</div><div>52W HI</div><div>HM/HL</div>' +
+    '<div>V.EMA</div><div>ABOVE 50</div><div>ABOVE 200</div><div>MOM+</div>' +
+    '<div>TREND↑</div><div>SQUEEZE</div><div>RS+</div><div>BREAKOUT</div>' +
+    '<div>OPT SPIKE</div></div>' +
+    '<div class="stats"><span>R20 '+fmtPct(m.r20_pct)+'</span><span>RS63 '+fmtN(m.rs_63)+'</span><span>ATR% '+fmtPct(m.atr_pct)+'</span></div>' +
+    '<p class="blurb">Trending down. below key MAs. Score '+score+'/12.</p>' +
+    '</article>';
 }
 </script>
 </body></html>"""
+        html = cr.ensure_embedded(live)
         html = bo.ensure_embedded(
-            live,
+            html,
             {
                 "breakout": [
                     {
@@ -908,18 +914,17 @@ const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1
 const window = dom.window;
 const called = [];
 const views = [];
-const orig = window.cardHTML;
-window.cardHTML = function (card) {{
-  called.push("cardHTML:" + ((card && card.t) || ""));
-  return orig.apply(this, arguments);
-}};
 window.selectTicker = function (t) {{ called.push("sel:" + String(t)); }};
 const origShow = window.__FD_BB_SHOW__;
 window.__FD_BB_SHOW__ = function (kind) {{ views.push(String(kind)); if (origShow) return origShow.apply(this, arguments); }};
 const pane = window.document.getElementById("view-breakout");
-if (pane) pane.classList.remove("hide");
+if (pane) {{ pane.classList.remove("hide"); pane.setAttribute("data-view", "breakout"); }}
 const grid = window.document.getElementById("breakout-grid");
 const row = JSON.parse(window.document.getElementById("fd-breakout-db").textContent).breakout[0];
+if (!row.metrics || row.metrics.r20_pct == null) {{
+  console.log(JSON.stringify({{error:"db missing metrics", row: row}}));
+  process.exit(3);
+}}
 const node = window.__FD_BB_RENDER_ROW__(row);
 if (!node) {{ console.log(JSON.stringify({{error:"no node"}})); process.exit(2); }}
 if (grid) grid.appendChild(node);
@@ -928,8 +933,9 @@ else window.document.body.appendChild(node);
 node.click();
 const report = {{
   called: called,
+  cardHTMLCalls: window.__cardHTMLCalls || [],
   views: views,
-  flags: {{ portable: !!window.__FD_BB_PORTABLE_FIX__, useCard: !!window.__FD_BB_USE_CARDHTML__ }},
+  flags: {{ cardhtml: !!window.__FD_BB_CARDHTML__, portable: !!window.__FD_BB_PORTABLE_FIX__, noCard: !!window.__FD_BB_NO_CARDHTML_FALLBACK__ }},
   dense: node.getAttribute("data-fd-bb-dense"),
   dataT: node.getAttribute("data-t"),
   text: (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim(),
@@ -948,23 +954,29 @@ console.log(JSON.stringify(report));
             )
             self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
             report = json.loads(proc.stdout.strip().splitlines()[-1])
-            self.assertIn("cardHTML:SPCX", report["called"], report)
-            self.assertIn("sel:SPCX", report["called"], report)
+            self.assertEqual(report["called"], ["sel:SPCX"], report)
+            self.assertIn("SPCX", report.get("cardHTMLCalls") or [], report)
             self.assertNotIn("breakdown", report.get("views") or [])
-            self.assertTrue(report["flags"]["useCard"])
-            self.assertIsNone(report.get("dense"))
+            self.assertTrue(report["flags"]["cardhtml"], report)
+            self.assertFalse(report["flags"]["portable"])
+            self.assertFalse(report["flags"]["noCard"])
+            self.assertNotEqual(report.get("dense"), "1")
             self.assertEqual(report.get("dataT"), "SPCX")
             text = report["text"]
-            html_out = report["html"]
             self.assertIn("SPCX", text)
-            self.assertIn("Buy", text)
-            self.assertIn("Sell", text)
-            self.assertIn("climber", text)
-            self.assertIn("↑3d>5", text)
+            self.assertIn("Weak / fading", text)
+            self.assertIn("Trending down", text)
+            self.assertIn("CLOSE HI", text)
+            self.assertIn("SQUEEZE", text)
+            self.assertIn("V.EMA", text)
+            self.assertIn("OPT SPIKE", text)
+            self.assertIn("below key MAs", text)
+            self.assertIn("R20 ", text)
             self.assertIn("12.8%", text)
+            self.assertIn("ATR%", text)
             self.assertIn("2.3%", text)
             self.assertNotIn("230%", text)
-            self.assertIn("data-fd-paper-act", html_out)
+            self.assertNotIn("203%", text)
 
     def test_write_combined_patches_live_html_with_tabs_and_delta(self) -> None:
         body = """<!DOCTYPE html>
@@ -1034,8 +1046,8 @@ console.log(JSON.stringify(report));
             )
             self.assertIsNotNone(bb_js)
             self.assertIn("cardHTML", bb_js.group(1))
-            self.assertIn("momCardForRow", bb_js.group(1))
-            self.assertIn("liveCardHTML", bb_js.group(1))
+            self.assertIn("callCardHTML", bb_js.group(1))
+            self.assertNotIn("denseHTML", bb_js.group(1))
             self.assertTrue((root / book_delta.SNAPSHOT_FILENAME).is_file())
             snap = json.loads((root / book_delta.SNAPSHOT_FILENAME).read_text(encoding="utf-8"))
             self.assertIn("names", snap)

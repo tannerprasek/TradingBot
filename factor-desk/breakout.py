@@ -97,7 +97,7 @@ PX_SERIES_KEYS: tuple[str, ...] = (
 
 DB_SCRIPT_ID = "fd-breakout-db"
 JS_SCRIPT_ID = "fd-breakout-js"
-JS_VER = "pr17-mom-cardhtml"
+JS_VER = "pr18-mom-cardhtml"
 CSS_STYLE_ID = "fd-breakout-css"
 PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
@@ -1156,12 +1156,13 @@ article.fd-bb-card, .fd-bb-card {{
 
 
 def strip_js() -> str:
-    """Fill Breakout/Breakdown grids with the **same** ``cardHTML`` Mom Up uses.
+    """Fill #breakout-grid / #breakdown-grid via live ``cardHTML(momCard)``.
 
-    Ranked rows only pick tickers. ``renderRow`` looks up the live MOM card
-    (``__FD_FIND_CARD__`` / ``MOM.up|down|cards``) and calls ``cardHTML(card)``
-    so pills, status, streak, metrics, blurb, and Paper Buy/Sell match Mom Up.
-    Capture-phase card click calls ``selectTicker`` and does not ``setView``.
+    Look up the Momentum card by ticker and pass that object unchanged into
+    the same ``cardHTML`` Momentum Up/Down uses. Do **not** paint the skinny
+    dense substitute as the primary path. Capture-phase click on nav still
+    stops the live topnav listener; card clicks call ``selectTicker``.
+    ``show`` is ``window.__FD_BB_SHOW__``.
     """
     view_ids = json.dumps(list(NATIVE_VIEW_IDS))
     return rf"""
@@ -1169,8 +1170,7 @@ def strip_js() -> str:
   var BB_VER = "{JS_VER}";
   if (window.__FD_BB_BOUND__ === BB_VER) return;
   window.__FD_BB_BOUND__ = BB_VER;
-  window.__FD_BB_USE_CARDHTML__ = true;
-  window.__FD_BB_PORTABLE_FIX__ = true;
+  window.__FD_BB_CARDHTML__ = true;
   var DB_ID = "fd-breakout-db";
   var VIEW_BO = "view-breakout";
   var VIEW_BD = "view-breakdown";
@@ -1306,14 +1306,15 @@ def strip_js() -> str:
     }}
     return [];
   }}
-  function liveMetrics(ticker) {{
+  function liveCard(ticker) {{
     var want = shortOf(ticker);
     if (!want) return null;
-    var found = null;
     if (typeof window.__FD_FIND_CARD__ === "function") {{
-      try {{ found = window.__FD_FIND_CARD__(ticker); }} catch (e0) {{ found = null; }}
+      try {{
+        var found = window.__FD_FIND_CARD__(ticker);
+        if (found) return found;
+      }} catch (e0) {{}}
     }}
-    if (found && found.metrics) return found.metrics;
     var bags = [];
     var mom = window.MOM || {{}};
     [mom.cards, mom.up, mom.down, mom.all, window.CARDS, window.MOM_CARDS].forEach(function (src) {{
@@ -1324,9 +1325,13 @@ def strip_js() -> str:
     for (var i = 0; i < bags.length; i++) {{
       var c = bags[i];
       if (!c || typeof c !== "object") continue;
-      if (shortOf(c.t || c.ticker || c.d || "") === want && c.metrics) return c.metrics;
+      if (shortOf(c.t || c.ticker || c.d || "") === want) return c;
     }}
     return null;
+  }}
+  function liveMetrics(ticker) {{
+    var found = liveCard(ticker);
+    return (found && found.metrics) ? found.metrics : null;
   }}
   function mergeStats(row) {{
     row = row || {{}};
@@ -1373,116 +1378,66 @@ def strip_js() -> str:
     row.card = card;
     return row;
   }}
-  function pillsHTML(pills) {{
-    if (!Array.isArray(pills)) return "";
-    var bits = [];
-    for (var i = 0; i < pills.length; i++) {{
-      var p = pills[i];
-      if (!p || !p.label) continue;
-      bits.push(
-        '<span class="badge spike-chip ' + esc(p.cls || "") + '" data-key="' + esc(p.key || "") + '"' +
-        (p.title ? ' title="' + esc(p.title) + '"' : "") + ">" + esc(p.label) + "</span>"
-      );
-    }}
-    return bits.join("");
-  }}
-  function denseHTML(row) {{
-    row = mergeStats(row || {{}});
-    var card = row.card || {{}};
-    var t = esc(shortOf(card.d || card.t || row.t || row.ticker || ""));
-    var score = row.score != null ? row.score : (card.score != null ? card.score : (card.mom_score != null ? card.mom_score : ""));
-    var pills = Array.isArray(row.pills) && row.pills.length ? row.pills : (card.enrich_pills || []);
-    return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(card.ticker || t) + '" data-fd-bb-dense="1">' +
-      "<header><h2>" + t + '</h2><span class="sc">' + esc(String(score)) + "</span>" +
-      '<div class="pills">' + pillsHTML(pills) + "</div></header>" +
-      '<div class="stats">' +
-        "<span>Day " + esc(fmtPct(row.day)) + "</span>" +
-        "<span>R20 " + esc(fmtPct(row.r20)) + "</span>" +
-        "<span>RS63 " + esc(fmtPct(row.rs63)) + "</span>" +
-        "<span>ATR% " + esc(fmtAtr(row.atr_pct)) + "</span>" +
-      "</div></article>";
-  }}
-  function liveCardHTML() {{
+  function callCardHTML(card) {{
     var fn = null;
-    try {{ if (typeof window.cardHTML === "function") fn = window.cardHTML; }} catch (e0) {{}}
+    try {{ fn = window.cardHTML; }} catch (e0) {{ fn = null; }}
     if (typeof fn !== "function") {{
-      try {{ if (typeof cardHTML === "function") fn = cardHTML; }} catch (e1) {{}}
+      try {{ if (typeof cardHTML === "function") fn = cardHTML; }} catch (e1) {{ fn = null; }}
     }}
-    return fn;
+    if (typeof fn !== "function") return "";
+    try {{ return fn(card) || ""; }} catch (e2) {{ return ""; }}
   }}
-  function findMomCard(ticker) {{
-    var want = shortOf(ticker);
-    if (!want) return null;
-    if (typeof window.__FD_FIND_CARD__ === "function") {{
-      try {{
-        var hit = window.__FD_FIND_CARD__(ticker);
-        if (hit && typeof hit === "object") return hit;
-      }} catch (e0) {{}}
-    }}
-    var bags = [];
-    function addList(src) {{
-      if (!src) return;
-      if (Array.isArray(src)) {{ for (var i = 0; i < src.length; i++) bags.push(src[i]); return; }}
-      if (typeof src !== "object") return;
-      if (src.t != null || src.ticker != null || src.d != null || src.score != null) {{ bags.push(src); return; }}
-      var keys = Object.keys(src);
-      for (var k = 0; k < keys.length; k++) addList(src[keys[k]]);
-    }}
-    var mom = window.MOM || {{}};
-    addList(mom.cards); addList(mom.up); addList(mom.down); addList(mom.all);
-    addList(mom.flags); addList(mom.watch); addList(mom.outliers); addList(mom.search);
-    addList(window.CARDS); addList(window.MOM_CARDS); addList(window.FLAGS);
-    addList(window.WATCH); addList(window.OUTLIERS); addList(window.BOOK);
-    for (var i = 0; i < bags.length; i++) {{
-      var c = bags[i];
-      if (!c || typeof c !== "object") continue;
-      if (shortOf(c.t || c.ticker || c.d || c.name || c.symbol || "") === want) return c;
-    }}
-    return null;
-  }}
-  function stampMetrics(card, row) {{
-    card = card || {{}};
+  function momCardFor(row) {{
     row = row || {{}};
-    var m = {{}};
-    function take(src) {{
-      if (!src || typeof src !== "object") return;
-      for (var k in src) if (src[k] != null && src[k] !== "" && m[k] == null) m[k] = src[k];
+    var t = shortOf(row.t || row.ticker || row.d || "");
+    if (!t) return null;
+    var card = liveCard(row.ticker || row.t || t);
+    if (!card && row.card && typeof row.card === "object") card = row.card;
+    if (!card) return null;
+    if (!card.t) card.t = t;
+    if (!card.d) card.d = card.t;
+    if (!card.ticker) card.ticker = row.ticker || t;
+    if (card.score == null && row.score != null) card.score = row.score;
+    if (!card.metrics || typeof card.metrics !== "object") card.metrics = {{}};
+    var m = card.metrics;
+    if (m.r20_pct == null && row.r20 != null) m.r20_pct = row.r20;
+    if (m.rs_63 == null && row.rs63 != null) m.rs_63 = row.rs63;
+    if (m.atr_pct == null && row.atr_pct != null) m.atr_pct = row.atr_pct;
+    if (m.day_pct == null && row.day != null) m.day_pct = row.day;
+    if (row.metrics && typeof row.metrics === "object") {{
+      if (m.r20_pct == null && row.metrics.r20_pct != null) m.r20_pct = row.metrics.r20_pct;
+      if (m.rs_63 == null && row.metrics.rs_63 != null) m.rs_63 = row.metrics.rs_63;
+      if (m.atr_pct == null && row.metrics.atr_pct != null) m.atr_pct = row.metrics.atr_pct;
+      if (m.day_pct == null && row.metrics.day_pct != null) m.day_pct = row.metrics.day_pct;
     }}
-    take(card.metrics);
-    take(row.metrics);
-    if (row.card && row.card.metrics) take(row.card.metrics);
-    if (row.r20 != null && m.r20_pct == null) m.r20_pct = row.r20;
-    if (row.rs63 != null && m.rs_63 == null) m.rs_63 = row.rs63;
-    if (row.atr_pct != null && m.atr_pct == null) m.atr_pct = row.atr_pct;
-    if (row.day != null && m.day_pct == null) m.day_pct = row.day;
-    if (Object.keys(m).length) card.metrics = m;
-    if (m.r20_pct != null) {{ if (card.r20 == null) card.r20 = m.r20_pct; if (card.R20 == null) card.R20 = m.r20_pct; }}
-    if (m.rs_63 != null) {{ if (card.rs63 == null) card.rs63 = m.rs_63; if (card.RS63 == null) card.RS63 = m.rs_63; }}
-    if (m.atr_pct != null) {{
-      if (card.atr_pct == null) card.atr_pct = m.atr_pct;
-      if (card.atrs == null) card.atrs = m.atr_pct;
-    }}
-    if (m.day_pct != null && card.day == null) card.day = m.day_pct;
     return card;
   }}
-  function momCardForRow(row) {{
-    row = row || {{}};
-    var t = row.t || row.ticker || (row.card && (row.card.t || row.card.ticker)) || "";
-    var found = findMomCard(t);
-    var card = {{}};
-    var src = found || (row.card && typeof row.card === "object" ? row.card : null);
-    if (src) {{
-      for (var k in src) {{
-        if (k === "px_series" || k === "prices" || k === "closes" || k === "history" || k === "mom_score_series") continue;
-        card[k] = src[k];
+  function rewriteAtr(node, card) {{
+    if (!node) return;
+    var atr = pickNum((card && card.metrics) || {{}}, ["atr_pct", "atr"]);
+    if (atr == null) atr = pickNum(card, ["atr_pct", "atrs", "atr", "ATR", "ATRS"]);
+    if (atr == null) return;
+    var shown = fmtAtr(atr);
+    var els = node.querySelectorAll("span, b, i, em, dt, dd, div, td, th, strong, small, label");
+    for (var i = 0; i < els.length; i++) {{
+      var el = els[i];
+      if (el.closest && el.closest(".fd-paper, .pills, .chips, .badges")) continue;
+      var text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      var up = text.toUpperCase();
+      if (up === "ATR%" || up === "ATR" || up === "ATRS") {{
+        var sib = el.nextElementSibling;
+        if (sib) {{ sib.textContent = shown; return; }}
+        for (var c = 0; c < el.children.length; c++) {{
+          el.children[c].textContent = shown;
+          return;
+        }}
+      }}
+      if (up.indexOf("ATR% ") === 0 || up === "ATR%" || up.indexOf("ATRS ") === 0 || up.indexOf("ATR ") === 0) {{
+        var lab = up.indexOf("ATR%") === 0 ? "ATR%" : (up.indexOf("ATRS") === 0 ? "ATRS" : "ATR");
+        el.textContent = lab + " " + shown;
+        return;
       }}
     }}
-    if (!card.t) card.t = shortOf(t);
-    if (!card.d) card.d = card.t;
-    if (!card.ticker) card.ticker = row.ticker || t || card.t;
-    if (card.score == null && row.score != null) card.score = row.score;
-    if (card.mom_score == null && row.score != null) card.mom_score = row.score;
-    return stampMetrics(card, row);
   }}
   function drillTicker(ticker) {{
     var t = ticker;
@@ -1516,26 +1471,27 @@ def strip_js() -> str:
     var node = wrap.firstElementChild;
     if (!node) return null;
     node.classList.remove("hide", "fd-bb-hid", "gics-hid");
+    node.removeAttribute("data-fd-bb-dense");
     return bindSelect(node, row, card);
   }}
   function renderRow(row) {{
     row = mergeStats(row || {{}});
-    var card = momCardForRow(row);
-    var fn = liveCardHTML();
-    if (typeof fn === "function") {{
-      try {{
-        var html = fn(card);
-        var node = fromHTML(html, row, card);
-        if (node) return node;
-      }} catch (e0) {{}}
+    var t = shortOf(row.t || row.ticker || row.d || "");
+    if (!t) return null;
+    var card = momCardFor(row);
+    if (!card) return null;
+    var html = callCardHTML(card);
+    var node = html ? fromHTML(html, row, card) : null;
+    if (!node && typeof window.__FD_RENDER_CARD__ === "function") {{
+      try {{ node = window.__FD_RENDER_CARD__(card); }} catch (e0) {{ node = null; }}
+      if (node) {{
+        node.classList.remove("hide", "fd-bb-hid", "gics-hid");
+        bindSelect(node, row, card);
+      }}
     }}
-    if (typeof window.__FD_RENDER_CARD__ === "function") {{
-      try {{
-        var painted = window.__FD_RENDER_CARD__(card);
-        if (painted) return bindSelect(painted, row, card);
-      }} catch (e1) {{}}
-    }}
-    return fromHTML(denseHTML(row), row, card);
+    if (!node) return null;
+    rewriteAtr(node, card);
+    return node;
   }}
   function fillGrid(grid, rows) {{
     if (!grid) return;
@@ -1548,7 +1504,9 @@ def strip_js() -> str:
       return;
     }}
     for (var i = 0; i < rows.length; i++) {{
-      var node = renderRow(rows[i] || {{}});
+      var row = rows[i] || {{}};
+      if (!shortOf(row.t || row.ticker || row.d || "")) continue;
+      var node = renderRow(row);
       if (node) grid.appendChild(node);
     }}
   }}
@@ -1639,21 +1597,10 @@ def strip_js() -> str:
     document.removeEventListener("click", window.__FD_BB_CLICK__, true);
   }}
   window.__FD_BB_CLICK__ = function (ev) {{
-    var target = ev.target;
-    if (target && target.closest && target.closest(".fd-paper, [data-fd-paper-act], [data-fd-paper-buy], [data-fd-paper-sell]")) return;
-    var card = target && target.closest
-      ? target.closest("#breakout-grid article.card, #breakdown-grid article.card, #view-breakout article.card, #view-breakdown article.card, #breakout-grid .card, #breakdown-grid .card")
-      : null;
-    if (card) {{
-      ev.preventDefault();
-      ev.stopPropagation();
-      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-      drillTicker(card.getAttribute("data-t") || card.getAttribute("data-ticker") || "");
-      return;
-    }}
-    var t = target && target.closest
-      ? target.closest("#topnav .nav-btn, #topnav .btn, #topnav button[data-view], nav .nav-btn, nav > .btn, .topnav .nav-btn, button[data-fd-breakout], button[data-fd-breakdown], #fd-nav-breakout, #fd-nav-breakdown")
-      : target;
+    if (ev.target && ev.target.closest && ev.target.closest("article.card, .card")) return;
+    var t = ev.target && ev.target.closest
+      ? ev.target.closest("#topnav .nav-btn, #topnav .btn, nav .nav-btn, nav .btn, .topnav .nav-btn, button[data-view], button[data-fd-breakout], button[data-fd-breakdown], #fd-nav-breakout, #fd-nav-breakdown")
+      : ev.target;
     var kind = kindOf(t);
     if (!kind) return;
     if (kind === "breakout" || kind === "breakdown") {{
@@ -1691,7 +1638,7 @@ def strip_js() -> str:
 
 
 def panes_html(ranked: Mapping[str, Any] | None = None, article_html=None) -> str:
-    """Momentum-style view shells. Grids are filled by ``__FD_RENDER_ROW__``.
+    """Momentum-style view shells. Grids are filled by live ``cardHTML(momCard)``.
 
     ``ranked`` / ``article_html`` are unused (kept for call-site compatibility).
     Legacy ``#fd-bb-*`` stay empty so old CSS cannot paint stub articles.
@@ -1699,11 +1646,11 @@ def panes_html(ranked: Mapping[str, Any] | None = None, article_html=None) -> st
     _ = (ranked, article_html)
     return "\n".join(
         [
-            f'<div id="{VIEW_BREAKOUT_ID}" class="view-pane hide">',
+            f'<div id="{VIEW_BREAKOUT_ID}" class="view-pane hide" data-view="breakout">',
             '  <div class="ph">Breakout</div>',
             f'  <div class="grid dense" id="{GRID_BREAKOUT_ID}"></div>',
             "</div>",
-            f'<div id="{VIEW_BREAKDOWN_ID}" class="view-pane hide">',
+            f'<div id="{VIEW_BREAKDOWN_ID}" class="view-pane hide" data-view="breakdown">',
             '  <div class="ph">Breakdown</div>',
             f'  <div class="grid dense" id="{GRID_BREAKDOWN_ID}"></div>',
             "</div>",

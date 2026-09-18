@@ -161,14 +161,13 @@ class EmbedTests(unittest.TestCase):
         self.assertIn("window.__FD_RENDER_ROW__", out)
         self.assertIn("window.__FD_NORMALIZE_CARD__", out)
         self.assertIn("polishNode", out)
-        self.assertIn("hideGhostMatrix", out)
         self.assertIn("fillStats", out)
-        self.assertIn("fd-tag-matrix", out)
+        self.assertIn("rewriteAtr", out)
         self.assertIn("HM/HL", out)
         self.assertIn("V.EMA", out)
         self.assertIn("ATR%", out)
         self.assertIn("window.__FD_POLISH_NODE__", out)
-        self.assertIn("fd-tag-chip", out)
+        self.assertIn("fmtAtr", out)
         self.assertIn("fd-bb-band", out)
         self.assertIn("labels[t]", out)
         self.assertIn("article.card .badge", out)
@@ -211,7 +210,7 @@ class EmbedTests(unittest.TestCase):
             ast_ok = compile(Path(desk_dash.__file__).read_text(encoding="utf-8"), desk_dash.__file__, "exec")
             self.assertIsNotNone(ast_ok)
 
-    def test_js_hides_classless_ghost_matrix_and_fills_stats(self) -> None:
+    def test_js_keeps_mom_digest_and_rewrites_atr(self) -> None:
         node = shutil.which("node")
         if not node:
             self.skipTest("node not installed")
@@ -248,13 +247,31 @@ class EmbedTests(unittest.TestCase):
 <html><head><meta charset="utf-8"></head>
 <body>
 <script>
-window.MOM = {{ cards: [] }};
+window.MOM = {{ cards: [{{
+  t:"SPCX", d:"SPCX", ticker:"SPCX US Equity", score:9,
+  r20:1.2, rs63:0.4, atr_pct:2.1,
+  metrics:{{r20_pct:0.1277, rs_63:0.4, atr_pct:2.1}},
+  tags:["MA FAN","BREAKOUT"]
+}}] }};
 function cardHTML(c) {{
   var t = (c && (c.t || c.d)) || "";
+  var m = (c && c.metrics) || {{}};
+  function fmtPct(x) {{
+    if (x == null || x === "") return "—";
+    var n = Number(x);
+    if (!isFinite(n)) return "—";
+    return (n * 100).toFixed(1) + "%";
+  }}
+  function fmtN(x) {{
+    if (x == null || x === "") return "—";
+    return String(x);
+  }}
   return '<article class="card" data-t="'+t+'">' +
-    '<header><h2>'+t+'</h2><span class="sc">'+(c && c.score != null ? c.score : '')+'</span></header>' +
-    '<div class="digest" style="display:grid;grid-template-columns:repeat(4,1fr);font-size:8px;color:#4b5563">{cells}</div>' +
-    '<div class="stats"><span>R20 -</span><span>RS63 -</span><span>ATR% -</span></div>' +
+    '<header><h2>'+t+'</h2><span class="sc">'+(c && c.score != null ? c.score : '')+'</span>' +
+    '<span class="status">Weak / fading</span></header>' +
+    '<div class="digest" style="display:grid;grid-template-columns:repeat(4,1fr)">{cells}</div>' +
+    '<div class="stats"><span>R20 '+fmtPct(m.r20_pct)+'</span><span>RS63 '+fmtN(m.rs_63)+'</span><span>ATR% '+fmtPct(m.atr_pct)+'</span></div>' +
+    '<p class="blurb">Trending down. Score 9/12.</p>' +
     '</article>';
 }}
 </script>
@@ -272,22 +289,14 @@ const html = fs.readFileSync({json.dumps(str(page))}, "utf8");
 const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1/factorbook.html" }});
 const window = dom.window;
 const row = {{
-  t: "SPCX", ticker: "SPCX US Equity", score: 9, delta: 2, lookback: 7,
-  label: "↑3d>5", side: "above",
-  pills: [
-    {{key:"fd-bb-band", label:"band 9", cls:"fd-bb-band"}},
-    {{key:"fd-bb-delta", label:"+2/7d", cls:"fd-bb-delta-up"}}
-  ],
-  card: {{ t:"SPCX", d:"SPCX", score:9, r20:0.012, rs63:0.004, atr_pct:2.1, tags:["MA FAN","BREAKOUT"] }}
+  t: "SPCX", ticker: "SPCX US Equity", score: 9
 }};
 const node = window.__FD_RENDER_ROW__(row);
 if (!node) {{ console.log(JSON.stringify({{error:"no node"}})); process.exit(2); }}
 const report = {{
   text: (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim(),
   stripped: node.getAttribute("data-fd-ghost-stripped"),
-  chips: Array.prototype.map.call(node.querySelectorAll(".spike-chip, .badge"), function (el) {{
-    return (el.textContent || "").replace(/\\s+/g, " ").trim();
-  }})
+  html: node.outerHTML
 }};
 console.log(JSON.stringify(report));
 """,
@@ -303,21 +312,20 @@ console.log(JSON.stringify(report));
             self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
             report = json.loads(proc.stdout.strip().splitlines()[-1])
             text = report["text"]
-            chips = report["chips"]
-            self.assertEqual(report.get("stripped"), "1", msg=report)
-            self.assertIn("band 9", chips)
-            self.assertIn("+2/7d", chips)
-            self.assertIn("↑3d>5", chips)
-            self.assertIn("MA FAN", chips)
-            self.assertIn("BREAKOUT", chips)
-            self.assertNotIn("CLOSE HI", chips)
-            self.assertNotIn("HM/HL", chips)
-            self.assertNotIn("V.EMA", text)
-            self.assertNotIn("SQUEEZE", text)
-            self.assertIn("R20 1.2%", text)
-            self.assertIn("RS63 0.4%", text)
+            self.assertNotEqual(report.get("stripped"), "1", msg=report)
+            self.assertIn("SPCX", text)
+            self.assertIn("Weak / fading", text)
+            self.assertIn("MA FAN", text)
+            self.assertIn("CLOSE HI", text)
+            self.assertIn("HM/HL", text)
+            self.assertIn("V.EMA", text)
+            self.assertIn("SQUEEZE", text)
+            self.assertIn("Trending down", text)
+            self.assertIn("12.8%", text)
             self.assertIn("ATR% 2.1%", text)
-            self.assertIn("Day ", cr.strip_js())
+            self.assertNotIn("210%", text)
+            self.assertNotIn("230%", text)
+            self.assertIn("fmtAtr", cr.strip_js())
 
 
 if __name__ == "__main__":

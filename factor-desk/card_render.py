@@ -4,15 +4,10 @@ Live Momentum Up/Down chrome (``cardHTML``) is the gold standard. Tabs must
 not invent a second card skin. This module:
 
 1. Wraps live ``window.cardHTML`` (or installs a MOM-shaped fallback).
-2. Normalizes a **full MOM-shaped card object** (ticker, score, tags, stats,
-   ``enrich_pills``) so Breakout/Breakdown/Outliers/search can pass the same
-   shape into one renderer.
-3. Polishes tag / why chrome on the **card node itself** (``.badge`` /
-   ``.spike-chip``) so moving a card between ``#breakout-grid``, ``#home``,
-   and mom grids does not need tab-specific CSS.
-
-Breakout "why" / streak belong on ``enrich_pills`` as short chips
-(``band 10``, ``+3/7d``, ``↑3d>5``) — never a brown ``.why`` dump box.
+2. Looks up the live MOM card by ticker and passes that object through the
+   same ``cardHTML`` so Breakout/Breakdown match Momentum chrome.
+3. Only polishes empty stats / ATR% (``atr_pct`` is already percent points —
+   do not ×100 again). Does not strip the digest pill grid.
 
 Does not wholesale replace live ~2.7–4.8MB ``factorbook.html``. Recopy this
 module next to live ``desk_dash.py`` and call ``ensure_embedded``.
@@ -26,7 +21,7 @@ from typing import Any, Mapping, MutableMapping
 
 CSS_STYLE_ID = "fd-card-css"
 JS_SCRIPT_ID = "fd-card-js"
-JS_VER = "pr17-mom-cardhtml"
+JS_VER = "pr18-mom-html"
 
 _BAND_WHY_RE = re.compile(r"^band\s", re.I)
 _DUMP_PILL_KEYS = frozenset({"fd-bb"})
@@ -495,22 +490,6 @@ article.card .tag[data-on="1"] {
   border-color: #ca8a04 !important;
   background: #1c1917 !important;
 }
-article.card .tg.off,
-article.card .tag.off,
-article.card .fd-tag-off,
-article.card .fd-tag-ghost,
-article.card .tg[data-on="0"],
-article.card .tag[data-on="0"],
-article.card .fd-tag-matrix,
-article.card .fd-tag-matrix * {
-  display: none !important;
-  visibility: hidden !important;
-  font-size: 0 !important;
-  line-height: 0 !important;
-  height: 0 !important;
-  overflow: hidden !important;
-  opacity: 0 !important;
-}
 article.card .badge.fd-bb-band, article.card .spike-chip.fd-bb-band {
   color: #fde68a !important; border-color: #ca8a04 !important;
 }
@@ -544,7 +523,7 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
-  var CARD_VER = "pr17-mom-cardhtml";
+  var CARD_VER = "pr18-mom-html";
   if (window.__FD_CARD_BOUND__ === CARD_VER) return;
   window.__FD_CARD_BOUND__ = CARD_VER;
 
@@ -553,17 +532,15 @@ def strip_js() -> str:
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
-  function fmtPct(x, d) {
-    d = (d == null) ? 1 : d;
-    if (x == null || x === "") return "—";
-    var n = Number(x);
-    if (!isFinite(n)) return "—";
-    return (n * 100).toFixed(d) + "%";
+  function fmt(v) {
+    if (v == null || v === "") return "—";
+    if (typeof v === "number" && isFinite(v)) return String(v);
+    return String(v);
   }
   function fmtAtr(x) {
-    if (x == null || x === "") return "—";
+    if (x == null || x === "") return "";
     var n = Number(x);
-    if (!isFinite(n)) return "—";
+    if (!isFinite(n)) return "";
     if (Math.abs(n) < 1) return (n * 100).toFixed(1) + "%";
     return n.toFixed(1) + "%";
   }
@@ -833,10 +810,10 @@ def strip_js() -> str:
     c = c || {};
     var t = esc(shortOf(c.d || c.t || c.ticker || c.name || ""));
     var score = c.score != null ? c.score : (c.mom_score != null ? c.mom_score : "");
-    var day = fmtPct(c.day != null ? c.day : (c.Day != null ? c.Day : (c.ret_1d != null ? c.ret_1d : (c.metrics && c.metrics.day_pct))));
-    var r20 = fmtPct(c.r20 != null ? c.r20 : (c.R20 != null ? c.R20 : (c.metrics && c.metrics.r20_pct)));
-    var rs63 = fmtPct(c.rs63 != null ? c.rs63 : (c.RS63 != null ? c.RS63 : (c.metrics && c.metrics.rs_63)));
-    var atr = fmtAtr(c.atr_pct != null ? c.atr_pct : (c.atrs != null ? c.atrs : (c.atr != null ? c.atr : (c.ATRS != null ? c.ATRS : (c.ATR != null ? c.ATR : (c.metrics && c.metrics.atr_pct))))));
+    var day = fmt(c.day != null ? c.day : (c.Day != null ? c.Day : (c.ret_1d != null ? c.ret_1d : null)));
+    var r20 = fmt(c.r20 != null ? c.r20 : (c.R20 != null ? c.R20 : null));
+    var rs63 = fmt(c.rs63 != null ? c.rs63 : (c.RS63 != null ? c.RS63 : null));
+    var atr = fmt(c.atr_pct != null ? c.atr_pct : (c.atrs != null ? c.atrs : (c.atr != null ? c.atr : (c.ATRS != null ? c.ATRS : (c.ATR != null ? c.ATR : null)))));
     return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(c.ticker || t) + '">' +
       "<header><h2>" + t + '</h2><span class="sc">' + esc(String(score)) + "</span>" +
       '<div class="pills">' + pillsHTML(c.enrich_pills) + "</div></header>" +
@@ -1043,14 +1020,41 @@ def strip_js() -> str:
     }
   }
   function fillStats(node, card) {
-    var day = pickNum(card, DAY_KEYS);
-    var r20 = pickNum(card, R20_KEYS);
-    var rs63 = pickNum(card, RS63_KEYS);
-    var atr = pickNum(card, ATR_KEYS);
-    if (day != null) fillLabeled(node, ["Day"], fmtPct(day));
-    if (r20 != null) fillLabeled(node, ["R20"], fmtPct(r20));
-    if (rs63 != null) fillLabeled(node, ["RS63"], fmtPct(rs63));
-    if (atr != null) fillLabeled(node, ["ATR%", "ATRS", "ATR"], fmtAtr(atr));
+    var m = (card && card.metrics) || {};
+    fillLabeled(node, ["Day"], pickNum(m, ["day_pct", "r1_pct", "day"]) != null ? pickNum(m, ["day_pct", "r1_pct", "day"]) : pickNum(card, DAY_KEYS));
+    fillLabeled(node, ["R20"], pickNum(m, ["r20_pct", "r20"]) != null ? pickNum(m, ["r20_pct", "r20"]) : pickNum(card, R20_KEYS));
+    fillLabeled(node, ["RS63"], pickNum(m, ["rs_63", "rs63"]) != null ? pickNum(m, ["rs_63", "rs63"]) : pickNum(card, RS63_KEYS));
+    fillLabeled(node, ["ATR%", "ATRS", "ATR"], pickNum(m, ["atr_pct", "atr"]) != null ? pickNum(m, ["atr_pct", "atr"]) : pickNum(card, ATR_KEYS));
+    rewriteAtr(node, card);
+  }
+  function rewriteAtr(node, card) {
+    if (!node) return;
+    var m = (card && card.metrics) || {};
+    var atr = pickNum(m, ["atr_pct", "atr"]);
+    if (atr == null) atr = pickNum(card, ATR_KEYS);
+    if (atr == null) return;
+    var shown = fmtAtr(atr);
+    if (!shown) return;
+    var els = node.querySelectorAll("span, b, i, em, dt, dd, div, td, th, strong, small, label");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.closest && el.closest(".fd-paper, .pills, .chips, .badges")) continue;
+      var text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      var up = text.toUpperCase();
+      if (up === "ATR%" || up === "ATR" || up === "ATRS") {
+        var sib = el.nextElementSibling;
+        if (sib) { sib.textContent = shown; return; }
+        for (var c = 0; c < el.children.length; c++) {
+          el.children[c].textContent = shown;
+          return;
+        }
+      }
+      if (up.indexOf("ATR% ") === 0 || up.indexOf("ATRS ") === 0 || up.indexOf("ATR ") === 0) {
+        var lab = up.indexOf("ATR%") === 0 ? "ATR%" : (up.indexOf("ATRS") === 0 ? "ATRS" : "ATR");
+        el.textContent = lab + " " + shown;
+        return;
+      }
+    }
   }
   function chipifyTags(node, card) {
     hideGhostMatrix(node, card);
@@ -1085,9 +1089,6 @@ def strip_js() -> str:
   function polishNode(node, card) {
     if (!node || node.nodeType !== 1) return node;
     node.classList.add("fd-card");
-    ensurePillsHost(node);
-    injectPills(node, (card && card.enrich_pills) || []);
-    chipifyTags(node, card);
     fillStats(node, card);
     stripBandWhy(node, card);
     node.setAttribute("data-fd-card-polished", "1");
@@ -1105,11 +1106,14 @@ def strip_js() -> str:
   function wrapCardHTML() {
     var fn = null;
     try { fn = window.cardHTML; } catch (e0) { fn = null; }
-    if (typeof fn === "function" && fn.__fdCard) return fn;
+    if (typeof fn === "function" && (fn.__fdCard || fn.__fdPaper)) {
+      window.cardHTML = fn;
+      return fn;
+    }
     if (typeof fn !== "function") {
       try { if (typeof cardHTML === "function") fn = cardHTML; } catch (e1) { fn = null; }
     }
-    if (typeof fn === "function" && fn.__fdCard) {
+    if (typeof fn === "function" && (fn.__fdCard || fn.__fdPaper)) {
       window.cardHTML = fn;
       return fn;
     }
@@ -1145,15 +1149,30 @@ def strip_js() -> str:
   }
   function renderRow(row) {
     row = row || {};
-    var found = findCard(row.ticker || row.t || row.d);
-    var card = normalizeCard(found, row);
+    var ticker = row.ticker || row.t || row.d;
+    if (!shortOf(ticker)) return null;
+    var found = findCard(ticker);
+    var card = found || normalizeCard(row.card || null, row);
+    if (!shortOf((card && (card.t || card.d || card.ticker)) || ticker)) return null;
+    if (found) {
+      if (!card.metrics || typeof card.metrics !== "object") card.metrics = {};
+      var m = card.metrics;
+      var rm = (row.metrics && typeof row.metrics === "object") ? row.metrics : {};
+      if (m.r20_pct == null && (rm.r20_pct != null || row.r20 != null)) m.r20_pct = rm.r20_pct != null ? rm.r20_pct : row.r20;
+      if (m.rs_63 == null && (rm.rs_63 != null || row.rs63 != null)) m.rs_63 = rm.rs_63 != null ? rm.rs_63 : row.rs63;
+      if (m.atr_pct == null && (rm.atr_pct != null || row.atr_pct != null)) m.atr_pct = rm.atr_pct != null ? rm.atr_pct : row.atr_pct;
+    }
     var node = renderCard(card);
     if (!node) return null;
     node.classList.remove("hide", "fd-bb-hid", "gics-hid");
     node.addEventListener("click", function (ev) {
       if (ev.target && ev.target.closest && ev.target.closest(".fd-paper, [data-fd-paper-act]")) return;
-      var sel = window.selectTicker || (typeof selectTicker === "function" ? selectTicker : null);
-      if (sel) sel(card.t || card.d || card.ticker || row.t);
+      var sel = null;
+      try { sel = window.selectTicker; } catch (e0) { sel = null; }
+      if (typeof sel !== "function") {
+        try { if (typeof selectTicker === "function") sel = selectTicker; } catch (e1) { sel = null; }
+      }
+      if (typeof sel === "function") sel(card.t || card.d || card.ticker || row.t);
     });
     return node;
   }
