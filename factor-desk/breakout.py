@@ -72,8 +72,32 @@ W_WEAK_ACCEL = 1.0  # names still ≤5 that only qualify via hard Δ
 RANK_CAP = 12
 MIN_COMPOSITE = 1.25  # do not fill the cap with junk
 
+# Price stats on ranked rows (same closes Mom cards use: px_series / prices_long).
+R20_N = 20
+RS63_N = 63
+ATR_N = 14
+BENCH_NAMES: tuple[str, ...] = (
+    "SPY US Equity",
+    "SPY",
+    "SPX Index",
+    "SPX",
+    "ES1 Index",
+    "QQQ US Equity",
+    "QQQ",
+)
+PX_SERIES_KEYS: tuple[str, ...] = (
+    "px_series",
+    "prices",
+    "closes",
+    "px_hist",
+    "history",
+    "px",
+    "hist",
+)
+
 DB_SCRIPT_ID = "fd-breakout-db"
 JS_SCRIPT_ID = "fd-breakout-js"
+JS_VER = "pr17-dense-nocardhtml"
 CSS_STYLE_ID = "fd-breakout-css"
 PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
@@ -153,6 +177,239 @@ _MOM_DOWN_BTN_RE = re.compile(
 def _short(ticker: str) -> str:
     parts = (ticker or "").split()
     return parts[0].upper() if parts else ""
+
+
+def _round_stat(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_close(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    return dapi_enrich.as_float(value)
+
+
+def closes_from_raw(raw: Any) -> list[float]:
+    """Extract a close series from px.by / hist / card px_series shapes."""
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            raw = json.loads(text)
+        except (TypeError, ValueError):
+            return []
+    out: list[float] = []
+
+    def push(value: Any) -> None:
+        px = _as_close(value)
+        if px is not None and px > 0:
+            out.append(float(px))
+
+    if isinstance(raw, Mapping):
+        for key in PX_SERIES_KEYS + ("c", "series"):
+            nested = closes_from_raw(raw.get(key))
+            if len(nested) >= 2:
+                return nested
+        dated: list[tuple[str, float]] = []
+        for key, val in raw.items():
+            if key in PX_SERIES_KEYS or key in {"by", "BY", "names"}:
+                continue
+            px = _as_close(val)
+            if px is None and isinstance(val, Mapping):
+                px = _as_close(
+                    val.get("c")
+                    or val.get("close")
+                    or val.get("px")
+                    or val.get("p")
+                    or val.get("last")
+                    or val.get("v")
+                )
+            if px is not None and px > 0:
+                dated.append((str(key), float(px)))
+        if dated:
+            dated.sort(key=lambda kv: kv[0])
+            return [px for _k, px in dated]
+        return out
+    if isinstance(raw, (list, tuple)):
+        for row in raw:
+            if isinstance(row, bool) or row is None:
+                continue
+            if isinstance(row, (int, float)):
+                push(row)
+                continue
+            if isinstance(row, (list, tuple)) and len(row) >= 2:
+                push(row[-1])
+                continue
+            if isinstance(row, Mapping):
+                push(
+                    row.get("c")
+                    or row.get("close")
+                    or row.get("px")
+                    or row.get("p")
+                    or row.get("last")
+                    or row.get("v")
+                    or row.get("price")
+                )
+        return out
+    push(raw)
+    return out
+
+
+def closes_from_card(card: Mapping[str, Any] | None) -> list[float]:
+    if not isinstance(card, Mapping):
+        return []
+    for key in PX_SERIES_KEYS:
+        got = closes_from_raw(card.get(key))
+        if len(got) >= 2:
+            return got
+    return []
+
+
+def closes_from_panel(panel: Mapping[str, Any] | None, ticker: str) -> list[float]:
+    if not isinstance(panel, Mapping) or not ticker:
+        return []
+    want = _short(ticker)
+    rec = panel.get(ticker)
+    if rec is None:
+        rec = panel.get(mom_streak._ticker_key(ticker))
+    if rec is None:
+        for key, val in panel.items():
+            if _short(str(key)) == want:
+                rec = val
+                break
+    if rec is None:
+        return []
+    if isinstance(rec, list) and rec and isinstance(rec[0], tuple) and len(rec[0]) >= 2:
+        out: list[float] = []
+        for _d, px in rec:
+            val = _as_close(px)
+            if val is not None and val > 0:
+                out.append(float(val))
+        return out
+    return closes_from_raw(rec)
+
+
+def ret_n(closes: Sequence[float], n: int) -> float | None:
+    """Percent return over ``n`` trading days (needs n+1 closes)."""
+    if n <= 0 or len(closes) < n + 1:
+        return None
+    start = float(closes[-(n + 1)])
+    last = float(closes[-1])
+    if start == 0:
+        return None
+    return _round_stat(100.0 * (last / start - 1.0))
+
+
+def atr_pct(closes: Sequence[float], period: int = ATR_N) -> float | None:
+    """Wilder ATR as percent of last close. Close-to-close TR when H/L absent."""
+    if period <= 0 or len(closes) < period + 1:
+        return None
+    trs = [abs(float(closes[i]) - float(closes[i - 1])) for i in range(1, len(closes))]
+    atr = sum(trs[:period]) / float(period)
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / float(period)
+    last = float(closes[-1])
+    if last == 0:
+        return None
+    return _round_stat(100.0 * atr / last)
+
+
+def _bench_closes(
+    panel: Mapping[str, Any] | None,
+    cards: Iterable[Mapping[str, Any]] | None = None,
+) -> list[float]:
+    for name in BENCH_NAMES:
+        got = closes_from_panel(panel, name)
+        if len(got) >= RS63_N + 1:
+            return got
+    for card in cards or []:
+        if not isinstance(card, Mapping):
+            continue
+        ticker = str(card.get("ticker") or card.get("t") or card.get("name") or "")
+        if _short(ticker) not in {"SPY", "SPX", "QQQ", "ES1"}:
+            continue
+        got = closes_from_card(card)
+        if len(got) >= RS63_N + 1:
+            return got
+    return []
+
+
+def _num_stat(src: Mapping[str, Any] | None, keys: Sequence[str]) -> float | None:
+    if not isinstance(src, Mapping):
+        return None
+    picked = card_render._pick_num(src, tuple(keys))
+    if isinstance(picked, bool) or picked is None or picked == "":
+        return None
+    try:
+        return float(picked)
+    except (TypeError, ValueError):
+        return None
+
+
+def px_stats(
+    card: Mapping[str, Any] | None = None,
+    panel: Mapping[str, Any] | None = None,
+    *,
+    ticker: str = "",
+    bench: Sequence[float] | None = None,
+) -> dict[str, float | None]:
+    """Day / R20 / RS63 / ATR% from existing card fields or price history."""
+    src = card if isinstance(card, Mapping) else {}
+    aliased = dict(src)
+    card_render.alias_stats(aliased)
+    existing = {
+        "day": _num_stat(aliased, card_render.DAY_KEYS),
+        "r20": _num_stat(aliased, card_render.R20_KEYS),
+        "rs63": _num_stat(aliased, card_render.RS63_KEYS),
+        "atr_pct": _num_stat(aliased, card_render.ATR_KEYS),
+    }
+    name = ticker or str(src.get("ticker") or src.get("t") or src.get("name") or "")
+    closes = closes_from_card(src)
+    if len(closes) < 2:
+        closes = closes_from_panel(panel, name)
+    day = existing["day"] if existing["day"] is not None else ret_n(closes, 1)
+    r20 = existing["r20"] if existing["r20"] is not None else ret_n(closes, R20_N)
+    atr = existing["atr_pct"] if existing["atr_pct"] is not None else atr_pct(closes)
+    rs63 = existing["rs63"]
+    if rs63 is None:
+        stock63 = ret_n(closes, RS63_N)
+        bench_closes = list(bench) if bench is not None else _bench_closes(panel, [src] if src else None)
+        bench63 = ret_n(bench_closes, RS63_N)
+        if stock63 is not None and bench63 is not None:
+            rs63 = _round_stat(stock63 - bench63)
+        else:
+            rs63 = stock63
+    return {"day": day, "r20": r20, "rs63": rs63, "atr_pct": atr}
+
+
+def attach_px_stats(
+    row: dict[str, Any],
+    card: Mapping[str, Any] | None = None,
+    panel: Mapping[str, Any] | None = None,
+    *,
+    bench: Sequence[float] | None = None,
+) -> dict[str, Any]:
+    """Write numeric Day/R20/RS63/ATR% onto a ranked row when prices exist."""
+    stats = px_stats(
+        card,
+        panel,
+        ticker=str(row.get("ticker") or row.get("t") or ""),
+        bench=bench,
+    )
+    for key, value in stats.items():
+        if value is not None:
+            row[key] = value
+        elif key not in row:
+            row[key] = None
+    return row
 
 
 def card_lists(card: Mapping[str, Any] | None) -> set[str]:
@@ -506,6 +763,8 @@ def rank_side(
     *,
     kind: str,
     cap: int = RANK_CAP,
+    panel: Mapping[str, Any] | None = None,
+    bench: Sequence[float] | None = None,
 ) -> list[dict[str, Any]]:
     score_key = "breakout_score" if kind == "breakout" else "breakdown_score"
     rows: list[dict[str, Any]] = []
@@ -515,6 +774,7 @@ def rank_side(
         row = score_one(card, hist, kind=kind)
         if row:
             row["_card"] = card
+            attach_px_stats(row, card, panel, bench=bench)
             rows.append(row)
     rows = _dedupe_best(rows, score_key)
     rows.sort(key=lambda r: float(r.get(score_key) or 0), reverse=True)
@@ -526,11 +786,17 @@ def rank_book(
     hist: Mapping[str, Any] | None = None,
     *,
     cap: int = RANK_CAP,
+    root: Any = None,
+    prices: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Select at most ``cap`` (8–12) names per side, ranked by documented score."""
     src = [c for c in (cards or []) if isinstance(c, Mapping)]
-    breakout = rank_side(src, hist, kind="breakout", cap=cap)
-    breakdown = rank_side(src, hist, kind="breakdown", cap=cap)
+    panel = prices
+    if panel is None:
+        panel, _rel = mom_streak.load_price_panel(root)
+    bench = _bench_closes(panel, src)
+    breakout = rank_side(src, hist, kind="breakout", cap=cap, panel=panel, bench=bench)
+    breakdown = rank_side(src, hist, kind="breakdown", cap=cap, panel=panel, bench=bench)
     return {
         "breakout": breakout,
         "breakdown": breakdown,
@@ -540,7 +806,7 @@ def rank_book(
 
 
 def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
-    """JSON-safe db. Each row carries a slim portable MOM card (no series)."""
+    """JSON-safe db. Top-level Day/R20/RS63/ATR% plus a slim MOM card (no series)."""
     ranked = ranked or {}
 
     def slim(rows: Any, score_key: str) -> list[dict[str, Any]]:
@@ -549,6 +815,16 @@ def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
             if not isinstance(row, Mapping):
                 continue
             src = row.get("_card") if isinstance(row.get("_card"), Mapping) else None
+            stats = px_stats(src, ticker=str(row.get("ticker") or row.get("t") or ""))
+            for key in ("day", "r20", "rs63", "atr_pct"):
+                if row.get(key) is not None and row.get(key) != "":
+                    stats[key] = row.get(key)
+            merged = dict(row)
+            merged.update({k: v for k, v in stats.items() if v is not None})
+            card = card_render.portable_card(src, merged) or {}
+            for key, value in stats.items():
+                if value is not None:
+                    card.setdefault(key, value)
             payload = {
                 "t": row.get("t") or _short(str(row.get("ticker") or "")),
                 "ticker": row.get("ticker"),
@@ -560,8 +836,12 @@ def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
                 "label": row.get("label"),
                 score_key: row.get(score_key),
                 "why": row.get("why"),
+                "day": stats.get("day"),
+                "r20": stats.get("r20"),
+                "rs63": stats.get("rs63"),
+                "atr_pct": stats.get("atr_pct"),
                 "pills": card_render.why_pills(row),
-                "card": card_render.portable_card(src, row),
+                "card": card,
             }
             out.append(payload)
         return out
@@ -598,6 +878,19 @@ article.fd-bb-card, .fd-bb-card {{
   font-size: 12px;
   margin: 8px 0;
 }}
+#breakout-grid article.card .stats,
+#breakdown-grid article.card .stats {{
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 11px;
+  color: #d1d5db;
+  margin-top: 6px;
+}}
+#breakout-grid article.card .stats span,
+#breakdown-grid article.card .stats span {{
+  white-space: nowrap;
+}}
 .nav-btn[data-view="breakout"].is-on,
 .nav-btn[data-view="breakout"].on,
 .btn.nav-btn[data-view="breakout"].on,
@@ -616,20 +909,23 @@ article.fd-bb-card, .fd-bb-card {{
 
 
 def strip_js() -> str:
-    """Fill #breakout-grid / #breakdown-grid via the shared MOM card renderer.
+    """Fill #breakout-grid / #breakdown-grid with dense MOM-style cards.
 
     Tabs only choose which rows to show. Markup comes from
-    ``window.__FD_RENDER_ROW__`` / live ``cardHTML`` (see ``card_render.py``),
-    not a Breakout-specific skin. Capture-phase click stops the live topnav
-    listener. ``show`` is ``window.__FD_BB_SHOW__`` so a patched live
-    ``setView`` early-returns without ``paint()`` and without toggling
-    legacy ``#fd-bb-*`` panes.
+    ``window.__FD_RENDER_ROW__`` when that path does **not** paint a digest
+    matrix. Breakout **never** calls live ``cardHTML`` — that fallback is
+    what paints the 12-label gray ghost. Missing portable render → dense
+    ticker / score / Day / R20 / RS63 / ATR% card. Capture-phase click
+    stops the live topnav listener. ``show`` is ``window.__FD_BB_SHOW__``.
     """
     view_ids = json.dumps(list(NATIVE_VIEW_IDS))
     return rf"""
 (function () {{
-  if (window.__FD_BB_BOUND__) return;
-  window.__FD_BB_BOUND__ = true;
+  var BB_VER = "{JS_VER}";
+  if (window.__FD_BB_BOUND__ === BB_VER) return;
+  window.__FD_BB_BOUND__ = BB_VER;
+  window.__FD_BB_NO_CARDHTML_FALLBACK__ = true;
+  window.__FD_BB_PORTABLE_FIX__ = true;
   var DB_ID = "fd-breakout-db";
   var VIEW_BO = "view-breakout";
   var VIEW_BD = "view-breakdown";
@@ -638,6 +934,9 @@ def strip_js() -> str:
   var LEGACY_BO = "fd-bb-breakout";
   var LEGACY_BD = "fd-bb-breakdown";
   var NATIVE_VIEWS = {view_ids};
+  var TAG_CATALOG = ["MA FAN","CLOSE HI","52W HI","HM/HL","V.EMA","ABOVE 50","ABOVE 200","MOM+","TREND↑","SQUEEZE","RS+","BREAKOUT"];
+  var TAG_SET = {{}};
+  for (var ti = 0; ti < TAG_CATALOG.length; ti++) TAG_SET[TAG_CATALOG[ti]] = true;
 
   function $(id) {{ return document.getElementById(id); }}
   function db() {{
@@ -647,44 +946,248 @@ def strip_js() -> str:
     catch (e) {{ return {{ breakout: [], breakdown: [] }}; }}
   }}
   function shortOf(t) {{ return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }}
-  function renderRow(row) {{
+  function esc(s) {{
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }}
+  function fmt(v) {{
+    if (v == null || v === "") return "—";
+    if (typeof v === "number" && isFinite(v)) return String(v);
+    var s = String(v).trim();
+    if (!s || s === "-" || s === "—" || s === "–") return "—";
+    return s;
+  }}
+  function pickNum(obj, keys) {{
+    if (!obj) return null;
+    for (var i = 0; i < keys.length; i++) {{
+      var v = obj[keys[i]];
+      if (v == null || v === "" || v === true || v === false) continue;
+      if (typeof v === "number" && isFinite(v)) return v;
+      var s = String(v).trim();
+      if (!s || s === "-" || s === "—" || s === "–") continue;
+      var n = parseFloat(s.replace("%", "").replace(",", ""));
+      if (isFinite(n)) return n;
+    }}
+    return null;
+  }}
+  function asCloses(raw) {{
+    if (raw == null || raw === "") return [];
+    if (typeof raw === "string") {{
+      try {{ raw = JSON.parse(raw); }} catch (e0) {{ return []; }}
+    }}
+    var out = [];
+    function push(v) {{
+      var n = typeof v === "number" ? v : parseFloat(v);
+      if (isFinite(n) && n > 0) out.push(n);
+    }}
+    if (Array.isArray(raw)) {{
+      for (var i = 0; i < raw.length; i++) {{
+        var row = raw[i];
+        if (typeof row === "number" || typeof row === "string") push(row);
+        else if (Array.isArray(row) && row.length >= 2) push(row[row.length - 1]);
+        else if (row && typeof row === "object") push(row.c || row.close || row.px || row.p || row.last || row.v || row.price);
+      }}
+      return out;
+    }}
+    if (raw && typeof raw === "object") {{
+      var nestedKeys = ["px_series","prices","closes","px_hist","history","px","hist","c","series"];
+      for (var k = 0; k < nestedKeys.length; k++) {{
+        var nested = asCloses(raw[nestedKeys[k]]);
+        if (nested.length >= 2) return nested;
+      }}
+      var dates = Object.keys(raw).sort();
+      for (var d = 0; d < dates.length; d++) {{
+        var val = raw[dates[d]];
+        if (typeof val === "number" || typeof val === "string") push(val);
+        else if (val && typeof val === "object") push(val.c || val.close || val.px || val.p || val.last);
+      }}
+    }}
+    return out;
+  }}
+  function lookupPx(ticker) {{
+    var want = shortOf(ticker);
+    if (!want) return [];
+    var bags = [window.px, window.PX, window.prices, window.PRICES, window.hist, window.HIST];
+    if (window.MOM) bags.push(window.MOM.px, window.MOM.hist, window.MOM.prices);
+    for (var i = 0; i < bags.length; i++) {{
+      var bag = bags[i];
+      if (!bag) continue;
+      var by = bag.by || bag.BY || bag.names || bag;
+      if (!by || typeof by !== "object") continue;
+      var rec = by[want] || by[ticker] || by[want + " US Equity"];
+      if (!rec) {{
+        var keys = Object.keys(by);
+        for (var k = 0; k < keys.length; k++) {{
+          if (shortOf(keys[k]) === want) {{ rec = by[keys[k]]; break; }}
+        }}
+      }}
+      var closes = asCloses(rec);
+      if (closes.length >= 2) return closes;
+    }}
+    return [];
+  }}
+  function retN(closes, n) {{
+    if (!closes || n <= 0 || closes.length < n + 1) return null;
+    var a = closes[closes.length - (n + 1)];
+    var b = closes[closes.length - 1];
+    if (!isFinite(a) || !isFinite(b) || a === 0) return null;
+    return Math.round((100 * (b / a - 1)) * 100) / 100;
+  }}
+  function atrPct(closes, period) {{
+    period = period || 14;
+    if (!closes || closes.length < period + 1) return null;
+    var atr = 0;
+    for (var i = 1; i <= period; i++) atr += Math.abs(closes[i] - closes[i - 1]);
+    atr = atr / period;
+    for (var j = period + 1; j < closes.length; j++) {{
+      atr = (atr * (period - 1) + Math.abs(closes[j] - closes[j - 1])) / period;
+    }}
+    var last = closes[closes.length - 1];
+    if (!isFinite(last) || last === 0) return null;
+    return Math.round((100 * atr / last) * 100) / 100;
+  }}
+  function benchCloses() {{
+    var names = ["SPY","SPY US Equity","SPX","SPX Index","QQQ","QQQ US Equity"];
+    for (var i = 0; i < names.length; i++) {{
+      var got = lookupPx(names[i]);
+      if (got.length >= 64) return got;
+    }}
+    return [];
+  }}
+  function mergeStats(row) {{
     row = row || {{}};
-    if (typeof window.__FD_RENDER_ROW__ === "function") {{
-      var node = window.__FD_RENDER_ROW__(row);
-      if (node) {{
-        node.classList.remove("hide", "fd-bb-hid", "gics-hid");
-        return node;
-      }}
+    var card = (row.card && typeof row.card === "object") ? row.card : {{}};
+    var t = row.t || row.ticker || card.t || card.ticker || "";
+    var closes = lookupPx(t);
+    var bench = benchCloses();
+    var computed = {{
+      day: retN(closes, 1),
+      r20: retN(closes, 20),
+      rs63: (function () {{
+        var s = retN(closes, 63);
+        var b = retN(bench, 63);
+        if (s != null && b != null) return Math.round((s - b) * 100) / 100;
+        return s;
+      }})(),
+      atr_pct: atrPct(closes, 14)
+    }};
+    var dayKeys = ["day","Day","d1","ret_1d","r1","R1"];
+    var r20Keys = ["r20","R20","ret20","ret_20","ret_20d","RET_20D"];
+    var rsKeys = ["rs63","RS63","rs_63","rel_63","RS_63"];
+    var atrKeys = ["atr_pct","atrpct","ATR_PCT","atrs","ATRS","atr","ATR"];
+    function take(keys, fallback) {{
+      var v = pickNum(row, keys);
+      if (v == null) v = pickNum(card, keys);
+      if (v == null) v = fallback;
+      return v;
     }}
-    var norm = window.__FD_NORMALIZE_CARD__;
-    var find = window.__FD_FIND_CARD__;
-    var render = window.__FD_RENDER_CARD__;
-    var card = typeof norm === "function"
-      ? norm((typeof find === "function" ? find(row.ticker || row.t) : null), row)
-      : row;
-    var display = shortOf((card && (card.d || card.t || card.ticker || card.name)) || row.t || row.ticker || "");
-    if (!display) return null;
-    if (typeof render === "function") {{
-      var painted = render(card);
-      if (painted) {{
-        painted.classList.remove("hide", "fd-bb-hid", "gics-hid");
-        return painted;
-      }}
+    row.day = take(dayKeys, computed.day);
+    row.r20 = take(r20Keys, computed.r20);
+    row.rs63 = take(rsKeys, computed.rs63);
+    row.atr_pct = take(atrKeys, computed.atr_pct);
+    if (row.day != null) card.day = row.day;
+    if (row.r20 != null) {{ card.r20 = row.r20; if (card.R20 == null) card.R20 = row.r20; }}
+    if (row.rs63 != null) {{ card.rs63 = row.rs63; if (card.RS63 == null) card.RS63 = row.rs63; }}
+    if (row.atr_pct != null) {{ card.atr_pct = row.atr_pct; if (card.atrs == null) card.atrs = row.atr_pct; }}
+    if (row.score != null && card.score == null) card.score = row.score;
+    if (!card.t) card.t = shortOf(t);
+    if (!card.d) card.d = card.t;
+    if (!card.ticker) card.ticker = row.ticker || t;
+    row.card = card;
+    return row;
+  }}
+  function pillsHTML(pills) {{
+    if (!Array.isArray(pills)) return "";
+    var bits = [];
+    for (var i = 0; i < pills.length; i++) {{
+      var p = pills[i];
+      if (!p || !p.label) continue;
+      bits.push(
+        '<span class="badge spike-chip ' + esc(p.cls || "") + '" data-key="' + esc(p.key || "") + '"' +
+        (p.title ? ' title="' + esc(p.title) + '"' : "") + ">" + esc(p.label) + "</span>"
+      );
     }}
-    var fn = null;
-    try {{ if (typeof window.cardHTML === "function") fn = window.cardHTML; }} catch (e1) {{ fn = null; }}
-    if (!fn) {{ try {{ if (typeof cardHTML === "function") fn = cardHTML; }} catch (e2) {{ fn = null; }} }}
-    if (!fn) return null;
-    var wrap = document.createElement("div");
-    wrap.innerHTML = fn(card);
-    var fallback = wrap.firstElementChild;
-    if (!fallback) return null;
-    fallback.classList.remove("hide", "fd-bb-hid", "gics-hid");
-    fallback.addEventListener("click", function () {{
+    return bits.join("");
+  }}
+  function denseHTML(row) {{
+    row = mergeStats(row || {{}});
+    var card = row.card || {{}};
+    var t = esc(shortOf(card.d || card.t || row.t || row.ticker || ""));
+    var score = row.score != null ? row.score : (card.score != null ? card.score : (card.mom_score != null ? card.mom_score : ""));
+    var pills = Array.isArray(row.pills) && row.pills.length ? row.pills : (card.enrich_pills || []);
+    return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(card.ticker || t) + '" data-fd-bb-dense="1">' +
+      "<header><h2>" + t + '</h2><span class="sc">' + esc(String(score)) + "</span>" +
+      '<div class="pills">' + pillsHTML(pills) + "</div></header>" +
+      '<div class="stats">' +
+        "<span>Day " + esc(fmt(row.day)) + "</span>" +
+        "<span>R20 " + esc(fmt(row.r20)) + "</span>" +
+        "<span>RS63 " + esc(fmt(row.rs63)) + "</span>" +
+        "<span>ATR% " + esc(fmt(row.atr_pct)) + "</span>" +
+      "</div></article>";
+  }}
+  function hasGhostMatrix(node) {{
+    if (!node || !node.querySelectorAll) return false;
+    var n = 0;
+    var els = node.querySelectorAll("div, span, td, li, b, i, small");
+    for (var i = 0; i < els.length; i++) {{
+      var el = els[i];
+      if (el.classList && (el.classList.contains("badge") || el.classList.contains("spike-chip"))) continue;
+      var own = "";
+      for (var c = el.firstChild; c; c = c.nextSibling) {{
+        if (c.nodeType === 3) own += c.textContent;
+      }}
+      var lab = String(own || "").replace(/\s+/g, " ").trim().toUpperCase();
+      if (TAG_SET[lab]) n++;
+    }}
+    return n >= 6;
+  }}
+  function bindSelect(node, row, card) {{
+    if (!node || node.__fdBbClick) return node;
+    node.__fdBbClick = true;
+    node.addEventListener("click", function (ev) {{
+      if (ev.target && ev.target.closest && ev.target.closest(".fd-paper, [data-fd-paper-act]")) return;
       var sel = window.selectTicker || (typeof selectTicker === "function" ? selectTicker : null);
-      if (sel) sel(card.t || card.d || card.ticker || row.t);
+      if (sel) sel((card && (card.t || card.d || card.ticker)) || (row && (row.t || row.ticker)));
     }});
-    return fallback;
+    return node;
+  }}
+  function fromHTML(html, row, card) {{
+    var wrap = document.createElement("div");
+    wrap.innerHTML = String(html || "");
+    var node = wrap.firstElementChild;
+    if (!node) return null;
+    node.classList.remove("hide", "fd-bb-hid", "gics-hid");
+    return bindSelect(node, row, card);
+  }}
+  function tryPortable(row) {{
+    if (typeof window.__FD_RENDER_ROW__ === "function") {{
+      try {{
+        var node = window.__FD_RENDER_ROW__(row);
+        if (node && !hasGhostMatrix(node)) {{
+          node.classList.remove("hide", "fd-bb-hid", "gics-hid");
+          return node;
+        }}
+      }} catch (e0) {{}}
+    }}
+    var render = window.__FD_RENDER_CARD__;
+    var norm = window.__FD_NORMALIZE_CARD__;
+    if (typeof render === "function") {{
+      try {{
+        var card = typeof norm === "function" ? norm(row.card || null, row) : (row.card || row);
+        var painted = render(card);
+        if (painted && !hasGhostMatrix(painted)) {{
+          painted.classList.remove("hide", "fd-bb-hid", "gics-hid");
+          return painted;
+        }}
+      }} catch (e1) {{}}
+    }}
+    return null;
+  }}
+  function renderRow(row) {{
+    row = mergeStats(row || {{}});
+    var node = tryPortable(row);
+    if (node) return node;
+    return fromHTML(denseHTML(row), row, row.card || row);
   }}
   function fillGrid(grid, rows) {{
     if (!grid) return;
@@ -753,6 +1256,7 @@ def strip_js() -> str:
   }}
   window.__FD_BB_SHOW__ = show;
   window.__FD_BB_SYNC_NAV__ = syncNav;
+  window.__FD_BB_RENDER_ROW__ = renderRow;
   function kindOf(btn) {{
     if (!btn || !btn.getAttribute) return "";
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
@@ -766,7 +1270,10 @@ def strip_js() -> str:
     if (btn.classList && (btn.classList.contains("nav-btn") || view)) return "other";
     return "";
   }}
-  document.addEventListener("click", function (ev) {{
+  if (window.__FD_BB_CLICK__) {{
+    document.removeEventListener("click", window.__FD_BB_CLICK__, true);
+  }}
+  window.__FD_BB_CLICK__ = function (ev) {{
     var t = ev.target && ev.target.closest ? ev.target.closest("button, [data-view], [data-fd-breakout], [data-fd-breakdown]") : ev.target;
     var kind = kindOf(t);
     if (!kind) return;
@@ -778,11 +1285,13 @@ def strip_js() -> str:
       return;
     }}
     if (kind === "other") show("");
-  }}, true);
+  }};
+  document.addEventListener("click", window.__FD_BB_CLICK__, true);
   function installSetViewBridge() {{
     var orig = window.setView;
-    if (typeof orig !== "function" || orig.__fdBb) return;
-    window.setView = function (v) {{
+    if (typeof orig === "function" && orig.__fdBb) orig = orig.__fdBbOrig || orig;
+    if (typeof orig !== "function") return;
+    var wrapped = function (v) {{
       var kind = String(v || "").toLowerCase();
       if (kind === "breakout" || kind === "breakdown") {{
         show(kind);
@@ -792,7 +1301,9 @@ def strip_js() -> str:
       show("");
       return orig.apply(this, arguments);
     }};
-    window.setView.__fdBb = true;
+    wrapped.__fdBb = true;
+    wrapped.__fdBbOrig = orig.__fdBbOrig || orig;
+    window.setView = wrapped;
   }}
   installSetViewBridge();
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", installSetViewBridge);
@@ -1075,27 +1586,36 @@ def _ensure_db(html_text: str, ranked: Mapping[str, Any] | None) -> str:
     return html_text + tag
 
 
-def _ensure_js(html_text: str) -> str:
-    script = f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
-    text, n = re.subn(
-        rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
-        lambda _m: script,
-        html_text,
-        count=1,
+def _replace_id_script(html_text: str, script_id: str, script: str) -> str:
+    """Drop every copy of ``script_id`` then inject ``script`` before ``</body>``.
+
+    Replaces even when an older embed used a different attribute order, and
+    even when ``ranked is None``. Duplicate leftover tags cannot keep an old
+    ``__FD_BB_BOUND__`` IIFE in front of the new one.
+    """
+    text = re.sub(
+        rf'<script\b[^>]*\bid=["\']{script_id}["\'][^>]*>.*?</script>\s*',
+        "",
+        html_text or "",
         flags=re.I | re.S,
     )
-    if n:
-        return text
-    if "</body>" in html_text:
-        return html_text.replace("</body>", script + "</body>", 1)
-    return html_text + script
+    if "</body>" in text:
+        return text.replace("</body>", script + "</body>", 1)
+    return text + script
+
+
+def _ensure_js(html_text: str) -> str:
+    script = f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
+    return _replace_id_script(html_text, JS_SCRIPT_ID, script)
 
 
 def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> str:
-    """Nav buttons + view shells + filled db + JS. Safe on live ~2.7MB HTML. No Sectors tab.
+    """Nav buttons + view shells + filled db + JS. Safe on live ~2.7–4.8MB HTML.
 
     ``ranked=None`` must not wipe ``#fd-breakout-db``. View shells stay; legacy
-    ``#fd-bb-*`` are emptied. Always pass ``rank_book(...)`` on a live write.
+    ``#fd-bb-*`` are emptied. JS is **always** replaced (never skipped when
+    ``ranked is None``) so a recopy refreshes ``renderRow``. Always pass
+    ``rank_book(...)`` on a live write so stats stay filled.
     """
     text = html_text or ""
     # Buttons before CSS: CSS selectors contain ``data-view="breakout"`` text.

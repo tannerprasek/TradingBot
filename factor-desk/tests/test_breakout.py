@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -173,9 +175,93 @@ class RankingTests(unittest.TestCase):
         self.assertEqual(card["atr_pct"], 2.1)
         self.assertEqual(card["tags"], ["MA FAN", "BREAKOUT"])
         self.assertNotIn("px_series", card)
+        self.assertEqual(payload["breakout"][0]["r20"], 1.2)
+        self.assertEqual(payload["breakout"][0]["rs63"], 0.4)
+        self.assertEqual(payload["breakout"][0]["atr_pct"], 2.1)
+        self.assertIsNotNone(payload["breakout"][0]["card"])
         blob = json.dumps(payload)
         self.assertNotIn("px_series", blob)
         self.assertIn("fd-bb-band", json.dumps(payload["breakout"][0]["pills"]))
+
+    def test_px_stats_from_close_history(self) -> None:
+        spy = [100.0]
+        spcx = [50.0]
+        for _ in range(80):
+            spy.append(round(spy[-1] * 1.001, 6))
+            spcx.append(round(spcx[-1] * 1.004, 6))
+        stats = bo.px_stats(
+            {"ticker": "SPCX US Equity", "px_series": spcx},
+            {"SPY US Equity": [(None, px) for px in spy]},
+            ticker="SPCX US Equity",
+        )
+        self.assertIsInstance(stats["r20"], float)
+        self.assertIsInstance(stats["rs63"], float)
+        self.assertIsInstance(stats["atr_pct"], float)
+        self.assertIsInstance(stats["day"], float)
+        self.assertGreater(stats["r20"], 0)
+        self.assertGreater(stats["atr_pct"], 0)
+        self.assertNotEqual(stats["r20"], stats["rs63"])
+
+    def test_slim_payload_computes_stats_when_card_fields_null(self) -> None:
+        closes = [100.0]
+        for i in range(70):
+            closes.append(round(closes[-1] * (1.01 if i % 3 else 0.997), 6))
+        ranked = {
+            "breakout": [
+                {
+                    "t": "SPCX",
+                    "ticker": "SPCX US Equity",
+                    "score": 9,
+                    "r20": None,
+                    "rs63": None,
+                    "atr_pct": None,
+                    "card": None,
+                    "why": "band 9",
+                    "_card": {
+                        "t": "SPCX",
+                        "ticker": "SPCX US Equity",
+                        "score": 9,
+                        "px_series": closes,
+                    },
+                }
+            ],
+            "breakdown": [],
+        }
+        payload = bo.slim_payload(ranked)
+        row = payload["breakout"][0]
+        self.assertIsInstance(row["r20"], float)
+        self.assertIsInstance(row["rs63"], float)
+        self.assertIsInstance(row["atr_pct"], float)
+        self.assertIsInstance(row["day"], float)
+        self.assertIsInstance(row["card"], dict)
+        self.assertEqual(row["card"]["r20"], row["r20"])
+        self.assertNotIn("px_series", json.dumps(payload))
+
+    def test_rank_book_fills_stats_from_prices_long(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            start = date(2026, 5, 4)
+            days = _weekdays(start, 80)
+            lines = ["date,ticker,close"]
+            spy = 400.0
+            px = 20.0
+            for i, d in enumerate(days):
+                spy *= 1.001
+                px *= 1.003
+                lines.append(f"{d.isoformat()},SPY US Equity,{spy:.4f}")
+                lines.append(f"{d.isoformat()},SPCX US Equity,{px:.4f}")
+            (root / "prices_long.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            hist, card = _hist_and_card("SPCX US Equity", [6, 7, 8, 8, 9, 9, 10])
+            ranked = bo.rank_book([card], hist, root=root)
+            self.assertTrue(ranked["breakout"], ranked)
+            row = ranked["breakout"][0]
+            self.assertIsInstance(row.get("r20"), float)
+            self.assertIsInstance(row.get("rs63"), float)
+            self.assertIsInstance(row.get("atr_pct"), float)
+            slim = bo.slim_payload(ranked)["breakout"][0]
+            self.assertIsInstance(slim["r20"], float)
+            self.assertIsInstance(slim["atr_pct"], float)
+            self.assertGreater(slim["atr_pct"], 0)
 
 
 class EmbedTests(unittest.TestCase):
@@ -307,9 +393,13 @@ function syncNav() {}
         self.assertIn("search-pane", js)
         self.assertIn("__FD_RENDER_ROW__", js)
         self.assertIn("__FD_RENDER_CARD__", js)
-        self.assertIn("cardHTML", js)
+        self.assertIn("denseHTML", js)
+        self.assertIn("__FD_BB_NO_CARDHTML_FALLBACK__", js)
+        self.assertIn(bo.JS_VER, js)
+        self.assertNotIn("window.cardHTML", js)
+        self.assertNotRegex(js, r"\bcardHTML\s*\(")
         self.assertIn("selectTicker", js)
-        self.assertIn("if (!display) return null", js)
+        self.assertNotIn("if (!display) return null", js)
         self.assertNotIn("fd-bb-card", js)
         self.assertNotIn('key: "fd-bb"', js)
         self.assertNotIn("cls: \"fd-bb-why\"", js)
@@ -379,6 +469,170 @@ function syncNav() {}
         self.assertIn('id="view-breakout"', kept)
         self.assertIn('id="breakout-grid"', kept)
 
+    def test_ensure_embedded_none_refreshes_js_without_cardhtml(self) -> None:
+        old_js = """
+<script id="fd-breakout-js">
+(function () {
+  if (window.__FD_BB_BOUND__) return;
+  window.__FD_BB_BOUND__ = true;
+  function renderRow(row) {
+    var fn = window.cardHTML;
+    return fn(row);
+  }
+})();
+</script>
+"""
+        html = f"""<!DOCTYPE html><html><body>
+<nav><button>Momentum Down</button></nav>
+<script type="application/json" id="fd-breakout-db">{{"breakout":[{{"t":"SPCX","ticker":"SPCX US Equity","score":9,"r20":null,"rs63":null,"atr_pct":null,"card":null,"why":"band 9"}}],"breakdown":[]}}</script>
+{old_js}
+</body></html>"""
+        self.assertEqual(html.count("id=\"fd-breakout-js\""), 1)
+        self.assertIn("window.cardHTML", html)
+        out = bo.ensure_embedded(html, None)
+        scripts = re.findall(
+            r'<script\b[^>]*id=["\']fd-breakout-js["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertEqual(len(scripts), 1, "duplicate fd-breakout-js left behind")
+        js = scripts[0]
+        self.assertIn(bo.JS_VER, js)
+        self.assertIn("__FD_BB_NO_CARDHTML_FALLBACK__", js)
+        self.assertIn("denseHTML", js)
+        self.assertNotIn("window.cardHTML", js)
+        self.assertNotRegex(js, r"\bcardHTML\s*\(")
+        db_blob = re.search(
+            r'<script\b[^>]*id=["\']fd-breakout-db["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(db_blob)
+        data = json.loads(db_blob.group(1))
+        self.assertEqual(data["breakout"][0]["t"], "SPCX")
+
+    def test_strip_js_never_calls_cardhtml(self) -> None:
+        js = bo.strip_js()
+        self.assertNotIn("cardHTML", js)
+        self.assertIn("denseHTML", js)
+        self.assertIn("Day ", js)
+        self.assertIn("R20 ", js)
+        self.assertIn("RS63 ", js)
+        self.assertIn("ATR% ", js)
+        self.assertIn("hasGhostMatrix", js)
+
+    def test_jsdom_dense_fallback_fills_stats_without_ghost(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        jsdom_root = Path("/tmp/fd-jsdom")
+        jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+        if not jsdom_mod.is_dir():
+            jsdom_root.mkdir(parents=True, exist_ok=True)
+            npm = shutil.which("npm")
+            if not npm:
+                self.skipTest("npm not installed")
+            subprocess.run(
+                [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        closes = [100.0]
+        for i in range(70):
+            closes.append(round(closes[-1] * (1.008 if i % 2 else 0.997), 6))
+        live = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<nav>
+  <button class="btn" data-view="home">Home</button>
+  <button class="btn">Momentum Down</button>
+</nav>
+<div id="home">FLAGS</div>
+<div id="breakout-grid" class="grid dense"></div>
+<script>
+window.MOM = { cards: [], up: [] };
+window.px = { by: {} };
+function cardHTML(c) {
+  return '<article class="card"><div class="digest"><div>MA FAN</div><div>CLOSE HI</div><div>52W HI</div><div>HM/HL</div><div>V.EMA</div><div>ABOVE 50</div><div>ABOVE 200</div><div>MOM+</div><div>TREND↑</div><div>SQUEEZE</div><div>RS+</div><div>BREAKOUT</div></div><div class="stats"><span>R20 -</span><span>RS63 -</span><span>ATR% -</span></div></article>';
+}
+</script>
+</body></html>"""
+        html = bo.ensure_embedded(
+            live,
+            {
+                "breakout": [
+                    {
+                        "t": "SPCX",
+                        "ticker": "SPCX US Equity",
+                        "score": 9,
+                        "delta": 2,
+                        "lookback": 7,
+                        "label": "↑3d>5",
+                        "side": "above",
+                        "why": "band 9",
+                        "r20": None,
+                        "rs63": None,
+                        "atr_pct": None,
+                        "card": None,
+                    }
+                ],
+                "breakdown": [],
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            runner = Path(tmp) / "run.js"
+            page.write_text(html, encoding="utf-8")
+            runner.write_text(
+                f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+const html = fs.readFileSync({json.dumps(str(page))}, "utf8");
+const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1/factorbook.html" }});
+const window = dom.window;
+window.px = {{ by: {{ SPCX: {json.dumps(closes)} }} }};
+const called = [];
+const orig = window.cardHTML;
+window.cardHTML = function () {{ called.push("cardHTML"); return orig.apply(this, arguments); }};
+const row = JSON.parse(window.document.getElementById("fd-breakout-db").textContent).breakout[0];
+const node = window.__FD_BB_RENDER_ROW__(row);
+if (!node) {{ console.log(JSON.stringify({{error:"no node"}})); process.exit(2); }}
+const report = {{
+  called: called,
+  flags: {{ portable: !!window.__FD_BB_PORTABLE_FIX__, noCard: !!window.__FD_BB_NO_CARDHTML_FALLBACK__ }},
+  dense: node.getAttribute("data-fd-bb-dense"),
+  text: (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim(),
+  html: node.outerHTML
+}};
+console.log(JSON.stringify(report));
+""",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [node, str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            report = json.loads(proc.stdout.strip().splitlines()[-1])
+            self.assertEqual(report["called"], [], report)
+            self.assertTrue(report["flags"]["noCard"])
+            self.assertEqual(report.get("dense"), "1")
+            text = report["text"]
+            self.assertIn("SPCX", text)
+            self.assertNotIn("CLOSE HI", text)
+            self.assertNotIn("SQUEEZE", text)
+            self.assertNotIn("V.EMA", text)
+            self.assertIn("R20 ", text)
+            self.assertNotIn("R20 —", text)
+            self.assertNotIn("R20 -", text)
+            self.assertIn("ATR%", text)
+            self.assertRegex(text, r"R20 -?\d")
+
     def test_write_combined_patches_live_html_with_tabs_and_delta(self) -> None:
         body = """<!DOCTYPE html>
 <html><head><title>Factor Desk</title>
@@ -436,7 +690,18 @@ function syncNav() {}
             self.assertIn('id="fd-book-delta"', text)
             self.assertIn("baseline set", text)
             self.assertIn('id="fd-hitch-db"', text)
+            self.assertIn('id="fd-paper-marks"', text)
+            self.assertIn('id="fd-paper-js"', text)
+            self.assertIn('id="view-experimental"', text)
             self.assertNotIn('data-tab="sectors"', text)
+            bb_js = re.search(
+                r'<script\b[^>]*id=["\']fd-breakout-js["\'][^>]*>(.*?)</script>',
+                text,
+                re.I | re.S,
+            )
+            self.assertIsNotNone(bb_js)
+            self.assertNotIn("cardHTML", bb_js.group(1))
+            self.assertIn("denseHTML", bb_js.group(1))
             self.assertTrue((root / book_delta.SNAPSHOT_FILENAME).is_file())
             snap = json.loads((root / book_delta.SNAPSHOT_FILENAME).read_text(encoding="utf-8"))
             self.assertIn("names", snap)

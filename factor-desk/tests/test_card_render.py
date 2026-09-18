@@ -172,6 +172,8 @@ class EmbedTests(unittest.TestCase):
         self.assertIn("fd-bb-band", out)
         self.assertIn("labels[t]", out)
         self.assertIn("article.card .badge", out)
+        self.assertIn("Day ", out)
+        self.assertIn(cr.JS_VER, out)
         again = cr.ensure_embedded(out)
         self.assertEqual(len(re.findall(r'id="fd-card-js"', again)), 1)
         self.assertEqual(len(re.findall(r'id="fd-card-css"', again)), 1)
@@ -315,6 +317,7 @@ console.log(JSON.stringify(report));
             self.assertIn("R20 1.2", text)
             self.assertIn("RS63 0.4", text)
             self.assertIn("ATR% 2.1", text)
+            self.assertIn("Day ", cr.strip_js())
 
 
 if __name__ == "__main__":

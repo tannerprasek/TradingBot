@@ -26,6 +26,7 @@ from typing import Any, Mapping, MutableMapping
 
 CSS_STYLE_ID = "fd-card-css"
 JS_SCRIPT_ID = "fd-card-js"
+JS_VER = "pr17-stats"
 
 _BAND_WHY_RE = re.compile(r"^band\s", re.I)
 _DUMP_PILL_KEYS = frozenset({"fd-bb"})
@@ -87,6 +88,15 @@ ATR_KEYS: tuple[str, ...] = (
     "ATR",
     "atrp",
     "atr_pctile",
+)
+DAY_KEYS: tuple[str, ...] = (
+    "day",
+    "Day",
+    "d1",
+    "ret_1d",
+    "r1",
+    "R1",
+    "ret1",
 )
 _SKIP_PORTABLE = frozenset(
     {
@@ -238,10 +248,15 @@ def active_tags(card: Mapping[str, Any] | None) -> list[str]:
 
 
 def alias_stats(card: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
-    """Copy R20 / RS63 / ATR% onto the names live ``cardHTML`` actually reads."""
+    """Copy Day / R20 / RS63 / ATR% onto the names live chrome actually reads."""
+    day = _pick_num(card, DAY_KEYS)
     r20 = _pick_num(card, R20_KEYS)
     rs63 = _pick_num(card, RS63_KEYS)
     atr = _pick_num(card, ATR_KEYS)
+    if day is not None:
+        card["day"] = day
+        card.setdefault("Day", day)
+        card.setdefault("ret_1d", day)
     if r20 is not None:
         card["r20"] = r20
         card.setdefault("R20", r20)
@@ -372,6 +387,20 @@ def normalize_card(
         out.setdefault("name", display)
         if not out.get("ticker"):
             out["ticker"] = row.get("ticker") or display
+    embedded = row.get("card") if isinstance(row.get("card"), Mapping) else None
+    if not embedded and isinstance(row.get("_card"), Mapping):
+        embedded = row.get("_card")
+    if isinstance(embedded, Mapping):
+        for key, val in embedded.items():
+            if key in _SKIP_PORTABLE:
+                continue
+            if val is None or val == "":
+                continue
+            if out.get(key) is None or out.get(key) == "":
+                out[key] = val
+    for key in DAY_KEYS + R20_KEYS + RS63_KEYS + ATR_KEYS + ("score", "mom_score"):
+        if out.get(key) is None and row.get(key) is not None and row.get(key) != "":
+            out[key] = row.get(key)
     if out.get("score") is None and row.get("score") is not None:
         out["score"] = row.get("score")
     if out.get("mom_score") is None and row.get("score") is not None:
@@ -497,6 +526,17 @@ article.card p.fd-bb-why,
 article.card .why[data-fd-bb="1"] {
   display: none !important;
 }
+article.card .stats {
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 11px;
+  color: #d1d5db;
+  margin-top: 6px;
+}
+article.card .stats span {
+  white-space: nowrap;
+}
 """.strip()
 
 
@@ -504,8 +544,9 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
-  if (window.__FD_CARD_BOUND__) return;
-  window.__FD_CARD_BOUND__ = true;
+  var CARD_VER = "pr17-stats";
+  if (window.__FD_CARD_BOUND__ === CARD_VER) return;
+  window.__FD_CARD_BOUND__ = CARD_VER;
 
   function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
   function esc(s) {
@@ -526,6 +567,7 @@ def strip_js() -> str:
   var R20_KEYS = ["r20","R20","ret20","ret_20","ret_20d","RET_20D","r_20","R_20"];
   var RS63_KEYS = ["rs63","RS63","rs_63","rel_63","rel_63d","RS_63"];
   var ATR_KEYS = ["atr_pct","atrpct","ATR_PCT","atr%","atrs","ATRS","atr","ATR","atrp"];
+  var DAY_KEYS = ["day","Day","d1","ret_1d","r1","R1","ret1"];
   var SKIP_COPY = {px_series:1,prices:1,closes:1,history:1,px_hist:1,mom_score_series:1,series:1,spark:1,html:1,svg:1,_card:1,card:1,why:1,pills:1};
 
   function catalogKey(text) {
@@ -556,9 +598,11 @@ def strip_js() -> str:
   }
   function aliasStats(card) {
     if (!card) return card;
+    var day = pickNum(card, DAY_KEYS);
     var r20 = pickNum(card, R20_KEYS);
     var rs63 = pickNum(card, RS63_KEYS);
     var atr = pickNum(card, ATR_KEYS);
+    if (day != null) { card.day = day; if (card.Day == null) card.Day = day; if (card.ret_1d == null) card.ret_1d = day; }
     if (r20 != null) { card.r20 = r20; if (card.R20 == null) card.R20 = r20; if (card.ret_20d == null) card.ret_20d = r20; }
     if (rs63 != null) { card.rs63 = rs63; if (card.RS63 == null) card.RS63 = rs63; }
     if (atr != null) {
@@ -742,6 +786,9 @@ def strip_js() -> str:
     }
     if (out.score == null && row.score != null) out.score = row.score;
     if (out.mom_score == null && row.score != null) out.mom_score = row.score;
+    ["day","r20","rs63","atr_pct","R20","RS63"].forEach(function (k) {
+      if ((out[k] == null || out[k] === "") && row[k] != null && row[k] !== "") out[k] = row[k];
+    });
     if (isBandDump(out.why) || (row.why && out.why === row.why)) delete out.why;
     var extra = Array.isArray(row.pills) && row.pills.length ? row.pills.slice() : whyPills(row);
     if (row.label && !extra.some(function (p) { return p && p.key === "mom-streak"; })) {
@@ -777,13 +824,14 @@ def strip_js() -> str:
     c = c || {};
     var t = esc(shortOf(c.d || c.t || c.ticker || c.name || ""));
     var score = c.score != null ? c.score : (c.mom_score != null ? c.mom_score : "");
+    var day = fmt(c.day != null ? c.day : (c.Day != null ? c.Day : (c.ret_1d != null ? c.ret_1d : null)));
     var r20 = fmt(c.r20 != null ? c.r20 : (c.R20 != null ? c.R20 : null));
     var rs63 = fmt(c.rs63 != null ? c.rs63 : (c.RS63 != null ? c.RS63 : null));
     var atr = fmt(c.atr_pct != null ? c.atr_pct : (c.atrs != null ? c.atrs : (c.atr != null ? c.atr : (c.ATRS != null ? c.ATRS : (c.ATR != null ? c.ATR : null)))));
     return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(c.ticker || t) + '">' +
       "<header><h2>" + t + '</h2><span class="sc">' + esc(String(score)) + "</span>" +
       '<div class="pills">' + pillsHTML(c.enrich_pills) + "</div></header>" +
-      '<div class="stats"><span>R20 ' + esc(r20) + "</span><span>RS63 " + esc(rs63) + "</span><span>ATR% " + esc(atr) + "</span></div>" +
+      '<div class="stats"><span>Day ' + esc(day) + "</span><span>R20 " + esc(r20) + "</span><span>RS63 " + esc(rs63) + "</span><span>ATR% " + esc(atr) + "</span></div>" +
       "</article>";
   }
 
@@ -986,6 +1034,7 @@ def strip_js() -> str:
     }
   }
   function fillStats(node, card) {
+    fillLabeled(node, ["Day"], pickNum(card, DAY_KEYS));
     fillLabeled(node, ["R20"], pickNum(card, R20_KEYS));
     fillLabeled(node, ["RS63"], pickNum(card, RS63_KEYS));
     fillLabeled(node, ["ATR%", "ATRS", "ATR"], pickNum(card, ATR_KEYS));
@@ -1130,18 +1179,15 @@ def _ensure_css(html_text: str) -> str:
 
 def _ensure_js(html_text: str) -> str:
     script = f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
-    text, n = re.subn(
+    text = re.sub(
         rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
-        lambda _m: script,
-        html_text,
-        count=1,
+        "",
+        html_text or "",
         flags=re.I | re.S,
     )
-    if n:
-        return text
-    if "</body>" in html_text:
-        return html_text.replace("</body>", script + "</body>", 1)
-    return html_text + script
+    if "</body>" in text:
+        return text.replace("</body>", script + "</body>", 1)
+    return text + script
 
 
 def ensure_embedded(html_text: str) -> str:
