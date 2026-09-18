@@ -1696,7 +1696,10 @@ def strip_js() -> str:
       pane.setAttribute("hidden", "hidden");
     }}
     var home = $("home");
-    if (home) home.classList.remove("hide");
+    var paperOn = !!(document.body && (document.body.getAttribute("data-fd-paper") || document.body.getAttribute("data-view") === "paper"));
+    var paperPane = document.getElementById("view-paper");
+    if (paperPane && paperPane.classList.contains("fd-paper-on")) paperOn = true;
+    if (home && !paperOn) home.classList.remove("hide");
     document.body.removeAttribute("data-fd-ss");
     if (document.body.getAttribute("data-view") === "experimental") {{
       document.body.removeAttribute("data-view");
@@ -1708,8 +1711,13 @@ def strip_js() -> str:
   function kindOf(btn) {{
     if (!btn || !btn.getAttribute) return "";
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
+    if (view === "paper" || view === "breakout" || view === "breakdown") return "";
+    if (btn.id === "fd-nav-paper" || btn.getAttribute("data-fd-paper-nav") === "1") return "";
+    if (btn.id === "fd-nav-breakout" || btn.id === "fd-nav-breakdown") return "";
+    if (btn.getAttribute("data-fd-breakout") === "1" || btn.getAttribute("data-fd-breakdown") === "1") return "";
     if (view === "experimental" || btn.getAttribute("data-fd-sscore") === "1" || btn.id === "{NAV_ID}") return "experimental";
     var label = (btn.textContent || "").replace(/\s+/g, " ").trim();
+    if (label === "Paper" || label === "Breakout" || label === "Breakdown") return "";
     if (label === "Experimental" || label === "Exp") return "experimental";
     if (btn.id === "refresh" || btn.id === "options-refresh") return "";
     if (btn.closest && btn.closest("#topnav, nav, .topnav") && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || view)) return "other";
@@ -1737,6 +1745,18 @@ def strip_js() -> str:
       if (kind === "experimental" || kind === "exp") {{
         show(true);
         return;
+      }}
+      if (kind === "paper" || kind === "breakout" || kind === "breakdown") {{
+        var paneOnly = $(VIEW);
+        if (paneOnly) {{
+          paneOnly.classList.add("hide");
+          paneOnly.classList.remove("fd-ss-on");
+          paneOnly.setAttribute("hidden", "hidden");
+        }}
+        document.body.removeAttribute("data-fd-ss");
+        if (document.body.getAttribute("data-view") === "experimental") document.body.removeAttribute("data-view");
+        syncNav(false);
+        return orig.apply(this, arguments);
       }}
       show(false);
       return orig.apply(this, arguments);

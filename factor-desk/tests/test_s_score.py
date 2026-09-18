@@ -350,6 +350,16 @@ function setView(v) {
         self.assertIn("fd-ss-on", out)
         self.assertIn('removeAttribute("data-fd-ss")', out)
         self.assertIn('home.classList.remove("hide")', ss.strip_js())
+        js = ss.strip_js()
+        self.assertIn('view === "paper"', js)
+        self.assertIn('view === "breakout"', js)
+        self.assertIn('view === "breakdown"', js)
+        self.assertIn("data-fd-paper", js)
+        self.assertIn("fd-paper-on", js)
+        self.assertIn("paperOn", js)
+        # Paper/Breakout/Breakdown must not be kind "other".
+        kind = js[js.find("function kindOf") : js.find("function kindOf") + 1200]
+        self.assertIn('if (view === "paper" || view === "breakout" || view === "breakdown") return "";', kind)
 
     def test_write_combined_patches_live_html(self) -> None:
         body = """<!DOCTYPE html>

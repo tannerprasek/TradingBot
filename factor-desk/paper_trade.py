@@ -2484,10 +2484,17 @@ def strip_js() -> str:
   }
   function paintHome() { paintTab(); }
   function hideNativeViews() {
-    for (var i = 0; i < NATIVE_VIEWS.length; i++) {
-      var el = $(NATIVE_VIEWS[i]);
-      if (!el) continue;
-      if (NATIVE_VIEWS[i] === VIEW) continue;
+    var paper = document.getElementById("view-paper");
+    var panes = document.querySelectorAll(".view-pane, #home, #search-pane");
+    for (var i = 0; i < panes.length; i++) {
+      if (panes[i] === paper || panes[i].id === "view-paper") continue;
+      panes[i].classList.add("hide");
+      panes[i].setAttribute("hidden", "hidden");
+    }
+    for (var j = 0; j < NATIVE_VIEWS.length; j++) {
+      if (NATIVE_VIEWS[j] === "view-paper") continue;
+      var el = document.getElementById(NATIVE_VIEWS[j]);
+      if (!el || el === paper) continue;
       el.classList.add("hide");
       el.setAttribute("hidden", "hidden");
     }
@@ -2515,7 +2522,7 @@ def strip_js() -> str:
   }
   function showPaper(on) {
     stripLegacyHome();
-    var pane = $(VIEW);
+    var pane = document.getElementById("view-paper");
     if (on) {
       hideNativeViews();
       if (pane) {
@@ -2526,6 +2533,7 @@ def strip_js() -> str:
       paintTab();
       document.body.setAttribute("data-view", "paper");
       document.body.setAttribute("data-fd-paper", "1");
+      try { window.view = "paper"; } catch (eView) {}
       syncNav(true);
       return;
     }
@@ -2534,7 +2542,7 @@ def strip_js() -> str:
       pane.classList.remove("fd-paper-on");
       pane.setAttribute("hidden", "hidden");
     }
-    var home = $("home");
+    var home = document.getElementById("home");
     if (home) home.classList.remove("hide");
     document.body.removeAttribute("data-fd-paper");
     if (document.body.getAttribute("data-view") === "paper") {
@@ -2581,6 +2589,7 @@ def strip_js() -> str:
     if (kind === "paper") {
       ev.preventDefault();
       ev.stopPropagation();
+      showPaper(true);
       if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
       goPaper();
       return;
@@ -3070,13 +3079,18 @@ def _early_return_snippet(marker: str, param: str) -> str:
     return (
         f"{marker}"
         f"if(String({param}||\"\").toLowerCase()===\"paper\"){{"
+        f"try{{window.view=\"paper\";}}catch(_v){{}}"
+        f"if(document.body){{document.body.setAttribute(\"data-view\",\"paper\");"
+        f"document.body.setAttribute(\"data-fd-paper\",\"1\");}}"
+        f"var _panes=document.querySelectorAll(\".view-pane,#home,#search-pane\");"
+        f"for(var _i=0;_i<_panes.length;_i++){{"
+        f"if(_panes[_i].id===\"view-paper\")continue;"
+        f"_panes[_i].classList.add(\"hide\");"
+        f"_panes[_i].setAttribute(\"hidden\",\"hidden\");}}"
         f"if(window.__FD_PAPER_SHOW__)window.__FD_PAPER_SHOW__();"
         f"else{{var _p=document.getElementById(\"view-paper\");"
         f"if(_p){{_p.classList.remove(\"hide\");_p.classList.add(\"fd-paper-on\");"
-        f"_p.removeAttribute(\"hidden\");}}"
-        f"if(document.body){{document.body.setAttribute(\"data-view\",\"paper\");"
-        f"document.body.setAttribute(\"data-fd-paper\",\"1\");}}"
-        f"}}"
+        f"_p.removeAttribute(\"hidden\");}}}}"
         f"if(typeof syncNav===\"function\")syncNav();"
         f"return;}}"
     )

@@ -574,8 +574,9 @@ Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping
 
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
-| `paper_trade.py` | **recopy** — Paper tab **HTML table** (Date / Ticker / Side / Entry / Mark / Return % / Close, not chips); Refresh rebuilds `#fd-paper-marks` from `px.by[ticker].p[-1]`; missing mark → `—` never ±100%; Buy/Sell/Close use dollar marks; strips leftover chip JS |
-| `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
+| `paper_trade.py` | **recopy** — Paper tab **HTML table** (Date / Ticker / Side / Entry / Mark / Return % / Close, not chips); Refresh rebuilds `#fd-paper-marks` from `px.by[ticker].p[-1]`; missing mark → `—` never ±100%; Buy/Sell/Close use dollar marks; capture Paper click `showPaper(true)` then `stopImmediatePropagation`; strips leftover chip JS |
+| `s_score.py` | **recopy** — Experimental `kindOf` returns `""` for Paper/Breakout/Breakdown; `show(false)` must not unhide `#home` when `data-fd-paper` / `#view-paper.fd-paper-on` |
+| `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; `kindOf` returns `""` for Paper/Experimental (not `"other"`); `setView('paper')` must not `show("")`/`hideNativeViews`; dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/PAPER-TRADE.md` | optional, for the desk |
 
@@ -588,6 +589,7 @@ Do **not** copy generated `factorbook.html` or a later `paper_book.json`. After 
 5. Week scorecard counts closes since Monday 00:00 America/Edmonton; empty copy is `no closed yet this week`.
 6. Reload / Refresh keeps the book (localStorage). Mom Up/Down chrome is otherwise unchanged.
 7. Breakout / Breakdown cards show real tickers (`AMGN`, …), not `"undefined"`.
+8. Click **Paper** → `#view-paper` tables are visible and `#home` stays hidden (not a race back to FLAGS/WATCH). Recopy `s_score.py` + `breakout.py` with `paper_trade.py` so Experimental/Breakout capture listeners cannot treat Paper as `"other"`.
 
 ---
 

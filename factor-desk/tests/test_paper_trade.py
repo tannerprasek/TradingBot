@@ -640,6 +640,10 @@ window.setView = function (v) {
         self.assertIn("__FD_PAPER_SHOW__", out)
         js = pt.strip_js()
         self.assertIn("stopImmediatePropagation", js)
+        self.assertIn('document.getElementById("view-paper")', js)
+        self.assertIn('var pane = document.getElementById("view-paper")', js)
+        nav = js[js.find('if (kind === "paper")') : js.find('if (kind === "paper")') + 400]
+        self.assertLess(nav.find("showPaper(true)"), nav.find("stopImmediatePropagation"))
         self.assertIn('sv("paper")', js)
         self.assertIn("installSetViewBridge", js)
         self.assertIn("__fdPaper", js)

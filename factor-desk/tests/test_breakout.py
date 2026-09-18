@@ -265,6 +265,13 @@ function syncNav() {}
         self.assertIn("breakout|breakdown", paint_head)
         js = bo.strip_js()
         self.assertIn("stopImmediatePropagation", js)
+        kind = js[js.find("function kindOf") : js.find("function kindOf") + 1400]
+        self.assertIn('if (view === "paper" || view === "experimental") return "";', kind)
+        self.assertIn("fd-nav-paper", kind)
+        self.assertIn("data-fd-paper-nav", kind)
+        bridge = js[js.find("function installSetViewBridge") :]
+        self.assertLess(bridge.find('kind === "paper"'), bridge.find('show("");'))
+        self.assertIn('kind === "experimental"', bridge)
         self.assertIn("window.__FD_BB_SHOW__", js)
         self.assertIn('classList.add("hide")', js)
         self.assertIn("view-mom-up", js)

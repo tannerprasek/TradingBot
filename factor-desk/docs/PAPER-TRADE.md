@@ -45,3 +45,5 @@ Missing or non-positive mark is **never** treated as 0 in P&L (that would paint 
   - **closed** — HTML table: Date / Closed / Ticker / Side / Entry / Exit / Return %. Empty: `no closed paper`.
 
 Leftover `#fd-paper-home` in top chrome is stripped and CSS-hidden. Mom Up/Down chrome is otherwise unchanged. `desk_dash.write_combined` always re-embeds `#fd-paper-marks` + `#view-paper` + wrap JS (`paper_trade.ensure_embedded`) so a Refresh rewrite cannot drop the tab.
+
+Paper nav must land on `#view-paper` tables with `#home` hidden. Capture-phase Paper click calls `showPaper(true)` then `stopImmediatePropagation`. Experimental and Breakout `kindOf` return `""` for Paper (not `"other"`); Experimental `show(false)` never unhides `#home` while `data-fd-paper` / `#view-paper.fd-paper-on`; Breakout `setView('paper')` must not `show("")`. Recopy `paper_trade.py`, `s_score.py`, and `breakout.py`.
