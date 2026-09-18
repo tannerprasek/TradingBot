@@ -88,7 +88,10 @@ PAINTVIEW_MARKER = "/*fd-paper-paintview*/"
 
 BTN_PAPER = (
     f'<button type="button" class="btn nav-btn" id="{NAV_ID}" '
-    'data-view="paper" data-fd-paper-nav="1">Paper</button>'
+    'data-view="paper" data-fd-paper-nav="1" '
+    "onclick=\"if(window.setView)window.setView('paper');"
+    "else if(window.__FD_PAPER_SHOW__)window.__FD_PAPER_SHOW__();"
+    'return false;">Paper</button>'
 )
 
 NATIVE_VIEW_IDS: tuple[str, ...] = (
@@ -111,11 +114,19 @@ _ALLOWLIST_RE = re.compile(
     re.I,
 )
 _SETVIEW_FN_RE = re.compile(
-    r"(function\s+setView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{)",
+    r"("
+    r"function\s+setView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{"
+    r"|"
+    r"(?:window\.)?setView\s*=\s*function\s*(?:\s+\w+)?\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{"
+    r")",
     re.I,
 )
 _PAINTVIEW_FN_RE = re.compile(
-    r"(function\s+paintView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{)",
+    r"("
+    r"function\s+paintView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{"
+    r"|"
+    r"(?:window\.)?paintView\s*=\s*function\s*(?:\s+\w+)?\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{"
+    r")",
     re.I,
 )
 _HIDEALL_FN_RE = re.compile(
@@ -1579,14 +1590,19 @@ def strip_css() -> str:
 #{HOME_HOST_ID}, .fd-paper-home {{
   display: none !important;
 }}
-#{VIEW_ID},
 #{VIEW_ID}.hide,
-#{VIEW_ID}[hidden] {{
+#{VIEW_ID}[hidden]:not(.fd-paper-on) {{
   display: none !important;
 }}
-body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
+body[data-view="paper"] #{VIEW_ID},
+body[data-fd-paper="1"] #{VIEW_ID},
 #{VIEW_ID}.fd-paper-on {{
   display: block !important;
+  visibility: visible !important;
+}}
+body[data-view="paper"] #home,
+body[data-fd-paper="1"] #home {{
+  display: none !important;
 }}
 #{VIEW_ID} .ph {{
   font: 650 13px/1.2 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
@@ -2473,6 +2489,7 @@ def strip_js() -> str:
       if (!el) continue;
       if (NATIVE_VIEWS[i] === VIEW) continue;
       el.classList.add("hide");
+      el.setAttribute("hidden", "hidden");
     }
   }
   function setOn(btn, on) {
@@ -2544,6 +2561,15 @@ def strip_js() -> str:
     if (!el || !el.closest) return false;
     return !!(el.closest("[data-fd-paper-act], [data-fd-paper-open], [data-fd-paper-close], #fd-paper-open-form, .fd-paper-ticker, .fd-paper"));
   }
+  function goPaper() {
+    showPaper(true);
+    var sv = window.setView;
+    if (typeof sv === "function" && sv.__fdPaper) {
+      try { sv("paper"); } catch (err) {}
+    } else if (window.__FD_PAPER_SHOW__) {
+      window.__FD_PAPER_SHOW__();
+    }
+  }
   function onNavClick(ev) {
     if (isTradeEl(ev.target)) return;
     var t = ev.target && ev.target.closest
@@ -2555,7 +2581,8 @@ def strip_js() -> str:
     if (kind === "paper") {
       ev.preventDefault();
       ev.stopPropagation();
-      showPaper(true);
+      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+      goPaper();
       return;
     }
     if (kind === "other") showPaper(false);
@@ -2569,19 +2596,24 @@ def strip_js() -> str:
   }
   window.__FD_PAPER_ON_DOC_CLICK__ = onDocumentClick;
   function installSetViewBridge() {
-    var orig = window.setView;
-    if (typeof orig !== "function" || orig.__fdPaper) return;
-    window.setView = function (v) {
+    var cur = window.setView;
+    if (typeof cur === "function" && cur.__fdPaper) return;
+    var wrapped = function (v) {
       var kind = String(v || "").toLowerCase();
       if (kind === "paper") {
         showPaper(true);
         return;
       }
       showPaper(false);
-      return orig.apply(this, arguments);
+      if (typeof wrapped._orig === "function") return wrapped._orig.apply(this, arguments);
     };
-    window.setView.__fdPaper = true;
+    wrapped._orig = cur;
+    wrapped.__fdPaper = true;
+    window.setView = wrapped;
   }
+  installSetViewBridge();
+  setTimeout(installSetViewBridge, 0);
+  setTimeout(installSetViewBridge, 25);
   function tabTicker() {
     var input = $(TICKER_ID);
     return shortOf(input && input.value);
@@ -2901,7 +2933,10 @@ def strip_js() -> str:
     }, true);
   }
   window.__FD_PAPER_BOUND__ = true;
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install);
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () {
+    installSetViewBridge();
+    install();
+  });
   else install();
   setTimeout(install, 0);
 })();
@@ -2969,6 +3004,31 @@ def _strip_home_host(html_text: str) -> str:
     return text
 
 
+_PAPER_BTN_OPEN_RE = re.compile(
+    r"<button\b([^>]*\b(?:id=[\"']fd-nav-paper[\"']|data-view=[\"']paper[\"']|"
+    r"data-fd-paper-nav=[\"']1[\"'])[^>]*)>",
+    re.I,
+)
+
+
+def _paper_onclick_attr() -> str:
+    return (
+        ' onclick="if(window.setView)window.setView(\'paper\');'
+        'else if(window.__FD_PAPER_SHOW__)window.__FD_PAPER_SHOW__();return false;"'
+    )
+
+
+def _ensure_nav_onclick(html_text: str) -> str:
+    """Existing Paper nav buttons must call setView('paper') / __FD_PAPER_SHOW__."""
+
+    def add_onclick(match: re.Match[str]) -> str:
+        attrs = match.group(1) or ""
+        attrs = re.sub(r"\s+onclick=(?:\"[^\"]*\"|'[^']*')", "", attrs, flags=re.I)
+        return f"<button{attrs}{_paper_onclick_attr()}>"
+
+    return _PAPER_BTN_OPEN_RE.sub(add_onclick, html_text or "", count=3)
+
+
 def _has_nav_button(html_text: str) -> bool:
     text = html_text or ""
     patterns = (
@@ -2981,17 +3041,18 @@ def _has_nav_button(html_text: str) -> bool:
 
 def _ensure_nav(html_text: str) -> str:
     if _has_nav_button(html_text):
-        return html_text
+        return _ensure_nav_onclick(html_text)
     pair = "\n  " + BTN_PAPER
     m = _EXPERIMENTAL_BTN_RE.search(html_text)
     if m:
-        return html_text[: m.end()] + pair + html_text[m.end() :]
+        return _ensure_nav_onclick(html_text[: m.end()] + pair + html_text[m.end() :])
     m = _OPTIONS_VIEW_BTN_RE.search(html_text)
     if m:
-        return html_text[: m.end()] + pair + html_text[m.end() :]
+        return _ensure_nav_onclick(html_text[: m.end()] + pair + html_text[m.end() :])
     if "<nav" in html_text.lower():
-        return re.sub(r"(</nav>)", pair + r"\n\1", html_text, count=1, flags=re.I)
-    return pair + "\n" + html_text
+        text = re.sub(r"(</nav>)", pair + r"\n\1", html_text, count=1, flags=re.I)
+        return _ensure_nav_onclick(text)
+    return _ensure_nav_onclick(pair + "\n" + html_text)
 
 
 def _patch_setview_allowlist(html_text: str) -> str:
@@ -3008,8 +3069,14 @@ def _patch_setview_allowlist(html_text: str) -> str:
 def _early_return_snippet(marker: str, param: str) -> str:
     return (
         f"{marker}"
-        f"if({param}===\"paper\"){{"
+        f"if(String({param}||\"\").toLowerCase()===\"paper\"){{"
         f"if(window.__FD_PAPER_SHOW__)window.__FD_PAPER_SHOW__();"
+        f"else{{var _p=document.getElementById(\"view-paper\");"
+        f"if(_p){{_p.classList.remove(\"hide\");_p.classList.add(\"fd-paper-on\");"
+        f"_p.removeAttribute(\"hidden\");}}"
+        f"if(document.body){{document.body.setAttribute(\"data-view\",\"paper\");"
+        f"document.body.setAttribute(\"data-fd-paper\",\"1\");}}"
+        f"}}"
         f"if(typeof syncNav===\"function\")syncNav();"
         f"return;}}"
     )
@@ -3022,19 +3089,31 @@ def _replace_or_inject_early_return(
     fn_re: re.Pattern[str],
 ) -> str:
     text = html_text or ""
-    existing = re.search(
-        re.escape(marker) + r'if\((\w+)==="paper".*?return;\}',
-        text,
+    snippet_re = re.compile(
+        re.escape(marker)
+        + r'if\((?:String\((\w+)\|\|""\)\.toLowerCase\(\)|(\w+))===["\']paper["\'].*?return;\}',
         re.S,
     )
-    if existing:
-        return text[: existing.start()] + _early_return_snippet(marker, existing.group(1)) + text[existing.end() :]
+
+    def replace_existing(match: re.Match[str]) -> str:
+        param = match.group(1) or match.group(2)
+        return _early_return_snippet(marker, param)
+
+    text = snippet_re.sub(replace_existing, text)
 
     def inject(match: re.Match[str]) -> str:
-        head, param = match.group(1), match.group(2)
+        head = match.group(1)
+        param = match.group(2) or match.group(3)
+        if not param:
+            return match.group(0)
+        after = match.group(0)
+        # Skip heads that already carry our marker immediately after `{`.
+        end = match.end()
+        if text[end : end + len(marker)] == marker:
+            return after
         return f"{head}{_early_return_snippet(marker, param)}"
 
-    return fn_re.sub(inject, text, count=1)
+    return fn_re.sub(inject, text)
 
 
 def _hideall_snippet() -> str:

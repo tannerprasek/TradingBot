@@ -598,6 +598,64 @@ function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</art
         self.assertGreater(paper_at, nav_at)
         self.assertGreater(paper_at, exp_at)
 
+    def test_paper_nav_setview_does_not_fall_through_to_home(self) -> None:
+        html = """<!DOCTYPE html><html><head></head><body>
+<nav>
+  <button data-view="home">Home</button>
+  <button data-view="options">Options</button>
+</nav>
+<div id="home">HOME</div>
+<div id="view-paper" class="view-pane hide" hidden>OLD</div>
+<script>
+function hideAllPanes() {
+  ["home","view-mom-up","view-mom-down","view-outliers","view-options"].forEach(function(id){
+    var el = document.getElementById(id);
+    if (el) el.classList.add("hide");
+  });
+}
+function paintView(v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+}
+function setView(v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+  hideAllPanes();
+  paintView(v);
+  paint();
+}
+window.setView = function (v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+};
+</script>
+</body></html>"""
+        out = pt.ensure_embedded(html, {})
+        setview_head = out.split("function setView")[1][:900]
+        self.assertIn("__FD_PAPER_SHOW__", setview_head)
+        self.assertIn(pt.SETVIEW_MARKER, setview_head)
+        self.assertLess(
+            setview_head.find("__FD_PAPER_SHOW__"),
+            setview_head.find('v = "home"'),
+        )
+        self.assertIn("|paper", out)
+        self.assertIn("setView('paper')", out)
+        self.assertIn("__FD_PAPER_SHOW__", out)
+        js = pt.strip_js()
+        self.assertIn("stopImmediatePropagation", js)
+        self.assertIn('sv("paper")', js)
+        self.assertIn("installSetViewBridge", js)
+        self.assertIn("__fdPaper", js)
+        self.assertIn("goPaper", js)
+        self.assertIn("fd-paper-table", js)
+        self.assertIn('"Date"', js)
+        pane = out[out.find('id="view-paper"') : out.find('id="view-paper"') + 900]
+        self.assertIn("fd-paper-tab", pane)
+        self.assertIn("data-fd-paper-open", pane)
+        self.assertIn("data-fd-paper-open", out)
+        btn = re.search(r"<button\b[^>]*id=[\"']fd-nav-paper[\"'][^>]*>", out, re.I)
+        self.assertIsNotNone(btn)
+        self.assertIn("setView('paper')", btn.group(0))
+        assign_head = out.split("window.setView = function")[1][:500]
+        self.assertIn("__FD_PAPER_SHOW__", assign_head)
+
     def test_inline_close_uses_opposite_click(self) -> None:
         book = pt.empty_book()
         pt.apply_click(book, "AMGN", "buy", 78.11)
