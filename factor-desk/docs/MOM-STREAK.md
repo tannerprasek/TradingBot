@@ -67,4 +67,4 @@ For MA-regime name-drill coloring, after merge CoS runs:
 python factor-desk\sync_live_paintpx.py --deploy-desktop
 ```
 
-That copies **`chart_marks.py`** + **`sync_live_paintpx.py`** into `C:\Users\MLP\Desktop\factorbook` and patches live `factorbook.html` via `chart_marks.ensure_embedded` / `inject_paintpx`. It refuses HTML &lt; 1MB and keeps Paper / Experimental / Breakout / `#fd-paper-marks`. Do **not** wholesale-replace live `factorbook.html` from the skinny generator and do **not** run `desk_dash.py` / `write_dash.py` on the live file. See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §8.
+That copies **`chart_marks.py`** + **`sync_live_paintpx.py`** into `C:\Users\MLP\Desktop\factorbook` and patches live `C:\Users\MLP\Desktop\factorbook.html` (sibling of the pack folder) via `chart_marks.ensure_embedded` / `inject_paintpx`. It refuses HTML &lt; 1MB and keeps Paper / Experimental / Breakout / `#fd-paper-marks`. Do **not** wholesale-replace live `factorbook.html` from the skinny generator and do **not** run `desk_dash.py` / `write_dash.py` on the live file. See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §8.

@@ -398,7 +398,7 @@ Working folder: `C:\Users\MLP\Desktop\factorbook`
 
 ```bat
 cd /d C:\Users\MLP\Desktop\factorbook
-python sync_live_paintpx.py --html C:\Users\MLP\Desktop\factorbook\factorbook.html
+python sync_live_paintpx.py --html C:\Users\MLP\Desktop\factorbook.html
 ```
 
 PowerShell equivalent: `.\scripts\sync_live_paintpx.ps1` after the two `.py` files are in `factorbook\`.
@@ -413,7 +413,7 @@ PowerShell equivalent: `.\scripts\sync_live_paintpx.ps1` after the two `.py` fil
 
 All of this pack lives under Cursor `factor-desk/` only. CoS does **not** copy generator HTML.
 
-From the TradingBot checkout, one command copies wrap Python onto Desktop and patches live `factorbook.html` via `chart_marks.ensure_embedded` / `inject_paintpx`:
+From the TradingBot checkout, one command copies wrap Python onto Desktop and patches live `C:\Users\MLP\Desktop\factorbook.html` (sibling of the `factorbook\` pack, **not** `factorbook\factorbook.html`) via `chart_marks.ensure_embedded` / `inject_paintpx`:
 
 ```bat
 python factor-desk\sync_live_paintpx.py --deploy-desktop
@@ -424,14 +424,14 @@ That:
 | Does | Does not |
 | --- | --- |
 | Copies `chart_marks.py` + `sync_live_paintpx.py` → `C:\Users\MLP\Desktop\factorbook` | Copy `factorbook.html` / `desk_dash.py` / dumps |
-| Patches live Desktop HTML in place (`paintPxChart` wrap) | Run `desk_dash.write_combined` / skinny rewrite |
+| Patches live `C:\Users\MLP\Desktop\factorbook.html` in place (`paintPxChart` wrap) | Run `desk_dash.write_combined` / skinny rewrite |
 | Refuses if live HTML is missing, **&lt; 1MB**, or has no `paintPxChart` | Touch Paper / Experimental / Breakout / `#fd-paper-marks` |
 
-If the two `.py` files are already in the Desktop folder:
+If the two `.py` files are already in the Desktop pack folder:
 
 ```bat
 cd /d C:\Users\MLP\Desktop\factorbook
-python sync_live_paintpx.py
+python sync_live_paintpx.py --html C:\Users\MLP\Desktop\factorbook.html
 ```
 
 Then hard-reload (Ctrl+F5). If live `write_combined` does not already call `chart_marks.ensure_embedded`, **re-run the sync helper after Refresh**.

@@ -12,8 +12,10 @@ This script **only** injects chart CSS + overlay JS. After merge, CoS:
     python factor-desk/sync_live_paintpx.py --deploy-desktop
 
 That copies ``chart_marks.py`` + ``sync_live_paintpx.py`` into
-``C:\\Users\\MLP\\Desktop\\factorbook`` and patches live HTML in place.
-It never copies ``factorbook.html`` and never imports ``desk_dash``.
+``C:\\Users\\MLP\\Desktop\\factorbook`` and patches live
+``C:\\Users\\MLP\\Desktop\\factorbook.html`` (sibling of the pack folder,
+not ``factorbook\\factorbook.html``). It never copies HTML and never
+imports ``desk_dash``.
 """
 
 from __future__ import annotations
@@ -45,10 +47,14 @@ WRAP_NEEDLES = (
     "close > s50 && close > s200",
     "#e6edf3",
     "restylePxChart",
+    "showPricePath",
 )
 COS_PY_FILES = ("chart_marks.py", "sync_live_paintpx.py")
-DESKTOP_ROOT_DEFAULT = Path(r"C:\Users\MLP\Desktop\factorbook")
-DESKTOP_DEFAULT = DESKTOP_ROOT_DEFAULT / "factorbook.html"
+DESKTOP_DIR_DEFAULT = Path(r"C:\Users\MLP\Desktop")
+DESKTOP_PACK_DEFAULT = DESKTOP_DIR_DEFAULT / "factorbook"
+DESKTOP_ROOT_DEFAULT = DESKTOP_PACK_DEFAULT  # .py copies land here
+DESKTOP_HTML_DEFAULT = DESKTOP_DIR_DEFAULT / "factorbook.html"
+DESKTOP_DEFAULT = DESKTOP_HTML_DEFAULT
 BACKUP_SUFFIX = ".bak-paintpx"
 
 
@@ -56,9 +62,35 @@ class SyncRefused(RuntimeError):
     """Live HTML is missing, too small, or not safe to patch."""
 
 
+def desktop_pack_path(desktop_root: Path | str | None = None) -> Path:
+    """Folder that receives ``chart_marks.py`` / ``sync_live_paintpx.py``."""
+    return Path(desktop_root) if desktop_root is not None else DESKTOP_PACK_DEFAULT
+
+
+def desktop_dir_path(desktop_root: Path | str | None = None) -> Path:
+    """Desktop directory whose sibling ``factorbook.html`` is the live desk."""
+    pack = desktop_pack_path(desktop_root)
+    if pack.name.lower() == "factorbook":
+        return pack.parent
+    return pack
+
+
+def desktop_html_candidates(desktop_root: Path | str | None = None) -> list[Path]:
+    """Live HTML is a sibling of the pack folder; nested path is fallback.
+
+    ``C:\\Users\\MLP\\Desktop\\factorbook.html``
+    else ``C:\\Users\\MLP\\Desktop\\factorbook\\factorbook.html``
+    """
+    pack = desktop_pack_path(desktop_root)
+    desk = desktop_dir_path(desktop_root)
+    return [desk / "factorbook.html", pack / "factorbook.html"]
+
+
 def desktop_html_path(desktop_root: Path | str | None = None) -> Path:
-    root = Path(desktop_root) if desktop_root is not None else DESKTOP_ROOT_DEFAULT
-    return root / "factorbook.html"
+    for path in desktop_html_candidates(desktop_root):
+        if path.is_file():
+            return path
+    return desktop_html_candidates(desktop_root)[0]
 
 
 def require_wrap_source() -> None:
@@ -97,7 +129,7 @@ def candidate_html_paths(
     paths: list[Path] = []
     if html is not None:
         paths.append(Path(html))
-    paths.append(desktop_html_path(desktop_root))
+    paths.extend(desktop_html_candidates(desktop_root))
     paths.append(HERE / "factorbook.html")
     cwd = Path.cwd() / "factorbook.html"
     if cwd not in paths:
@@ -261,31 +293,43 @@ def patch_live_html(
 def deploy_desktop(
     desktop_root: Path | str | None = None,
     *,
+    html: Path | str | None = None,
     dry_run: bool = False,
     backup: bool = True,
 ) -> dict[str, Any]:
-    """CoS one-shot: copy wrap Python to Desktop, then patch live HTML."""
-    root = Path(desktop_root) if desktop_root is not None else DESKTOP_ROOT_DEFAULT
-    html_path = root / "factorbook.html"
+    """CoS one-shot: copy wrap Python into the pack folder, patch live HTML.
+
+    Live file is ``Desktop\\factorbook.html`` (sibling of ``Desktop\\factorbook\\``).
+    Nested ``Desktop\\factorbook\\factorbook.html`` is only a fallback.
+    """
+    pack = desktop_pack_path(desktop_root)
+    html_path = resolve_html_path(html, desktop_root=pack)
+    tried = desktop_html_candidates(pack)
+    if html is not None:
+        html_path = Path(html)
+        tried = [html_path]
     if not html_path.is_file():
         raise SyncRefused(
-            f"refuse: {html_path} does not exist. "
-            "CoS patches the live Desktop desk; will not write a new factorbook.html."
+            "refuse: live factorbook.html not found. Tried: "
+            + ", ".join(str(p) for p in tried)
+            + ". CoS patches C:\\Users\\MLP\\Desktop\\factorbook.html "
+            "(sibling of the factorbook\\ pack); will not write a new file."
         )
     before = html_path.read_text(encoding="utf-8")
     validate_live_html(before, path=html_path)
     require_wrap_source()
     copied: list[str] = []
     if not dry_run:
-        copied = deploy_py_files(root)
+        pack.mkdir(parents=True, exist_ok=True)
+        copied = deploy_py_files(pack)
     info = patch_live_html(
         html_path,
         dry_run=dry_run,
         backup=backup,
-        desktop_root=root,
+        desktop_root=pack,
     )
     info["copied"] = copied
-    info["desktop_root"] = str(root)
+    info["desktop_root"] = str(pack)
     return info
 
 
@@ -299,17 +343,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--html",
         default="",
-        help="Path to live factorbook.html (default: live Desktop file if >=1MB, else next to this script)",
+        help=r"Path to live factorbook.html (default: C:\Users\MLP\Desktop\factorbook.html)",
     )
     p.add_argument(
         "--desktop-root",
         default="",
-        help=r"Desktop factorbook folder (default: C:\Users\MLP\Desktop\factorbook)",
+        help=r"Pack folder for .py copies (default: C:\Users\MLP\Desktop\factorbook)",
     )
     p.add_argument(
         "--deploy-desktop",
         action="store_true",
-        help="CoS: copy chart_marks.py + sync_live_paintpx.py to Desktop, then patch live HTML",
+        help="CoS: copy .py into Desktop\\factorbook\\, patch Desktop\\factorbook.html",
     )
     p.add_argument("--dry-run", action="store_true", help="Validate and inject in memory; do not write")
     p.add_argument("--no-backup", action="store_true", help="Do not write factorbook.html.bak-paintpx")
@@ -319,6 +363,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.deploy_desktop:
             info = deploy_desktop(
                 desktop_root,
+                html=args.html or None,
                 dry_run=args.dry_run,
                 backup=not args.no_backup,
             )

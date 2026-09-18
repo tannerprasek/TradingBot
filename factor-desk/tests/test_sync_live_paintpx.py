@@ -181,32 +181,65 @@ class SyncLivePaintPxTests(unittest.TestCase):
 
     def test_resolve_prefers_live_desktop_over_skinny_local(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            desk = Path(tmp) / "factorbook"
-            desk.mkdir()
+            desk = Path(tmp)
+            pack = desk / "factorbook"
+            pack.mkdir()
             live = desk / "factorbook.html"
             live.write_text(_pad(LIVE_BODY, 1_100_000), encoding="utf-8")
             skinny = Path(tmp) / "skinny.html"
             skinny.write_text(_pad(LIVE_BODY, 80_000), encoding="utf-8")
-            got = sync.resolve_html_path(desktop_root=desk)
+            got = sync.resolve_html_path(desktop_root=pack)
             self.assertEqual(got.resolve(), live.resolve())
-            explicit = sync.resolve_html_path(skinny, desktop_root=desk)
+            explicit = sync.resolve_html_path(skinny, desktop_root=pack)
             self.assertEqual(explicit.resolve(), skinny.resolve())
+
+    def test_deploy_desktop_patches_sibling_html_copies_py_into_pack(self) -> None:
+        live_html = _pad(LIVE_BODY, 1_100_000)
+        nested_html = _pad(LIVE_BODY, 80_000)
+        with tempfile.TemporaryDirectory() as tmp:
+            desk = Path(tmp)
+            pack = desk / "factorbook"
+            pack.mkdir()
+            sibling = desk / "factorbook.html"
+            nested = pack / "factorbook.html"
+            sibling.write_text(live_html, encoding="utf-8")
+            nested.write_text(nested_html, encoding="utf-8")
+            planted = pack / "do-not-touch.html"
+            planted.write_text("keep", encoding="utf-8")
+            buf, err = StringIO(), StringIO()
+            with redirect_stdout(buf), redirect_stderr(err):
+                rc = sync.main(["--deploy-desktop", "--desktop-root", str(pack)])
+            self.assertEqual(rc, 0, err.getvalue())
+            self.assertTrue((pack / "chart_marks.py").is_file())
+            self.assertTrue((pack / "sync_live_paintpx.py").is_file())
+            self.assertEqual(planted.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(nested.read_text(encoding="utf-8"), nested_html)
+            text = sibling.read_text(encoding="utf-8")
+            self.assertGreater(sibling.stat().st_size, 1_000_000)
+            self.assertIn("wrapPaintPxChart", text)
+            self.assertIn("showPricePath", text)
+            self.assertIn('{"CNH":13.63,"PWR":629.65}', text)
+            self.assertIn(">Paper</button>", text)
+            self.assertIn("copied:", buf.getvalue())
+            self.assertIn(str(sibling), buf.getvalue())
+            self.assertNotIn("factorbook.html", sync.COS_PY_FILES)
 
     def test_deploy_desktop_copies_py_not_html(self) -> None:
         live = _pad(LIVE_BODY, 1_100_000)
         with tempfile.TemporaryDirectory() as tmp:
-            desk = Path(tmp) / "factorbook"
-            desk.mkdir()
+            desk = Path(tmp)
+            pack = desk / "factorbook"
+            pack.mkdir()
             dest = desk / "factorbook.html"
             dest.write_text(live, encoding="utf-8")
-            planted = desk / "do-not-touch.html"
+            planted = pack / "do-not-touch.html"
             planted.write_text("keep", encoding="utf-8")
             buf, err = StringIO(), StringIO()
             with redirect_stdout(buf), redirect_stderr(err):
-                rc = sync.main(["--deploy-desktop", "--desktop-root", str(desk)])
+                rc = sync.main(["--deploy-desktop", "--desktop-root", str(pack)])
             self.assertEqual(rc, 0, err.getvalue())
-            self.assertTrue((desk / "chart_marks.py").is_file())
-            self.assertTrue((desk / "sync_live_paintpx.py").is_file())
+            self.assertTrue((pack / "chart_marks.py").is_file())
+            self.assertTrue((pack / "sync_live_paintpx.py").is_file())
             self.assertEqual(planted.read_text(encoding="utf-8"), "keep")
             text = dest.read_text(encoding="utf-8")
             self.assertGreater(dest.stat().st_size, 1_000_000)
@@ -219,17 +252,31 @@ class SyncLivePaintPxTests(unittest.TestCase):
     def test_deploy_desktop_refuses_skinny_and_does_not_copy(self) -> None:
         small = _pad(LIVE_BODY, 80_000)
         with tempfile.TemporaryDirectory() as tmp:
-            desk = Path(tmp) / "factorbook"
-            desk.mkdir()
+            desk = Path(tmp)
+            pack = desk / "factorbook"
+            pack.mkdir()
             dest = desk / "factorbook.html"
             dest.write_text(small, encoding="utf-8")
             buf, err = StringIO(), StringIO()
             with redirect_stdout(buf), redirect_stderr(err):
-                rc = sync.main(["--deploy-desktop", "--desktop-root", str(desk)])
+                rc = sync.main(["--deploy-desktop", "--desktop-root", str(pack)])
             self.assertEqual(rc, 2)
             self.assertIn("refuse", err.getvalue().lower())
-            self.assertFalse((desk / "chart_marks.py").is_file())
+            self.assertFalse((pack / "chart_marks.py").is_file())
             self.assertEqual(dest.read_text(encoding="utf-8"), small)
+
+    def test_desktop_html_default_is_sibling_not_nested(self) -> None:
+        self.assertEqual(
+            sync.DESKTOP_HTML_DEFAULT,
+            Path(r"C:\Users\MLP\Desktop") / "factorbook.html",
+        )
+        self.assertEqual(
+            sync.DESKTOP_PACK_DEFAULT,
+            Path(r"C:\Users\MLP\Desktop") / "factorbook",
+        )
+        cands = sync.desktop_html_candidates()
+        self.assertEqual(cands[0], Path(r"C:\Users\MLP\Desktop") / "factorbook.html")
+        self.assertEqual(cands[1], Path(r"C:\Users\MLP\Desktop") / "factorbook" / "factorbook.html")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,9 @@ so color flips over time. No arrows / callouts.
 
 Live ``paintPxChart`` already draws SMA20/50/200 + 52w high; the wrap
 segments the white ``#e6edf3`` price path and does not pile on duplicate
-MAs. ``padR`` is enlarged so the last print / marker is not clipped.
+MAs. The original path is hidden **only after** green/red segments exist
+(fail-open: a wrap miss keeps the white series). ``padR`` is enlarged so
+the last print / marker is not clipped.
 
 Skinny generator cards get a compact SVG sparkline when a price (or score)
 series is available. Live ~4.8MB HTML is patched: overlay JS + JSON db.
@@ -832,7 +834,9 @@ def strip_css() -> str:
   max-width: 1040px;
   overflow: visible;
 }
-[data-px-svg] [data-fd-trend-src], [data-fd-trend-src] {
+[data-px-svg]:has([data-fd-trend-seg]) [data-fd-trend-src],
+svg:has([data-fd-trend-seg]) [data-fd-trend-src],
+[data-fd-trend-src]:has(+ [data-fd-trend-seg]) {
   display: none !important;
   stroke: none !important;
   opacity: 0 !important;
@@ -1326,6 +1330,9 @@ def overlay_js() -> str:
   }
   function hidePricePath(el) {
     if (!el) return;
+    if (!el.getAttribute("data-fd-src-stroke")) {
+      el.setAttribute("data-fd-src-stroke", el.getAttribute("stroke") || LIVE_PX_PRICE);
+    }
     el.setAttribute("data-fd-trend-src", "1");
     el.setAttribute("stroke", "none");
     el.setAttribute("opacity", "0");
@@ -1334,6 +1341,18 @@ def overlay_js() -> str:
     el.style.opacity = "0";
     el.style.display = "none";
     el.style.visibility = "hidden";
+  }
+  function showPricePath(el) {
+    if (!el) return;
+    el.removeAttribute("data-fd-trend-src");
+    var st = el.getAttribute("data-fd-src-stroke") || LIVE_PX_PRICE;
+    el.setAttribute("stroke", st);
+    el.removeAttribute("opacity");
+    el.removeAttribute("display");
+    el.style.stroke = st;
+    el.style.opacity = "";
+    el.style.display = "";
+    el.style.visibility = "";
   }
   function remapAttrX(el, names, padL, oldInner, newInner) {
     names.forEach(function (name) {
@@ -1462,10 +1481,12 @@ def overlay_js() -> str:
       polishChips(host);
       var src = findPricePath(svg);
       if (!src) { ensureHtmlLegend(host, svg); return; }
-      if (src.getAttribute("data-fd-trend-src") === "1" && svg.querySelector("[data-fd-trend-seg]")) {
+      var hadSeg = !!svg.querySelector("[data-fd-trend-seg]");
+      if (src.getAttribute("data-fd-trend-src") === "1" && hadSeg) {
         ensureHtmlLegend(host, svg);
         return;
       }
+      if (src.getAttribute("data-fd-trend-src") === "1" && !hadSeg) showPricePath(src);
       Array.prototype.forEach.call(svg.querySelectorAll("[data-fd-trend-seg]"), function (n) { n.remove(); });
       var pts = parsePoints(src);
       if (pts.length < 2) { ensureHtmlLegend(host, svg); return; }
@@ -1480,17 +1501,15 @@ def overlay_js() -> str:
       if (px.length) {
         flags = drawnFlags(px, s50, s200);
         if (flags.length !== pts.length) {
-          var ys = pts.map(function (p) { return -p.y; });
-          flags = flagsFromSeries(ys, smaArr(ys, SMA_FAST), ys.length >= SMA_SLOW ? smaArr(ys, SMA_SLOW) : []);
+          if (flags.length > pts.length) flags = flags.slice(flags.length - pts.length);
+          else {
+            var ys = pts.map(function (p) { return -p.y; });
+            flags = flagsFromSeries(ys, smaArr(ys, SMA_FAST), ys.length >= SMA_SLOW ? smaArr(ys, SMA_SLOW) : []);
+          }
         }
       } else {
         var ys2 = pts.map(function (p) { return -p.y; });
         flags = flagsFromSeries(ys2, smaArr(ys2, SMA_FAST), ys2.length >= SMA_SLOW ? smaArr(ys2, SMA_SLOW) : []);
-      }
-      hidePricePath(src);
-      if (!flags.some(function (f) { return f === "pos" || f === "neg"; })) {
-        ensureHtmlLegend(host, svg);
-        return;
       }
       var parent = src.parentNode || svg;
       var start = 0;
@@ -1511,12 +1530,19 @@ def overlay_js() -> str:
         el.setAttribute("d", pathFromPts(chunk));
         parent.appendChild(el);
       }
-      for (var j = 1; j < flags.length; j++) {
-        var kind = flags[j] || "na";
-        if (kind !== cur) { emit(cur, start, j - 1); start = j; cur = kind; }
+      if (flags.some(function (f) { return f === "pos" || f === "neg"; })) {
+        for (var j = 1; j < flags.length; j++) {
+          var kind = flags[j] || "na";
+          if (kind !== cur) { emit(cur, start, j - 1); start = j; cur = kind; }
+        }
+        emit(cur, start, flags.length - 1);
       }
-      emit(cur, start, flags.length - 1);
+      var drew = svg.querySelector("[data-fd-trend-seg]");
+      if (drew) hidePricePath(src);
+      else showPricePath(src);
       ensureHtmlLegend(host, svg);
+    } catch (err) {
+      try { showPricePath(src); } catch (e2) {}
     } finally {
       restylingPx = false;
     }
@@ -1715,8 +1741,6 @@ def overlay_js() -> str:
     if (ma200.length) parent.insertBefore(polyEl("fd-chart-ma200", ma200, {"data-fd-ma": "200"}), src);
     var flags = ys.map(function (c, idx) { return trendFlag(c, s50[idx], s200[idx]); });
     if (flags.every(function (f) { return f == null; })) return;
-    src.setAttribute("data-fd-trend-src", "1");
-    src.style.opacity = "0";
     var start = 0;
     var cur = flags[0] || "na";
     function emit(kind, a, b) {
@@ -1730,6 +1754,10 @@ def overlay_js() -> str:
       if (kind !== cur) { emit(cur, start, j - 1); start = j; cur = kind; }
     }
     emit(cur, start, flags.length - 1);
+    if (parent.querySelector("[data-fd-trend-seg]")) {
+      src.setAttribute("data-fd-trend-src", "1");
+      src.style.opacity = "0";
+    }
     var svg = chart.tagName === "svg" || chart.tagName === "SVG" ? chart : (chart.querySelector && chart.querySelector("svg"));
     if (svg && isDetailChart(chart)) addLegend(svg, (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width) || chart.getBoundingClientRect().width);
   }
