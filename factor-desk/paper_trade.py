@@ -905,6 +905,7 @@ def strip_css() -> str:
 .fd-paper-chip:hover {{ color: #fff; }}
 .fd-paper-chip.fd-paper-up {{ color: #6ee7b7; border-color: #34d399; }}
 .fd-paper-chip.fd-paper-down {{ color: #fda4af; border-color: #fb7185; }}
+.fd-paper-chip[hidden], #{HOME_HOST_ID} [hidden] {{ display: none !important; }}
 .fd-paper-home-empty, .fd-paper-home-score.fd-paper-home-empty {{
   color: #6b7280;
   letter-spacing: 0.03em;

@@ -247,6 +247,7 @@ class HomeStripTests(unittest.TestCase):
         self.assertIn("selectTicker", js)
         self.assertIn("OPEN_LIMIT = 12", js)
         self.assertIn("weekStartMs", js)
+        self.assertIn(".fd-paper-chip[hidden]", pt.strip_css())
         self.assertIn("Already long — sell to close", js)
         self.assertIn("Previous trades", out)
         self.assertIn(">Buy</button>", pt.chrome_html("AAPL", mark=12.0))
