@@ -97,7 +97,7 @@ PX_SERIES_KEYS: tuple[str, ...] = (
 
 DB_SCRIPT_ID = "fd-breakout-db"
 JS_SCRIPT_ID = "fd-breakout-js"
-JS_VER = "pr17-metrics-drill"
+JS_VER = "pr17-html-metrics-map"
 CSS_STYLE_ID = "fd-breakout-css"
 PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
@@ -436,6 +436,178 @@ def metrics_payload(stats: Mapping[str, Any] | None, card: Mapping[str, Any] | N
             except (TypeError, ValueError):
                 continue
     return {k: v for k, v in out.items() if v is not None and v != ""}
+
+
+_TICKER_CTX_RE = re.compile(
+    r"""(?:["'](?:t|d|ticker|symbol)["']|\b(?:t|d|ticker|symbol))\s*:\s*["']([^"']+)["']""",
+    re.I,
+)
+_METRICS_KEY_RE = re.compile(r'(?:["\']metrics["\']|\bmetrics)\s*:\s*\{', re.I)
+_METRIC_NUM_RE = re.compile(
+    r"""["']?(r20_pct|rs_63|atr_pct|day_pct|r1_pct|r20|rs63|atr)["']?\s*:\s*(-?\d+(?:\.\d+)?)""",
+    re.I,
+)
+
+
+def _read_js_object(text: str, open_idx: int, *, limit: int = 4000) -> str:
+    if open_idx < 0 or open_idx >= len(text) or text[open_idx] != "{":
+        return ""
+    depth = 0
+    in_str = None
+    escape = False
+    end = min(len(text), open_idx + limit)
+    i = open_idx
+    while i < end:
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_str:
+                in_str = None
+        else:
+            if ch in "\"'":
+                in_str = ch
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[open_idx : i + 1]
+        i += 1
+    return ""
+
+
+def _parse_metrics_obj(blob: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for match in _METRIC_NUM_RE.finditer(blob or ""):
+        key = match.group(1)
+        try:
+            out[key] = float(match.group(2))
+        except (TypeError, ValueError):
+            continue
+    canon: dict[str, float] = {}
+    if "r20_pct" in out:
+        canon["r20_pct"] = out["r20_pct"]
+    elif "r20" in out:
+        canon["r20_pct"] = out["r20"]
+    if "rs_63" in out:
+        canon["rs_63"] = out["rs_63"]
+    elif "rs63" in out:
+        canon["rs_63"] = out["rs63"]
+    if "atr_pct" in out:
+        canon["atr_pct"] = out["atr_pct"]
+    elif "atr" in out:
+        canon["atr_pct"] = out["atr"]
+    if "day_pct" in out:
+        canon["day_pct"] = out["day_pct"]
+    elif "r1_pct" in out:
+        canon["day_pct"] = out["r1_pct"]
+    return canon
+
+
+def extract_live_metrics_map(html_text: str) -> dict[str, dict[str, float]]:
+    """Ticker → metrics from live HTML MOM cards (no ``fd-mom-db``).
+
+    Live Desktop embeds ~396 ``{t, metrics:{r20_pct, rs_63, atr_pct}}`` objects
+    in factorbook HTML. CoS hot-filled BB rows from that map; this is the
+    durable equivalent at ``ensure_embedded`` time.
+    """
+    out: dict[str, dict[str, float]] = {}
+    text = html_text or ""
+    for match in _METRICS_KEY_RE.finditer(text):
+        body = _read_js_object(text, match.end() - 1)
+        metrics = _parse_metrics_obj(body)
+        if not metrics:
+            continue
+        ctx_before = text[max(0, match.start() - 800) : match.start()]
+        after_start = match.end() - 1 + len(body)
+        ctx_after = text[after_start : after_start + 300]
+        before_tickers = _TICKER_CTX_RE.findall(ctx_before)
+        after_tickers = _TICKER_CTX_RE.findall(ctx_after)
+        raw = ""
+        if before_tickers:
+            raw = str(before_tickers[-1] or "").strip()
+        elif after_tickers:
+            raw = str(after_tickers[0] or "").strip()
+        if not raw:
+            continue
+        short = _short(raw)
+        if not short:
+            continue
+        for key in (short, raw):
+            cur = out.get(key)
+            if not isinstance(cur, dict):
+                out[key] = dict(metrics)
+                continue
+            for mk, mv in metrics.items():
+                if cur.get(mk) is None:
+                    cur[mk] = mv
+    return out
+
+
+def lookup_live_metrics(live_map: Mapping[str, Any] | None, ticker: str) -> dict[str, float]:
+    if not live_map or not ticker:
+        return {}
+    rec = live_map.get(ticker) or live_map.get(_short(ticker))
+    if not isinstance(rec, Mapping):
+        for key, val in live_map.items():
+            if _short(str(key)) == _short(ticker) and isinstance(val, Mapping):
+                rec = val
+                break
+    return {k: float(v) for k, v in (rec or {}).items() if _float_any(v) is not None}
+
+
+def merge_live_metrics_into_card(
+    card: Mapping[str, Any] | None,
+    live_map: Mapping[str, Any] | None,
+    ticker: str = "",
+) -> dict[str, Any]:
+    src = dict(card) if isinstance(card, Mapping) else {}
+    blob = lookup_live_metrics(live_map, ticker or str(src.get("ticker") or src.get("t") or ""))
+    if not blob:
+        return src
+    metrics = dict(src.get("metrics") or {})
+    for key, value in blob.items():
+        if metrics.get(key) is None:
+            metrics[key] = value
+    if metrics:
+        src["metrics"] = metrics
+    return src
+
+
+def enrich_ranked_from_map(
+    ranked: Mapping[str, Any] | None,
+    live_map: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Stamp live MOM ``metrics.*`` onto ranked BB rows (CoS map → durable)."""
+    ranked = dict(ranked or {})
+    if not live_map:
+        return ranked
+    for side in ("breakout", "breakdown"):
+        rows: list[dict[str, Any]] = []
+        for row in ranked.get(side) or []:
+            if not isinstance(row, Mapping):
+                continue
+            row = dict(row)
+            ticker = str(row.get("ticker") or row.get("t") or "")
+            src = row.get("_card") if isinstance(row.get("_card"), Mapping) else None
+            if src is None and isinstance(row.get("card"), Mapping):
+                src = row.get("card")
+            src = merge_live_metrics_into_card(src, live_map, ticker)
+            if src:
+                if isinstance(row.get("_card"), Mapping) or row.get("_card") is None:
+                    row["_card"] = src
+                if isinstance(row.get("card"), Mapping):
+                    card = dict(row["card"])
+                    if src.get("metrics"):
+                        card["metrics"] = src["metrics"]
+                    row["card"] = card
+                attach_px_stats(row, src)
+            rows.append(row)
+        ranked[side] = rows
+    return ranked
 
 
 def attach_px_stats(
@@ -856,17 +1028,25 @@ def rank_book(
     }
 
 
-def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
-    """JSON-safe db. Top-level Day/R20/RS63/ATR% plus a slim MOM card (no series)."""
+def slim_payload(
+    ranked: Mapping[str, Any] | None,
+    live_map: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """JSON-safe db. Nested ``metrics.r20_pct`` / ``rs_63`` / ``atr_pct`` (Mom shape)."""
     ranked = ranked or {}
+    live_map = live_map or {}
 
     def slim(rows: Any, score_key: str) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for row in rows or []:
             if not isinstance(row, Mapping):
                 continue
+            ticker = str(row.get("ticker") or row.get("t") or "")
             src = row.get("_card") if isinstance(row.get("_card"), Mapping) else None
-            stats = px_stats(src, ticker=str(row.get("ticker") or row.get("t") or ""))
+            if src is None and isinstance(row.get("card"), Mapping):
+                src = row.get("card")
+            src = merge_live_metrics_into_card(src, live_map, ticker)
+            stats = px_stats(src, ticker=ticker)
             for key in ("day", "r20", "rs63", "atr_pct"):
                 if row.get(key) is not None and row.get(key) != "":
                     stats[key] = row.get(key)
@@ -877,10 +1057,14 @@ def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
                 if value is not None:
                     card.setdefault(key, value)
             metrics = metrics_payload(stats, src)
+            if isinstance(row.get("metrics"), Mapping):
+                for key, value in row["metrics"].items():
+                    if value is not None and metrics.get(key) is None:
+                        metrics[key] = value
             if metrics:
                 card["metrics"] = metrics
             payload = {
-                "t": row.get("t") or _short(str(row.get("ticker") or "")),
+                "t": row.get("t") or _short(ticker),
                 "ticker": row.get("ticker"),
                 "score": row.get("score"),
                 "delta": row.get("delta"),
@@ -913,8 +1097,16 @@ def _script_json(blob: str) -> str:
     return (blob or "").replace("</", "<\\/")
 
 
-def embed_db(ranked: Mapping[str, Any] | None) -> str:
-    blob = json.dumps(slim_payload(ranked), separators=(",", ":"), ensure_ascii=True, default=str)
+def embed_db(
+    ranked: Mapping[str, Any] | None,
+    live_map: Mapping[str, Any] | None = None,
+) -> str:
+    blob = json.dumps(
+        slim_payload(ranked, live_map=live_map),
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    )
     return f'<script type="application/json" id="{DB_SCRIPT_ID}">{_script_json(blob)}</script>'
 
 
@@ -1694,8 +1886,12 @@ def _ensure_panes(html_text: str, ranked: Mapping[str, Any] | None, *, replace: 
     return _insert_host(html_text, host)
 
 
-def _ensure_db(html_text: str, ranked: Mapping[str, Any] | None) -> str:
-    tag = embed_db(ranked)
+def _ensure_db(
+    html_text: str,
+    ranked: Mapping[str, Any] | None,
+    live_map: Mapping[str, Any] | None = None,
+) -> str:
+    tag = embed_db(ranked, live_map=live_map)
     if re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', html_text, re.I):
         return re.sub(
             rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>',
@@ -1707,6 +1903,36 @@ def _ensure_db(html_text: str, ranked: Mapping[str, Any] | None) -> str:
     if "</body>" in html_text:
         return html_text.replace("</body>", tag + "\n</body>", 1)
     return html_text + tag
+
+
+def _enrich_existing_db(html_text: str, live_map: Mapping[str, Any] | None) -> str:
+    """Fill null metrics on an existing ``#fd-breakout-db`` from the live MOM map."""
+    if not live_map:
+        return html_text
+    match = re.search(
+        rf'<script\b[^>]*id=["\']{DB_SCRIPT_ID}["\'][^>]*>(.*?)</script>',
+        html_text or "",
+        re.I | re.S,
+    )
+    if not match:
+        return html_text
+    try:
+        data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return html_text
+    if not isinstance(data, dict):
+        return html_text
+    ranked = enrich_ranked_from_map(
+        {
+            "breakout": data.get("breakout") or [],
+            "breakdown": data.get("breakdown") or [],
+            "cap": data.get("cap", RANK_CAP),
+            "asof": data.get("asof"),
+        },
+        live_map,
+    )
+    tag = embed_db(ranked, live_map=live_map)
+    return html_text[: match.start()] + tag + html_text[match.end() :]
 
 
 def _replace_id_script(html_text: str, script_id: str, script: str) -> str:
@@ -1737,20 +1963,25 @@ def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> 
 
     ``ranked=None`` must not wipe ``#fd-breakout-db``. View shells stay; legacy
     ``#fd-bb-*`` are emptied. JS is **always** replaced (never skipped when
-    ``ranked is None``) so a recopy refreshes ``renderRow``. Always pass
-    ``rank_book(...)`` on a live write so stats stay filled.
+    ``ranked is None``) so a recopy refreshes ``renderRow``. Live MOM card
+    ``metrics.*`` are scraped from the HTML (no ``fd-mom-db``) and stamped
+    onto BB rows at embed time.
     """
     text = html_text or ""
+    live_map = extract_live_metrics_map(text)
     # Buttons before CSS: CSS selectors contain ``data-view="breakout"`` text.
     text = _ensure_nav(text)
     text = _ensure_css(text)
     text = _patch_setview(text)
     if ranked is not None:
+        ranked = enrich_ranked_from_map(ranked, live_map)
         text = _ensure_panes(text, ranked, replace=True)
-        text = _ensure_db(text, ranked)
+        text = _ensure_db(text, ranked, live_map=live_map)
     else:
         text = _ensure_panes(text, {"breakout": [], "breakdown": []}, replace=False)
         if not re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', text, re.I):
-            text = _ensure_db(text, {"breakout": [], "breakdown": []})
+            text = _ensure_db(text, {"breakout": [], "breakdown": []}, live_map=live_map)
+        elif live_map:
+            text = _enrich_existing_db(text, live_map)
     text = _ensure_js(text)
     return text

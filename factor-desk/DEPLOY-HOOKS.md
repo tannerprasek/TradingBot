@@ -448,8 +448,8 @@ Breakout/Breakdown must render **dense MOM cards** (ticker, score, Day/R20/RS63/
 
 - `#view-breakout` / `#view-breakdown` with `.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`
 - empty hidden `#fd-bb-breakout` / `#fd-bb-breakdown` so old CSS cannot paint stubs
-- `#fd-breakout-db` rows with top-level numeric `day`/`r20`/`rs63`/`atr_pct` (computed from `px_series` / `prices_long.csv`) and a nested `card` object that is never left `null` when a ticker exists
-- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, tries `__FD_RENDER_ROW__` only if it does not paint a digest matrix, otherwise builds the dense MOM-style card — **never** `cardHTML(card)`. Short `band 10` / `+3/7d` / streak chips — **not** a brown why dump.
+- `#fd-breakout-db` rows with top-level numeric `day`/`r20`/`rs63`/`atr_pct` **and** nested `metrics.r20_pct` / `rs_63` / `atr_pct` (the shape live `cardHTML` reads). Stats come from scraping the ~396 live HTML MOM card objects at embed time (there is **no** `#fd-mom-db`), else `px_series` / `prices_long.csv`. Nested `card` is never left `null` when a ticker exists.
+- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, tries `__FD_RENDER_ROW__` only if it does not paint a digest matrix, otherwise builds the dense MOM-style card — **never** `cardHTML(card)` (`renderRow` is banned from that fallback). Short `band 10` / `+3/7d` / streak chips — **not** a brown why dump. `fmtPct` is `(x*100).toFixed(d)+"%"`; `fmtAtr` does not `*100` when `abs(atr_pct) >= 1`.
 
 ### Live `setView` / `hideAllPanes` / `paintView` (required on Desktop)
 
@@ -515,7 +515,7 @@ Pills (`DA·A` / `DA·B` / `DA·C` / `DA`) appear when a recent `YYYY-MM-DD-*.md
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
 | `card_render.py` | **recopy** — wrap live `cardHTML`; portable chip CSS; `__FD_RENDER_CARD__` / `__FD_RENDER_ROW__`; Day/R20/RS63/ATR% aliases |
-| `breakout.py` | **recopy** — never call `cardHTML`; dense Day/R20/RS63/ATR% cards; `metrics.r20_pct` / `rs_63` / `atr_pct`; nav listener is nav-only so card click → `selectTicker` (name-drill), not `show(breakdown)` |
+| `breakout.py` | **recopy** — never call `cardHTML` from BB `renderRow`; scrape live HTML `"metrics":{r20_pct,rs_63,atr_pct}` (no `fd-mom-db`) onto ranked `#fd-breakout-db` rows; dense Day/R20/RS63/ATR%; nav listener is nav-only so card click → `selectTicker` (name-drill), not `show(breakdown)` |
 | `book_delta.py` | new — since-last-Refresh strip |
 | `desk_hitch.py` | new — DA hitch pills |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
