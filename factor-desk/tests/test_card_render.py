@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -96,6 +99,56 @@ class NormalizeTests(unittest.TestCase):
         self.assertIn("fd-bb-band", keys)
 
 
+class TagAndStatTests(unittest.TestCase):
+    def test_catalog_key_matches_screenshot_labels(self) -> None:
+        self.assertEqual(cr.catalog_key("ma fan"), "MA FAN")
+        self.assertEqual(cr.catalog_key("HM HL"), "HM/HL")
+        self.assertEqual(cr.catalog_key("V EMA"), "V.EMA")
+        self.assertEqual(cr.catalog_key("TREND^"), "TREND↑")
+        self.assertEqual(cr.catalog_key("not a tag"), "")
+
+    def test_active_tags_skips_off_entries(self) -> None:
+        card = {
+            "tags": [
+                {"label": "MA FAN", "on": 1},
+                {"label": "GAP", "off": True},
+                "BREAKOUT",
+            ],
+            "tg": {"CLOSE HI": True, "SQUEEZE": 0},
+        }
+        self.assertEqual(cr.active_tags(card), ["MA FAN", "BREAKOUT", "CLOSE HI"])
+
+    def test_portable_card_keeps_stats_drops_series(self) -> None:
+        mom = {
+            "t": "SPCX",
+            "r20": 1.2,
+            "rs63": 0.4,
+            "atr_pct": 2.1,
+            "tags": ["MA FAN", "BREAKOUT"],
+            "px_series": [1, 2, 3, 4],
+            "mom_score_series": [{"date": "2026-09-01", "score": 8}],
+        }
+        row = {"t": "SPCX", "score": 9, "delta": 2, "lookback": 7, "why": "band 9 · +2 / 7d"}
+        out = cr.portable_card(mom, row)
+        self.assertEqual(out["r20"], 1.2)
+        self.assertEqual(out["rs63"], 0.4)
+        self.assertEqual(out["atr_pct"], 2.1)
+        self.assertNotIn("px_series", out)
+        self.assertNotIn("mom_score_series", out)
+        self.assertNotIn("why", out)
+        self.assertEqual(out["tags"], ["MA FAN", "BREAKOUT"])
+        keys = [p["key"] for p in out["enrich_pills"]]
+        self.assertIn("fd-bb-band", keys)
+        self.assertIn("fd-bb-delta", keys)
+
+    def test_alias_stats_from_ret_20d(self) -> None:
+        card: dict = {"ret_20d": 0.8, "RS_63": 1.1, "ATR": 3.4}
+        cr.alias_stats(card)
+        self.assertEqual(card["r20"], 0.8)
+        self.assertEqual(card["rs63"], 1.1)
+        self.assertEqual(card["atr_pct"], 3.4)
+
+
 class EmbedTests(unittest.TestCase):
     def test_ensure_embedded_wraps_cardhtml_and_exposes_render(self) -> None:
         html = """<!DOCTYPE html><html><head></head><body>
@@ -108,10 +161,18 @@ class EmbedTests(unittest.TestCase):
         self.assertIn("window.__FD_RENDER_ROW__", out)
         self.assertIn("window.__FD_NORMALIZE_CARD__", out)
         self.assertIn("polishNode", out)
-        self.assertIn("fd-tag-chip", out)
+        self.assertIn("fillStats", out)
+        self.assertIn("rewriteAtr", out)
+        self.assertIn("HM/HL", out)
+        self.assertIn("V.EMA", out)
+        self.assertIn("ATR%", out)
+        self.assertIn("window.__FD_POLISH_NODE__", out)
+        self.assertIn("fmtAtr", out)
         self.assertIn("fd-bb-band", out)
         self.assertIn("labels[t]", out)
         self.assertIn("article.card .badge", out)
+        self.assertIn("Day ", out)
+        self.assertIn(cr.JS_VER, out)
         again = cr.ensure_embedded(out)
         self.assertEqual(len(re.findall(r'id="fd-card-js"', again)), 1)
         self.assertEqual(len(re.findall(r'id="fd-card-css"', again)), 1)
@@ -148,6 +209,123 @@ class EmbedTests(unittest.TestCase):
                 self.assertGreater(paper_at, card_at)
             ast_ok = compile(Path(desk_dash.__file__).read_text(encoding="utf-8"), desk_dash.__file__, "exec")
             self.assertIsNotNone(ast_ok)
+
+    def test_js_keeps_mom_digest_and_rewrites_atr(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        jsdom_root = Path("/tmp/fd-jsdom")
+        jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+        if not jsdom_mod.is_dir():
+            jsdom_root.mkdir(parents=True, exist_ok=True)
+            npm = shutil.which("npm")
+            if not npm:
+                self.skipTest("npm not installed")
+            subprocess.run(
+                [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        tags = [
+            "MA FAN",
+            "CLOSE HI",
+            "52W HI",
+            "HM/HL",
+            "V.EMA",
+            "ABOVE 50",
+            "ABOVE 200",
+            "MOM+",
+            "TREND↑",
+            "SQUEEZE",
+            "RS+",
+            "BREAKOUT",
+        ]
+        cells = "".join(f"<div>{t}</div>" for t in tags)
+        live = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<script>
+window.MOM = {{ cards: [{{
+  t:"SPCX", d:"SPCX", ticker:"SPCX US Equity", score:9,
+  r20:1.2, rs63:0.4, atr_pct:2.1,
+  metrics:{{r20_pct:0.1277, rs_63:0.4, atr_pct:2.1}},
+  tags:["MA FAN","BREAKOUT"]
+}}] }};
+function cardHTML(c) {{
+  var t = (c && (c.t || c.d)) || "";
+  var m = (c && c.metrics) || {{}};
+  function fmtPct(x) {{
+    if (x == null || x === "") return "—";
+    var n = Number(x);
+    if (!isFinite(n)) return "—";
+    return (n * 100).toFixed(1) + "%";
+  }}
+  function fmtN(x) {{
+    if (x == null || x === "") return "—";
+    return String(x);
+  }}
+  return '<article class="card" data-t="'+t+'">' +
+    '<header><h2>'+t+'</h2><span class="sc">'+(c && c.score != null ? c.score : '')+'</span>' +
+    '<span class="status">Weak / fading</span></header>' +
+    '<div class="digest" style="display:grid;grid-template-columns:repeat(4,1fr)">{cells}</div>' +
+    '<div class="stats"><span>R20 '+fmtPct(m.r20_pct)+'</span><span>RS63 '+fmtN(m.rs_63)+'</span><span>ATR% '+fmtPct(m.atr_pct)+'</span></div>' +
+    '<p class="blurb">Trending down. Score 9/12.</p>' +
+    '</article>';
+}}
+</script>
+</body></html>"""
+        html = cr.ensure_embedded(live)
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            runner = Path(tmp) / "run.js"
+            page.write_text(html, encoding="utf-8")
+            runner.write_text(
+                f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+const html = fs.readFileSync({json.dumps(str(page))}, "utf8");
+const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1/factorbook.html" }});
+const window = dom.window;
+const row = {{
+  t: "SPCX", ticker: "SPCX US Equity", score: 9
+}};
+const node = window.__FD_RENDER_ROW__(row);
+if (!node) {{ console.log(JSON.stringify({{error:"no node"}})); process.exit(2); }}
+const report = {{
+  text: (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim(),
+  stripped: node.getAttribute("data-fd-ghost-stripped"),
+  html: node.outerHTML
+}};
+console.log(JSON.stringify(report));
+""",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [node, str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            report = json.loads(proc.stdout.strip().splitlines()[-1])
+            text = report["text"]
+            self.assertNotEqual(report.get("stripped"), "1", msg=report)
+            self.assertIn("SPCX", text)
+            self.assertIn("Weak / fading", text)
+            self.assertIn("MA FAN", text)
+            self.assertIn("CLOSE HI", text)
+            self.assertIn("HM/HL", text)
+            self.assertIn("V.EMA", text)
+            self.assertIn("SQUEEZE", text)
+            self.assertIn("Trending down", text)
+            self.assertIn("12.8%", text)
+            self.assertIn("ATR% 2.1%", text)
+            self.assertNotIn("210%", text)
+            self.assertNotIn("230%", text)
+            self.assertIn("fmtAtr", cr.strip_js())
 
 
 if __name__ == "__main__":

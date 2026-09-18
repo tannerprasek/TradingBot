@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 import book_delta  # noqa: E402
 import breakout as bo  # noqa: E402
+import card_render as cr  # noqa: E402
 import dapi_enrich as de  # noqa: E402
 import desk_dash  # noqa: E402
 import mom_streak as ms  # noqa: E402
@@ -142,6 +145,254 @@ class RankingTests(unittest.TestCase):
         self.assertIsNotNone(a)
         self.assertIsNotNone(b)
         self.assertGreater(b["breakout_score"], a["breakout_score"])
+
+
+    def test_slim_payload_embeds_portable_stats_and_tags(self) -> None:
+        ranked = {
+            "breakout": [
+                {
+                    "t": "SPCX",
+                    "ticker": "SPCX US Equity",
+                    "score": 9,
+                    "delta": 2,
+                    "lookback": 7,
+                    "why": "band 9 · +2 / 7d",
+                    "_card": {
+                        "t": "SPCX",
+                        "r20": 1.2,
+                        "rs63": 0.4,
+                        "atr_pct": 2.1,
+                        "tags": ["MA FAN", "BREAKOUT"],
+                        "px_series": list(range(200)),
+                    },
+                }
+            ],
+            "breakdown": [],
+        }
+        payload = bo.slim_payload(ranked)
+        card = payload["breakout"][0]["card"]
+        self.assertEqual(card["r20"], 1.2)
+        self.assertEqual(card["rs63"], 0.4)
+        self.assertEqual(card["atr_pct"], 2.1)
+        self.assertEqual(card["tags"], ["MA FAN", "BREAKOUT"])
+        self.assertNotIn("px_series", card)
+        self.assertEqual(payload["breakout"][0]["r20"], 1.2)
+        self.assertEqual(payload["breakout"][0]["rs63"], 0.4)
+        self.assertEqual(payload["breakout"][0]["atr_pct"], 2.1)
+        self.assertIsNotNone(payload["breakout"][0]["card"])
+        blob = json.dumps(payload)
+        self.assertNotIn("px_series", blob)
+        self.assertIn("fd-bb-band", json.dumps(payload["breakout"][0]["pills"]))
+
+    def test_px_stats_from_close_history(self) -> None:
+        spy = [100.0]
+        spcx = [50.0]
+        for _ in range(80):
+            spy.append(round(spy[-1] * 1.001, 6))
+            spcx.append(round(spcx[-1] * 1.004, 6))
+        stats = bo.px_stats(
+            {"ticker": "SPCX US Equity", "px_series": spcx},
+            {"SPY US Equity": [(None, px) for px in spy]},
+            ticker="SPCX US Equity",
+        )
+        self.assertIsInstance(stats["r20"], float)
+        self.assertIsInstance(stats["rs63"], float)
+        self.assertIsInstance(stats["atr_pct"], float)
+        self.assertIsInstance(stats["day"], float)
+        self.assertGreater(stats["r20"], 0)
+        self.assertLess(abs(stats["r20"]), 1.0)
+        self.assertGreater(stats["atr_pct"], 0)
+        self.assertNotEqual(stats["r20"], stats["rs63"])
+
+    def test_slim_payload_reads_live_metrics_blob(self) -> None:
+        ranked = {
+            "breakout": [
+                {
+                    "t": "SPCX",
+                    "ticker": "SPCX US Equity",
+                    "score": 9,
+                    "why": "band 9",
+                    "_card": {
+                        "t": "SPCX",
+                        "ticker": "SPCX US Equity",
+                        "metrics": {"r20_pct": 0.1277, "rs_63": 0.041, "atr_pct": 2.3},
+                    },
+                }
+            ],
+            "breakdown": [],
+        }
+        row = bo.slim_payload(ranked)["breakout"][0]
+        self.assertEqual(row["metrics"]["r20_pct"], 0.1277)
+        self.assertEqual(row["metrics"]["rs_63"], 0.041)
+        self.assertEqual(row["metrics"]["atr_pct"], 2.3)
+        self.assertEqual(row["r20"], 0.1277)
+        self.assertEqual(row["card"]["metrics"]["r20_pct"], 0.1277)
+        self.assertEqual(row["card"]["metrics"]["atr_pct"], 2.3)
+
+    def test_slim_payload_merges_html_live_map_when_card_has_no_metrics(self) -> None:
+        ranked = {
+            "breakout": [
+                {
+                    "t": "SPCX",
+                    "ticker": "SPCX US Equity",
+                    "score": 9,
+                    "r20": None,
+                    "rs63": None,
+                    "atr_pct": None,
+                    "card": None,
+                    "why": "band 9",
+                }
+            ],
+            "breakdown": [
+                {
+                    "t": "CRACK",
+                    "ticker": "CRACK US Equity",
+                    "score": 4,
+                    "r20": None,
+                    "card": None,
+                }
+            ],
+        }
+        live_map = {
+            "SPCX": {"r20_pct": 0.1277, "rs_63": 0.041, "atr_pct": 2.3},
+            "CRACK": {"r20_pct": -0.08, "rs_63": -0.11, "atr_pct": 4.2},
+        }
+        payload = bo.slim_payload(ranked, live_map=live_map)
+        up = payload["breakout"][0]
+        down = payload["breakdown"][0]
+        self.assertEqual(up["metrics"]["r20_pct"], 0.1277)
+        self.assertEqual(up["r20"], 0.1277)
+        self.assertEqual(up["atr_pct"], 2.3)
+        self.assertEqual(up["card"]["metrics"]["rs_63"], 0.041)
+        self.assertEqual(down["metrics"]["r20_pct"], -0.08)
+        self.assertEqual(down["metrics"]["atr_pct"], 4.2)
+        self.assertIsInstance(up["card"], dict)
+
+    def test_slim_payload_computes_stats_when_card_fields_null(self) -> None:
+        closes = [100.0]
+        for i in range(70):
+            closes.append(round(closes[-1] * (1.01 if i % 3 else 0.997), 6))
+        ranked = {
+            "breakout": [
+                {
+                    "t": "SPCX",
+                    "ticker": "SPCX US Equity",
+                    "score": 9,
+                    "r20": None,
+                    "rs63": None,
+                    "atr_pct": None,
+                    "card": None,
+                    "why": "band 9",
+                    "_card": {
+                        "t": "SPCX",
+                        "ticker": "SPCX US Equity",
+                        "score": 9,
+                        "px_series": closes,
+                    },
+                }
+            ],
+            "breakdown": [],
+        }
+        payload = bo.slim_payload(ranked)
+        row = payload["breakout"][0]
+        self.assertIsInstance(row["r20"], float)
+        self.assertIsInstance(row["rs63"], float)
+        self.assertIsInstance(row["atr_pct"], float)
+        self.assertIsInstance(row["day"], float)
+        self.assertIsInstance(row["card"], dict)
+        self.assertEqual(row["card"]["r20"], row["r20"])
+        self.assertLess(abs(row["r20"]), 1.0)
+        self.assertIn("r20_pct", row["metrics"])
+        self.assertEqual(row["metrics"]["r20_pct"], row["r20"])
+        self.assertNotIn("px_series", json.dumps(payload))
+
+    def test_rank_book_fills_stats_from_prices_long(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            start = date(2026, 5, 4)
+            days = _weekdays(start, 80)
+            lines = ["date,ticker,close"]
+            spy = 400.0
+            px = 20.0
+            for i, d in enumerate(days):
+                spy *= 1.001
+                px *= 1.003
+                lines.append(f"{d.isoformat()},SPY US Equity,{spy:.4f}")
+                lines.append(f"{d.isoformat()},SPCX US Equity,{px:.4f}")
+            (root / "prices_long.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            hist, card = _hist_and_card("SPCX US Equity", [6, 7, 8, 8, 9, 9, 10])
+            ranked = bo.rank_book([card], hist, root=root)
+            self.assertTrue(ranked["breakout"], ranked)
+            row = ranked["breakout"][0]
+            self.assertIsInstance(row.get("r20"), float)
+            self.assertIsInstance(row.get("rs63"), float)
+            self.assertIsInstance(row.get("atr_pct"), float)
+            slim = bo.slim_payload(ranked)["breakout"][0]
+            self.assertIsInstance(slim["r20"], float)
+            self.assertIsInstance(slim["atr_pct"], float)
+            self.assertGreater(slim["atr_pct"], 0)
+
+
+def _live_mom_script(cards: list[dict]) -> str:
+    """Synthetic live factorbook: MOM card objects with nested metrics, no fd-mom-db."""
+    bits = []
+    for card in cards:
+        t = card["t"]
+        m = card["metrics"]
+        bits.append(
+            '{t:"%s", d:"%s", ticker:"%s US Equity", score:%s, '
+            '"metrics":{"r20_pct":%s, "rs_63":%s, "atr_pct":%s}}'
+            % (t, t, t, card.get("score", 9), m["r20_pct"], m["rs_63"], m["atr_pct"])
+        )
+    return (
+        "<script>\nwindow.MOM = { cards: [], up: ["
+        + ",".join(bits)
+        + "], down: [] };\n</script>"
+    )
+
+
+class LiveMetricsMapTests(unittest.TestCase):
+    def test_extract_live_metrics_map_from_embedded_card_json(self) -> None:
+        html = (
+            "<!DOCTYPE html><html><body>"
+            + _live_mom_script(
+                [
+                    {"t": "SPCX", "metrics": {"r20_pct": 0.1277, "rs_63": 0.041, "atr_pct": 2.3}},
+                    {"t": "CRACK", "metrics": {"r20_pct": -0.08, "rs_63": -0.11, "atr_pct": 4.2}},
+                ]
+            )
+            + "</body></html>"
+        )
+        self.assertNotIn("fd-mom-db", html)
+        got = bo.extract_live_metrics_map(html)
+        self.assertEqual(got["SPCX"]["r20_pct"], 0.1277)
+        self.assertEqual(got["SPCX"]["rs_63"], 0.041)
+        self.assertEqual(got["SPCX"]["atr_pct"], 2.3)
+        self.assertEqual(got["CRACK"]["r20_pct"], -0.08)
+        self.assertIn("SPCX US Equity", got)
+
+    def test_extract_live_metrics_map_reads_ticker_after_metrics(self) -> None:
+        html = (
+            '<script>var cards=[{metrics:{r20_pct:0.05,rs_63:0.01,atr_pct:3.1},t:"LATE"}];'
+            "</script>"
+        )
+        got = bo.extract_live_metrics_map(html)
+        self.assertEqual(got["LATE"]["r20_pct"], 0.05)
+        self.assertEqual(got["LATE"]["atr_pct"], 3.1)
+
+    def test_enrich_ranked_from_map_fills_null_rows(self) -> None:
+        ranked = {
+            "breakout": [{"t": "SPCX", "ticker": "SPCX US Equity", "score": 9, "r20": None, "card": None}],
+            "breakdown": [{"t": "CRACK", "score": 4, "r20": None, "card": None}],
+        }
+        live_map = {
+            "SPCX": {"r20_pct": 0.1277, "rs_63": 0.041, "atr_pct": 2.3},
+            "CRACK": {"r20_pct": -0.08, "rs_63": -0.11, "atr_pct": 4.2},
+        }
+        out = bo.enrich_ranked_from_map(ranked, live_map)
+        self.assertEqual(out["breakout"][0]["metrics"]["r20_pct"], 0.1277)
+        self.assertEqual(out["breakout"][0]["r20"], 0.1277)
+        self.assertEqual(out["breakdown"][0]["metrics"]["atr_pct"], 4.2)
 
 
 class EmbedTests(unittest.TestCase):
@@ -271,14 +522,29 @@ function syncNav() {}
         self.assertIn("view-breakout", js)
         self.assertIn("view-breakdown", js)
         self.assertIn("search-pane", js)
-        self.assertIn("__FD_RENDER_ROW__", js)
+        self.assertIn("__FD_FIND_CARD__", js)
         self.assertIn("__FD_RENDER_CARD__", js)
-        self.assertIn("cardHTML", js)
+        self.assertIn("__FD_BB_RENDER_ROW__", js)
+        self.assertIn("callCardHTML", js)
+        self.assertIn("__FD_BB_CARDHTML__", js)
+        self.assertIn(bo.JS_VER, js)
+        self.assertIn("window.cardHTML", js)
+        self.assertIn("function callCardHTML", js)
         self.assertIn("selectTicker", js)
-        self.assertIn("if (!display) return null", js)
+        self.assertIn("isNavControl", js)
+        self.assertIn('closest("article.card, .card")', js)
+        self.assertNotIn('closest("button, [data-view], [data-fd-breakout], [data-fd-breakdown]")', js)
+        self.assertIn("fmtPct", js)
+        self.assertIn("fmtAtr", js)
+        self.assertIn("r20_pct", js)
+        self.assertIn("Math.abs(n) < 1", js)
+        self.assertNotIn("if (!display) return null", js)
         self.assertNotIn("fd-bb-card", js)
         self.assertNotIn('key: "fd-bb"', js)
         self.assertNotIn("cls: \"fd-bb-why\"", js)
+        self.assertNotIn("denseHTML", js)
+        self.assertNotIn("__FD_BB_NO_CARDHTML_FALLBACK__", js)
+        self.assertNotIn("__FD_BB_PORTABLE_FIX__", js)
         self.assertIn('class="btn nav-btn"', out)
 
     def test_panes_html_emits_view_shells_not_stubs(self) -> None:
@@ -324,6 +590,8 @@ function syncNav() {}
         pill_labels = [p.get("label") for p in data["breakout"][0].get("pills") or []]
         self.assertTrue(any(str(lab).startswith("band ") for lab in pill_labels))
         self.assertFalse(any(" · " in str(lab) for lab in pill_labels))
+        card = data["breakout"][0].get("card") or {}
+        self.assertEqual(card.get("t") or card.get("d"), "CLIMB")
         self.assertIn('id="view-breakout"', filled)
         self.assertNotRegex(filled, r'<article\b[^>]*fd-bb-card')
         self.assertNotIn("No breakout names this Refresh.", filled)
@@ -342,6 +610,373 @@ function syncNav() {}
         self.assertNotIn("No breakout names this Refresh.", kept)
         self.assertIn('id="view-breakout"', kept)
         self.assertIn('id="breakout-grid"', kept)
+
+    def test_ensure_embedded_none_refreshes_js_to_cardhtml(self) -> None:
+        old_js = """
+<script id="fd-breakout-js">
+(function () {
+  if (window.__FD_BB_BOUND__) return;
+  window.__FD_BB_BOUND__ = true;
+  function renderRow(row) {
+    var fn = window.cardHTML;
+    return fn(row);
+  }
+})();
+</script>
+"""
+        html = f"""<!DOCTYPE html><html><body>
+<nav><button>Momentum Down</button></nav>
+<script type="application/json" id="fd-breakout-db">{{"breakout":[{{"t":"SPCX","ticker":"SPCX US Equity","score":9,"r20":null,"rs63":null,"atr_pct":null,"card":null,"why":"band 9"}}],"breakdown":[]}}</script>
+{old_js}
+</body></html>"""
+        self.assertEqual(html.count("id=\"fd-breakout-js\""), 1)
+        self.assertIn("window.cardHTML", html)
+        out = bo.ensure_embedded(html, None)
+        scripts = re.findall(
+            r'<script\b[^>]*id=["\']fd-breakout-js["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertEqual(len(scripts), 1, "duplicate fd-breakout-js left behind")
+        js = scripts[0]
+        self.assertIn(bo.JS_VER, js)
+        self.assertIn("__FD_BB_CARDHTML__", js)
+        self.assertIn("callCardHTML", js)
+        self.assertIn("window.cardHTML", js)
+        self.assertNotIn("denseHTML", js)
+        self.assertNotIn("__FD_BB_NO_CARDHTML_FALLBACK__", js)
+        db_blob = re.search(
+            r'<script\b[^>]*id=["\']fd-breakout-db["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(db_blob)
+        data = json.loads(db_blob.group(1))
+        self.assertEqual(data["breakout"][0]["t"], "SPCX")
+
+    def test_ensure_embedded_stamps_html_metrics_onto_ranked_rows(self) -> None:
+        """CoS hot-fill: scrape ~396 live card metrics JSON onto BB db at embed time."""
+        cards = []
+        ranked_bo = []
+        ranked_bd = []
+        for i in range(12):
+            t = f"UP{i:02d}"
+            cards.append(
+                {
+                    "t": t,
+                    "metrics": {
+                        "r20_pct": round(0.10 + i * 0.002, 4),
+                        "rs_63": round(0.03 + i * 0.001, 4),
+                        "atr_pct": round(2.0 + i * 0.1, 2),
+                    },
+                }
+            )
+            ranked_bo.append(
+                {
+                    "t": t,
+                    "ticker": f"{t} US Equity",
+                    "score": 9,
+                    "r20": None,
+                    "rs63": None,
+                    "atr_pct": None,
+                    "card": None,
+                    "why": "band 9",
+                }
+            )
+            dt = f"DN{i:02d}"
+            cards.append(
+                {
+                    "t": dt,
+                    "metrics": {
+                        "r20_pct": round(-0.09 - i * 0.001, 4),
+                        "rs_63": round(-0.05 - i * 0.001, 4),
+                        "atr_pct": round(3.5 + i * 0.1, 2),
+                    },
+                }
+            )
+            ranked_bd.append(
+                {
+                    "t": dt,
+                    "ticker": f"{dt} US Equity",
+                    "score": 4,
+                    "r20": None,
+                    "rs63": None,
+                    "atr_pct": None,
+                    "card": None,
+                    "why": "band 4",
+                }
+            )
+        html = (
+            "<!DOCTYPE html><html><body><nav><button>Momentum Down</button></nav>"
+            + _live_mom_script(cards)
+            + "</body></html>"
+        )
+        self.assertNotIn("fd-mom-db", html)
+        self.assertGreaterEqual(html.count('"metrics":{'), 24)
+        out = bo.ensure_embedded(
+            html, {"breakout": ranked_bo, "breakdown": ranked_bd}
+        )
+        blob = re.search(
+            r'<script\b[^>]*id=["\']fd-breakout-db["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(blob)
+        data = json.loads(blob.group(1))
+        self.assertEqual(len(data["breakout"]), 12)
+        self.assertEqual(len(data["breakdown"]), 12)
+        for i, row in enumerate(data["breakout"]):
+            self.assertIsInstance(row["metrics"]["r20_pct"], float, row)
+            self.assertEqual(row["metrics"]["r20_pct"], round(0.10 + i * 0.002, 4))
+            self.assertEqual(row["r20"], row["metrics"]["r20_pct"])
+            self.assertEqual(row["metrics"]["rs_63"], round(0.03 + i * 0.001, 4))
+            self.assertEqual(row["metrics"]["atr_pct"], round(2.0 + i * 0.1, 2))
+            self.assertGreaterEqual(abs(row["atr_pct"]), 1.0)
+            self.assertEqual(row["card"]["metrics"]["r20_pct"], row["metrics"]["r20_pct"])
+        for i, row in enumerate(data["breakdown"]):
+            self.assertEqual(row["metrics"]["r20_pct"], round(-0.09 - i * 0.001, 4))
+            self.assertEqual(row["metrics"]["atr_pct"], round(3.5 + i * 0.1, 2))
+        bb_js = re.search(
+            r'<script\b[^>]*id=["\']fd-breakout-js["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(bb_js)
+        self.assertIn("cardHTML", bb_js.group(1))
+        self.assertIn("function renderRow", bb_js.group(1))
+        render = bb_js.group(1).split("function renderRow", 1)[1][:700]
+        self.assertIn("callCardHTML", render)
+        self.assertNotIn("denseHTML", render)
+
+    def test_ensure_embedded_none_enriches_existing_db_from_html_map(self) -> None:
+        html = (
+            "<!DOCTYPE html><html><body>\n"
+            "<nav><button>Momentum Down</button></nav>\n"
+            '<script type="application/json" id="fd-breakout-db">'
+            '{"breakout":[{"t":"SPCX","ticker":"SPCX US Equity","score":9,"r20":null,'
+            '"rs63":null,"atr_pct":null,"card":null,"why":"band 9"}],'
+            '"breakdown":[{"t":"CRACK","ticker":"CRACK US Equity","score":4,"r20":null,'
+            '"rs63":null,"atr_pct":null,"card":null}]}'
+            "</script>\n"
+            + _live_mom_script(
+                [
+                    {"t": "SPCX", "metrics": {"r20_pct": 0.1277, "rs_63": 0.041, "atr_pct": 2.3}},
+                    {"t": "CRACK", "metrics": {"r20_pct": -0.08, "rs_63": -0.11, "atr_pct": 4.2}},
+                ]
+            )
+            + "\n</body></html>"
+        )
+        self.assertNotIn("fd-mom-db", html)
+        out = bo.ensure_embedded(html, None)
+        blob = re.search(
+            r'<script\b[^>]*id=["\']fd-breakout-db["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(blob)
+        data = json.loads(blob.group(1))
+        up = data["breakout"][0]
+        down = data["breakdown"][0]
+        self.assertEqual(up["t"], "SPCX")
+        self.assertEqual(up["metrics"]["r20_pct"], 0.1277)
+        self.assertEqual(up["r20"], 0.1277)
+        self.assertEqual(up["metrics"]["atr_pct"], 2.3)
+        self.assertEqual(up["card"]["metrics"]["rs_63"], 0.041)
+        self.assertEqual(down["metrics"]["r20_pct"], -0.08)
+        self.assertEqual(down["metrics"]["atr_pct"], 4.2)
+        js = re.search(
+            r'<script\b[^>]*id=["\']fd-breakout-js["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(js)
+        self.assertIn("cardHTML", js.group(1))
+
+    def test_strip_js_calls_live_cardhtml(self) -> None:
+        js = bo.strip_js()
+        self.assertIn("cardHTML", js)
+        self.assertIn("callCardHTML", js)
+        self.assertIn("momCardFor", js)
+        self.assertIn("rewriteAtr", js)
+        self.assertNotIn("denseHTML", js)
+        self.assertNotIn("hasGhostMatrix", js)
+        self.assertIn("fmtPct", js)
+        self.assertIn("fmtAtr", js)
+        self.assertIn("selectTicker", js)
+        self.assertIn("function renderRow", js)
+        render = js.split("function renderRow", 1)[1][:800]
+        self.assertIn("callCardHTML", render)
+        self.assertNotIn("denseHTML", render)
+        self.assertNotIn("tryPortable", render)
+        src = Path(bo.__file__).read_text(encoding="utf-8")
+        js_block = src.split("def strip_js()", 1)[1].split("def panes_html", 1)[0]
+        self.assertIn("window.cardHTML", js_block)
+        self.assertIn("callCardHTML", js_block)
+        self.assertNotIn('closest("button, [data-view], [data-fd-breakout], [data-fd-breakdown]")', js)
+
+    def test_jsdom_cardhtml_paints_mom_chrome(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        jsdom_root = Path("/tmp/fd-jsdom")
+        jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+        if not jsdom_mod.is_dir():
+            jsdom_root.mkdir(parents=True, exist_ok=True)
+            npm = shutil.which("npm")
+            if not npm:
+                self.skipTest("npm not installed")
+            subprocess.run(
+                [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        live = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<nav>
+  <button class="btn" data-view="home">Home</button>
+  <button class="btn">Momentum Down</button>
+</nav>
+<div id="home">FLAGS</div>
+<div id="breakout-grid" class="grid dense"></div>
+<script>
+window.__cardHTMLCalls = [];
+window.MOM = { cards: [], up: [
+  {t:"SPCX", d:"SPCX", ticker:"SPCX US Equity", score:9, mom_streak_label:"↑3d>5",
+   "metrics":{"r20_pct":0.1277, "rs_63":0.04, "atr_pct":2.3}}
+], down: [] };
+function cardHTML(c) {
+  c = c || {};
+  window.__cardHTMLCalls.push(c.t || c.d || "");
+  var t = c.t || c.d || "";
+  var m = c.metrics || {};
+  function fmtPct(x) {
+    if (x == null || x === "") return "—";
+    var n = Number(x);
+    if (!isFinite(n)) return "—";
+    return (n * 100).toFixed(1) + "%";
+  }
+  function fmtN(x) {
+    if (x == null || x === "") return "—";
+    return String(x);
+  }
+  var score = c.score != null ? c.score : "";
+  return '<article class="card" data-t="'+t+'">' +
+    '<header><h2>'+t+'</h2><span class="sc">'+score+'</span>' +
+    '<span class="status">Weak / fading</span>' +
+    '<span class="streak">'+(c.mom_streak_label || "")+'</span></header>' +
+    '<div class="trend">Trending down</div>' +
+    '<div class="digest"><div>MA FAN</div><div>CLOSE HI</div><div>52W HI</div><div>HM/HL</div>' +
+    '<div>V.EMA</div><div>ABOVE 50</div><div>ABOVE 200</div><div>MOM+</div>' +
+    '<div>TREND↑</div><div>SQUEEZE</div><div>RS+</div><div>BREAKOUT</div>' +
+    '<div>OPT SPIKE</div></div>' +
+    '<div class="stats"><span>R20 '+fmtPct(m.r20_pct)+'</span><span>RS63 '+fmtN(m.rs_63)+'</span><span>ATR% '+fmtPct(m.atr_pct)+'</span></div>' +
+    '<p class="blurb">Trending down. below key MAs. Score '+score+'/12.</p>' +
+    '</article>';
+}
+</script>
+</body></html>"""
+        html = cr.ensure_embedded(live)
+        html = bo.ensure_embedded(
+            html,
+            {
+                "breakout": [
+                    {
+                        "t": "SPCX",
+                        "ticker": "SPCX US Equity",
+                        "score": 9,
+                        "delta": 2,
+                        "lookback": 7,
+                        "label": "↑3d>5",
+                        "side": "above",
+                        "why": "band 9",
+                        "r20": None,
+                        "rs63": None,
+                        "atr_pct": None,
+                        "card": None,
+                    }
+                ],
+                "breakdown": [],
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            runner = Path(tmp) / "run.js"
+            page.write_text(html, encoding="utf-8")
+            runner.write_text(
+                f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+const html = fs.readFileSync({json.dumps(str(page))}, "utf8");
+const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1/factorbook.html" }});
+const window = dom.window;
+const called = [];
+const views = [];
+window.selectTicker = function (t) {{ called.push("sel:" + String(t)); }};
+const origShow = window.__FD_BB_SHOW__;
+window.__FD_BB_SHOW__ = function (kind) {{ views.push(String(kind)); if (origShow) return origShow.apply(this, arguments); }};
+const pane = window.document.getElementById("view-breakout");
+if (pane) {{ pane.classList.remove("hide"); pane.setAttribute("data-view", "breakout"); }}
+const grid = window.document.getElementById("breakout-grid");
+const row = JSON.parse(window.document.getElementById("fd-breakout-db").textContent).breakout[0];
+if (!row.metrics || row.metrics.r20_pct == null) {{
+  console.log(JSON.stringify({{error:"db missing metrics", row: row}}));
+  process.exit(3);
+}}
+const node = window.__FD_BB_RENDER_ROW__(row);
+if (!node) {{ console.log(JSON.stringify({{error:"no node"}})); process.exit(2); }}
+if (grid) grid.appendChild(node);
+else if (pane) pane.appendChild(node);
+else window.document.body.appendChild(node);
+node.click();
+const report = {{
+  called: called,
+  cardHTMLCalls: window.__cardHTMLCalls || [],
+  views: views,
+  flags: {{ cardhtml: !!window.__FD_BB_CARDHTML__, portable: !!window.__FD_BB_PORTABLE_FIX__, noCard: !!window.__FD_BB_NO_CARDHTML_FALLBACK__ }},
+  dense: node.getAttribute("data-fd-bb-dense"),
+  dataT: node.getAttribute("data-t"),
+  text: (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim(),
+  html: node.outerHTML
+}};
+console.log(JSON.stringify(report));
+""",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [node, str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            report = json.loads(proc.stdout.strip().splitlines()[-1])
+            self.assertEqual(report["called"], ["sel:SPCX"], report)
+            self.assertIn("SPCX", report.get("cardHTMLCalls") or [], report)
+            self.assertNotIn("breakdown", report.get("views") or [])
+            self.assertTrue(report["flags"]["cardhtml"], report)
+            self.assertFalse(report["flags"]["portable"])
+            self.assertFalse(report["flags"]["noCard"])
+            self.assertNotEqual(report.get("dense"), "1")
+            self.assertEqual(report.get("dataT"), "SPCX")
+            text = report["text"]
+            self.assertIn("SPCX", text)
+            self.assertIn("Weak / fading", text)
+            self.assertIn("Trending down", text)
+            self.assertIn("CLOSE HI", text)
+            self.assertIn("SQUEEZE", text)
+            self.assertIn("V.EMA", text)
+            self.assertIn("OPT SPIKE", text)
+            self.assertIn("below key MAs", text)
+            self.assertIn("R20 ", text)
+            self.assertIn("12.8%", text)
+            self.assertIn("ATR%", text)
+            self.assertIn("2.3%", text)
+            self.assertNotIn("230%", text)
+            self.assertNotIn("203%", text)
 
     def test_write_combined_patches_live_html_with_tabs_and_delta(self) -> None:
         body = """<!DOCTYPE html>
@@ -400,7 +1035,19 @@ function syncNav() {}
             self.assertIn('id="fd-book-delta"', text)
             self.assertIn("baseline set", text)
             self.assertIn('id="fd-hitch-db"', text)
+            self.assertIn('id="fd-paper-marks"', text)
+            self.assertIn('id="fd-paper-js"', text)
+            self.assertIn('id="view-experimental"', text)
             self.assertNotIn('data-tab="sectors"', text)
+            bb_js = re.search(
+                r'<script\b[^>]*id=["\']fd-breakout-js["\'][^>]*>(.*?)</script>',
+                text,
+                re.I | re.S,
+            )
+            self.assertIsNotNone(bb_js)
+            self.assertIn("cardHTML", bb_js.group(1))
+            self.assertIn("callCardHTML", bb_js.group(1))
+            self.assertNotIn("denseHTML", bb_js.group(1))
             self.assertTrue((root / book_delta.SNAPSHOT_FILENAME).is_file())
             snap = json.loads((root / book_delta.SNAPSHOT_FILENAME).read_text(encoding="utf-8"))
             self.assertIn("names", snap)

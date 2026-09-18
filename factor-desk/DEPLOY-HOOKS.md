@@ -436,9 +436,9 @@ html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
 book_delta.write_snapshot(snap, root=PATHS["fb_root"])  # gitignored desk_snapshot.json
 ```
 
-**Never** call `breakout.ensure_embedded(html)` / `ensure_embedded(html, None)` on the live dash — that leaves `#fd-breakout-db` alone in this pack, but Desktop must still pass `ranked` so the JSON stays filled.
+**Never** call `breakout.ensure_embedded(html)` / `ensure_embedded(html, None)` on the live dash **as the only write** — that leaves `#fd-breakout-db` alone, but Desktop must still pass `ranked` so the JSON stays filled. `ranked=None` **does** refresh `#fd-breakout-js` (it must not skip the JS patch).
 
-Breakout/Breakdown must render **dense MOM cards** via the shared portable renderer (live `cardHTML` wrapped by `card_render`), **not** skinny `article.fd-bb-card` stubs and **not** a tab-specific skin. `card_render.ensure_embedded` (before `breakout.ensure_embedded`) emits:
+Breakout/Breakdown must render **the same `cardHTML` chrome as Momentum Up** (pills, status, streak, metrics, blurb, Buy/Sell) — **not** skinny `article.fd-bb-card` stubs and **not** a tab-specific dense fallback. `renderRow` finds the live MOM card by ticker and calls `cardHTML(card)`. `card_render.ensure_embedded` (before `breakout.ensure_embedded`) emits:
 
 - `#fd-card-css` chip chrome on `article.card` (not scoped to a tab) so MA FAN / CLOSE HI / 52W HI / enrich pills match Momentum Up `.badge.spike-chip`
 - `#fd-card-js` wrapping live `window.cardHTML` plus `window.__FD_RENDER_CARD__(card)` / `window.__FD_RENDER_ROW__(row)`
@@ -448,7 +448,8 @@ Breakout/Breakdown must render **dense MOM cards** via the shared portable rende
 
 - `#view-breakout` / `#view-breakdown` with `.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`
 - empty hidden `#fd-bb-breakout` / `#fd-bb-breakdown` so old CSS cannot paint stubs
-- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, passes each ranked row into `__FD_RENDER_ROW__` (full MOM-shaped object + short `band 10` / `+3/7d` / streak chips — **not** a brown why dump)
+- `#fd-breakout-db` rows with top-level numeric `day`/`r20`/`rs63`/`atr_pct` **and** nested `metrics.r20_pct` / `rs_63` / `atr_pct` (the shape live `cardHTML` reads). Stats come from scraping the ~396 live HTML MOM card objects at embed time (there is **no** `#fd-mom-db`), else `px_series` / `prices_long.csv`. Nested `card` is never left `null` when a ticker exists.
+- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, looks up the MOM card by ticker, and calls **`cardHTML(card)`** (same function Mom Up uses). Capture-phase card click → `selectTicker`. `atr_pct` is already percent points — do not `*100` again.
 
 ### Live `setView` / `hideAllPanes` / `paintView` (required on Desktop)
 
@@ -513,19 +514,20 @@ Pills (`DA·A` / `DA·B` / `DA·C` / `DA`) appear when a recent `YYYY-MM-DD-*.md
 
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
-| `card_render.py` | **new / recopy** — wrap live `cardHTML`; portable chip CSS on `article.card`; `__FD_RENDER_CARD__` / `__FD_RENDER_ROW__` |
-| `breakout.py` | **recopy** — tabs only rank; grids call `__FD_RENDER_ROW__` (no stub `fd-bb-card`, no why dump box) |
+| `card_render.py` | **recopy** — wrap live `cardHTML`; portable chip CSS; `__FD_RENDER_CARD__` / `__FD_RENDER_ROW__`; Day/R20/RS63/ATR% aliases |
+| `breakout.py` | **recopy** — `renderRow` = find MOM card by ticker → `cardHTML(card)` (full Mom chrome); scrape live HTML `"metrics":{r20_pct,rs_63,atr_pct}` onto `#fd-breakout-db`; capture click on BB cards → `selectTicker` (not `show(breakdown)`); `fmtAtr` does not `*100` when `abs(atr_pct)>=1` |
 | `book_delta.py` | new — since-last-Refresh strip |
 | `desk_hitch.py` | new — DA hitch pills |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/BREAKOUT-BREAKDOWN.md` | optional, for the desk |
 | gitignore `desk_snapshot.json` | local, like `mom_score_hist.json` |
 
-Do **not** copy generated `factorbook.html`, `desk_snapshot.json`, `mom_score_hist.json`, or the ideas markdown. After drop-in, Refresh once and confirm Breakout / Breakdown sit beside Momentum Down, clicking Breakout shows the same dense card grid as Momentum Up (full card chrome, **chip tags** not a cramped gray matrix, **band / Δ chips** not a brown why dump, few names), `#fd-card-js` + `#fd-breakout-db` are filled, `#fd-book-delta` shows `baseline set` on the first write, hitch pills appear only when `FACTOR_DESK_IDEAS_DIR` (or `ideas/`) has dated notes, and no skinny `#fd-bb-*` list bleeds onto other tabs.
+Do **not** copy generated `factorbook.html`, `desk_snapshot.json`, `mom_score_hist.json`, or the ideas markdown. After drop-in, call `card_render.ensure_embedded` then `breakout.ensure_embedded(html, ranked)` on the **live ~4.8MB** `factorbook.html` only — never replace it with skinny `desk_dash` generator HTML (~190KB). Refresh once and confirm: Breakout / Breakdown sit beside Momentum Down; cards are dense MOM chrome (no gray digest matrix); Day/R20/RS63/ATR% are numbers; **clicking a card opens the company name-drill** (`selectTicker`) and does **not** jump to the Breakdown tab; `#fd-card-js` + `#fd-breakout-db` are filled; Paper (`#fd-paper-marks`) and Experimental stay; `#fd-book-delta` shows `baseline set` on the first write. No CoS Desktop hot-patches — recopy the modules.
 
 Suggested Desktop sync paths:
 
 - Code: `factor-desk/*.py` → `C:\Users\MLP\Desktop\factorbook\`
+- Then patch live HTML in place (`ensure_embedded`); do not emit a new skinny desk
 - Ideas: `C:\Users\MLP\Desktop\jr-analysts\ideas\` → env `FACTOR_DESK_IDEAS_DIR` or a synced copy at `C:\Users\MLP\Desktop\factorbook\ideas\`
 
 ---

@@ -4,15 +4,10 @@ Live Momentum Up/Down chrome (``cardHTML``) is the gold standard. Tabs must
 not invent a second card skin. This module:
 
 1. Wraps live ``window.cardHTML`` (or installs a MOM-shaped fallback).
-2. Normalizes a **full MOM-shaped card object** (ticker, score, tags, stats,
-   ``enrich_pills``) so Breakout/Breakdown/Outliers/search can pass the same
-   shape into one renderer.
-3. Polishes tag / why chrome on the **card node itself** (``.badge`` /
-   ``.spike-chip``) so moving a card between ``#breakout-grid``, ``#home``,
-   and mom grids does not need tab-specific CSS.
-
-Breakout "why" / streak belong on ``enrich_pills`` as short chips
-(``band 10``, ``+3/7d``, ``↑3d>5``) — never a brown ``.why`` dump box.
+2. Looks up the live MOM card by ticker and passes that object through the
+   same ``cardHTML`` so Breakout/Breakdown match Momentum chrome.
+3. Only polishes empty stats / ATR% (``atr_pct`` is already percent points —
+   do not ×100 again). Does not strip the digest pill grid.
 
 Does not wholesale replace live ~2.7–4.8MB ``factorbook.html``. Recopy this
 module next to live ``desk_dash.py`` and call ``ensure_embedded``.
@@ -20,14 +15,101 @@ module next to live ``desk_dash.py`` and call ``ensure_embedded``.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Mapping, MutableMapping
 
 CSS_STYLE_ID = "fd-card-css"
 JS_SCRIPT_ID = "fd-card-js"
+JS_VER = "pr18-mom-html"
 
 _BAND_WHY_RE = re.compile(r"^band\s", re.I)
 _DUMP_PILL_KEYS = frozenset({"fd-bb"})
+
+# Live digest catalog (screenshot: 4-col ghost matrix under the chips).
+TAG_CATALOG: tuple[str, ...] = (
+    "MA FAN",
+    "CLOSE HI",
+    "52W HI",
+    "HM/HL",
+    "V.EMA",
+    "ABOVE 50",
+    "ABOVE 200",
+    "MOM+",
+    "TREND↑",
+    "SQUEEZE",
+    "RS+",
+    "BREAKOUT",
+)
+TAG_ALIASES: dict[str, str] = {
+    "HM HL": "HM/HL",
+    "HMHL": "HM/HL",
+    "V EMA": "V.EMA",
+    "VEMA": "V.EMA",
+    "TREND^": "TREND↑",
+    "TREND UP": "TREND↑",
+    "ABOVE50": "ABOVE 50",
+    "ABOVE200": "ABOVE 200",
+    "MOM +": "MOM+",
+    "RS +": "RS+",
+    "GAP": "GAP",
+}
+R20_KEYS: tuple[str, ...] = (
+    "r20",
+    "R20",
+    "ret20",
+    "ret_20",
+    "ret_20d",
+    "RET_20D",
+    "r_20",
+    "R_20",
+)
+RS63_KEYS: tuple[str, ...] = (
+    "rs63",
+    "RS63",
+    "rs_63",
+    "rel_63",
+    "rel_63d",
+    "RS_63",
+)
+ATR_KEYS: tuple[str, ...] = (
+    "atr_pct",
+    "atrpct",
+    "ATR_PCT",
+    "atr%",
+    "atrs",
+    "ATRS",
+    "atr",
+    "ATR",
+    "atrp",
+    "atr_pctile",
+)
+DAY_KEYS: tuple[str, ...] = (
+    "day",
+    "Day",
+    "d1",
+    "ret_1d",
+    "r1",
+    "R1",
+    "ret1",
+)
+_SKIP_PORTABLE = frozenset(
+    {
+        "px_series",
+        "prices",
+        "closes",
+        "history",
+        "px_hist",
+        "mom_score_series",
+        "series",
+        "spark",
+        "html",
+        "svg",
+        "_card",
+        "card",
+    }
+)
+_EMPTY_STAT = frozenset({"", "-", "—", "–", "−", "n/a", "na", "none", "null"})
 
 
 def _short(ticker: Any) -> str:
@@ -49,6 +131,158 @@ def _delta_up(delta: Any) -> bool:
         return float(delta) >= 0
     except (TypeError, ValueError):
         return True
+
+
+def catalog_key(text: Any) -> str:
+    """Canonical digest-tag label, or ``\"\"`` if this is not a catalog cell."""
+    raw = " ".join(str(text or "").split()).strip().upper()
+    if not raw:
+        return ""
+    if raw in TAG_CATALOG:
+        return raw if raw != "GAP" else "GAP"
+    aliased = TAG_ALIASES.get(raw)
+    if aliased:
+        return aliased
+    collapsed = raw.replace(" ", "").replace(".", "").replace("/", "").replace("+", "")
+    for label in TAG_CATALOG:
+        if label.replace(" ", "").replace(".", "").replace("/", "").replace("+", "").replace("↑", "") == collapsed.replace("↑", "").replace("^", ""):
+            return label
+    return ""
+
+
+def _truthy_on(value: Any) -> bool | None:
+    if value in (True, 1, "1", "true", "True", "yes", "YES", "on", "ON"):
+        return True
+    if value in (False, 0, "0", "false", "False", "no", "NO", "off", "OFF"):
+        return False
+    return None
+
+
+def _pick_num(card: Mapping[str, Any] | None, keys: tuple[str, ...]) -> float | str | None:
+    if not isinstance(card, Mapping):
+        return None
+    for key in keys:
+        if key not in card:
+            continue
+        val = card.get(key)
+        if val is None or isinstance(val, bool):
+            continue
+        if isinstance(val, str):
+            text = val.strip()
+            if text.lower() in _EMPTY_STAT:
+                continue
+            try:
+                return float(text.replace("%", "").replace(",", ""))
+            except ValueError:
+                return text
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            continue
+        return num
+    return None
+
+
+def active_tags(card: Mapping[str, Any] | None) -> list[str]:
+    """On/true digest tags only. Empty when the card has no tag state."""
+    if not isinstance(card, Mapping):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(label: Any) -> None:
+        key = catalog_key(label) or " ".join(str(label or "").split()).strip()
+        if not key or key in seen or len(key) > 28:
+            return
+        seen.add(key)
+        out.append(key)
+
+    for field in ("tags", "digest_tags", "flags_tags", "on_tags", "active_tags"):
+        raw = card.get(field)
+        if isinstance(raw, str) and raw.strip():
+            up = raw.upper()
+            harvested = False
+            for label in TAG_CATALOG:
+                if label in up:
+                    add(label)
+                    harvested = True
+            if not harvested:
+                bits = re.split(r"[,|;]+", raw) if ("," in raw or "|" in raw or ";" in raw) else [raw]
+                for bit in bits:
+                    token = bit.strip()
+                    if catalog_key(token) or (token and len(token) <= 28):
+                        add(token)
+        elif isinstance(raw, (list, tuple)):
+            for item in raw:
+                if isinstance(item, Mapping):
+                    on = _truthy_on(item.get("on") if "on" in item else item.get("active"))
+                    off = _truthy_on(item.get("off"))
+                    if off is True or on is False:
+                        continue
+                    add(item.get("label") or item.get("tag") or item.get("name") or item.get("t"))
+                else:
+                    add(item)
+    for field in ("tg", "tgs", "tag", "digest"):
+        raw = card.get(field)
+        if isinstance(raw, Mapping):
+            for key, val in raw.items():
+                flag = _truthy_on(val)
+                if flag is True:
+                    add(key)
+                elif flag is None and catalog_key(key) and val not in (None, ""):
+                    add(key)
+        elif isinstance(raw, str):
+            add(raw)
+    for label in TAG_CATALOG:
+        for key in (label, label.replace(" ", "_"), label.replace(" ", "").replace(".", "").replace("/", "").replace("+", "plus")):
+            if key in card:
+                flag = _truthy_on(card.get(key))
+                if flag is True:
+                    add(label)
+    return out
+
+
+def alias_stats(card: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    """Copy Day / R20 / RS63 / ATR% onto the names live chrome actually reads."""
+    day = _pick_num(card, DAY_KEYS)
+    r20 = _pick_num(card, R20_KEYS)
+    rs63 = _pick_num(card, RS63_KEYS)
+    atr = _pick_num(card, ATR_KEYS)
+    if day is not None:
+        card["day"] = day
+        card.setdefault("Day", day)
+        card.setdefault("ret_1d", day)
+    if r20 is not None:
+        card["r20"] = r20
+        card.setdefault("R20", r20)
+        card.setdefault("ret_20d", r20)
+    if rs63 is not None:
+        card["rs63"] = rs63
+        card.setdefault("RS63", rs63)
+    if atr is not None:
+        card["atr_pct"] = atr
+        card.setdefault("atrs", atr)
+        card.setdefault("atr", atr)
+        card.setdefault("ATR", atr)
+        card.setdefault("ATRS", atr)
+    return card
+
+
+def portable_card(
+    card: Mapping[str, Any] | None,
+    row: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Self-contained MOM-shaped object for ``#fd-breakout-db`` (no price series)."""
+    src = dict(card) if isinstance(card, Mapping) else {}
+    for key in list(src):
+        if key in _SKIP_PORTABLE:
+            src.pop(key, None)
+    out = normalize_card(src, row)
+    alias_stats(out)
+    tags = active_tags(out) or active_tags(src)
+    if tags:
+        out["tags"] = tags
+    return out
 
 
 def why_pills(row: Mapping[str, Any] | None) -> list[dict[str, str]]:
@@ -148,6 +382,20 @@ def normalize_card(
         out.setdefault("name", display)
         if not out.get("ticker"):
             out["ticker"] = row.get("ticker") or display
+    embedded = row.get("card") if isinstance(row.get("card"), Mapping) else None
+    if not embedded and isinstance(row.get("_card"), Mapping):
+        embedded = row.get("_card")
+    if isinstance(embedded, Mapping):
+        for key, val in embedded.items():
+            if key in _SKIP_PORTABLE:
+                continue
+            if val is None or val == "":
+                continue
+            if out.get(key) is None or out.get(key) == "":
+                out[key] = val
+    for key in DAY_KEYS + R20_KEYS + RS63_KEYS + ATR_KEYS + ("score", "mom_score"):
+        if out.get(key) is None and row.get(key) is not None and row.get(key) != "":
+            out[key] = row.get(key)
     if out.get("score") is None and row.get("score") is not None:
         out["score"] = row.get("score")
     if out.get("mom_score") is None and row.get("score") is not None:
@@ -170,6 +418,10 @@ def normalize_card(
             }
         )
     out["enrich_pills"] = merge_pills(out, extra)
+    alias_stats(out)
+    tags = active_tags(out)
+    if tags:
+        out["tags"] = tags
     return out
 
 
@@ -238,11 +490,6 @@ article.card .tag[data-on="1"] {
   border-color: #ca8a04 !important;
   background: #1c1917 !important;
 }
-article.card .tg.off,
-article.card .tag.off,
-article.card .fd-tag-off {
-  display: none !important;
-}
 article.card .badge.fd-bb-band, article.card .spike-chip.fd-bb-band {
   color: #fde68a !important; border-color: #ca8a04 !important;
 }
@@ -258,6 +505,17 @@ article.card p.fd-bb-why,
 article.card .why[data-fd-bb="1"] {
   display: none !important;
 }
+article.card .stats {
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 11px;
+  color: #d1d5db;
+  margin-top: 6px;
+}
+article.card .stats span {
+  white-space: nowrap;
+}
 """.strip()
 
 
@@ -265,8 +523,9 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
-  if (window.__FD_CARD_BOUND__) return;
-  window.__FD_CARD_BOUND__ = true;
+  var CARD_VER = "pr18-mom-html";
+  if (window.__FD_CARD_BOUND__ === CARD_VER) return;
+  window.__FD_CARD_BOUND__ = CARD_VER;
 
   function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
   function esc(s) {
@@ -278,8 +537,103 @@ def strip_js() -> str:
     if (typeof v === "number" && isFinite(v)) return String(v);
     return String(v);
   }
+  function fmtAtr(x) {
+    if (x == null || x === "") return "";
+    var n = Number(x);
+    if (!isFinite(n)) return "";
+    if (Math.abs(n) < 1) return (n * 100).toFixed(1) + "%";
+    return n.toFixed(1) + "%";
+  }
   function isBandDump(text) { return /^\s*band\s/i.test(String(text || "")); }
   function deltaUp(d) { var n = parseFloat(d); return !(isFinite(n) && n < 0); }
+  var TAG_CATALOG = ["MA FAN","CLOSE HI","52W HI","HM/HL","V.EMA","ABOVE 50","ABOVE 200","MOM+","TREND↑","SQUEEZE","RS+","BREAKOUT"];
+  var TAG_ALIAS = {"HM HL":"HM/HL","HMHL":"HM/HL","V EMA":"V.EMA","VEMA":"V.EMA","TREND^":"TREND↑","ABOVE50":"ABOVE 50","ABOVE200":"ABOVE 200","MOM +":"MOM+","RS +":"RS+","GAP":"GAP"};
+  var TAG_SET = {};
+  for (var ti = 0; ti < TAG_CATALOG.length; ti++) TAG_SET[TAG_CATALOG[ti]] = true;
+  var R20_KEYS = ["r20","R20","ret20","ret_20","ret_20d","RET_20D","r_20","R_20"];
+  var RS63_KEYS = ["rs63","RS63","rs_63","rel_63","rel_63d","RS_63"];
+  var ATR_KEYS = ["atr_pct","atrpct","ATR_PCT","atr%","atrs","ATRS","atr","ATR","atrp"];
+  var DAY_KEYS = ["day","Day","d1","ret_1d","r1","R1","ret1"];
+  var SKIP_COPY = {px_series:1,prices:1,closes:1,history:1,px_hist:1,mom_score_series:1,series:1,spark:1,html:1,svg:1,_card:1,card:1,why:1,pills:1};
+
+  function catalogKey(text) {
+    var raw = String(text || "").replace(/\s+/g, " ").trim().toUpperCase();
+    if (!raw) return "";
+    if (TAG_SET[raw]) return raw;
+    if (TAG_ALIAS[raw]) return TAG_ALIAS[raw];
+    var collapsed = raw.replace(/[\s./+]/g, "").replace("↑","").replace("^","");
+    for (var i = 0; i < TAG_CATALOG.length; i++) {
+      var lab = TAG_CATALOG[i].replace(/[\s./+↑]/g, "");
+      if (lab && lab === collapsed) return TAG_CATALOG[i];
+    }
+    return "";
+  }
+  function pickNum(card, keys) {
+    if (!card) return null;
+    for (var i = 0; i < keys.length; i++) {
+      var v = card[keys[i]];
+      if (v == null || v === "" || v === true || v === false) continue;
+      if (typeof v === "number" && isFinite(v)) return v;
+      var s = String(v).trim();
+      if (!s || s === "-" || s === "—" || s === "–" || s === "−") continue;
+      var n = parseFloat(s.replace("%", "").replace(",", ""));
+      if (isFinite(n)) return n;
+      return s;
+    }
+    return null;
+  }
+  function aliasStats(card) {
+    if (!card) return card;
+    var day = pickNum(card, DAY_KEYS);
+    var r20 = pickNum(card, R20_KEYS);
+    var rs63 = pickNum(card, RS63_KEYS);
+    var atr = pickNum(card, ATR_KEYS);
+    if (day != null) { card.day = day; if (card.Day == null) card.Day = day; if (card.ret_1d == null) card.ret_1d = day; }
+    if (r20 != null) { card.r20 = r20; if (card.R20 == null) card.R20 = r20; if (card.ret_20d == null) card.ret_20d = r20; }
+    if (rs63 != null) { card.rs63 = rs63; if (card.RS63 == null) card.RS63 = rs63; }
+    if (atr != null) {
+      card.atr_pct = atr;
+      if (card.atrs == null) card.atrs = atr;
+      if (card.atr == null) card.atr = atr;
+      if (card.ATR == null) card.ATR = atr;
+    }
+    return card;
+  }
+  function activeTagsFromCard(card) {
+    var out = [];
+    var seen = {};
+    function add(label) {
+      var key = catalogKey(label) || String(label || "").replace(/\s+/g, " ").trim();
+      if (!key || seen[key] || key.length > 28) return;
+      seen[key] = true;
+      out.push(key);
+    }
+    if (!card) return out;
+    ["tags","digest_tags","flags_tags","on_tags","active_tags"].forEach(function (field) {
+      var raw = card[field];
+      if (typeof raw === "string" && raw.trim()) {
+        if (/[,|;]/.test(raw)) raw.split(/[,|;]+/).forEach(function (bit) { add(bit); });
+        else add(raw);
+      } else if (Array.isArray(raw)) {
+        raw.forEach(function (item) {
+          if (item && typeof item === "object") {
+            if (item.off === true || item.on === false || item.on === 0 || item.on === "0") return;
+            add(item.label || item.tag || item.name || item.t);
+          } else add(item);
+        });
+      }
+    });
+    ["tg","tgs","tag","digest"].forEach(function (field) {
+      var raw = card[field];
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        Object.keys(raw).forEach(function (k) {
+          var v = raw[k];
+          if (v === true || v === 1 || v === "1" || v === "on" || v === "ON") add(k);
+        });
+      }
+    });
+    return out;
+  }
 
   function whyPills(row) {
     row = row || {};
@@ -332,6 +686,11 @@ def strip_js() -> str:
     addList(raw, window.OUTLIERS);
     addList(raw, window.BOOK);
     addList(raw, window.DIGEST);
+    addList(raw, window.NAMES);
+    addList(raw, window.MOMUP);
+    addList(raw, window.MOMDOWN);
+    if (window.BOOK && window.BOOK.names) addList(raw, window.BOOK.names);
+    if (window.DIGEST && window.DIGEST.names) addList(raw, window.DIGEST.names);
     var out = [];
     var seen = {};
     for (var i = 0; i < raw.length; i++) {
@@ -357,7 +716,28 @@ def strip_js() -> str:
 
   function copyCard(card) {
     var out = {};
-    if (card) { for (var k in card) out[k] = card[k]; }
+    if (!card) return out;
+    for (var k in card) {
+      if (SKIP_COPY[k] && k !== "why") continue;
+      if (k === "px_series" || k === "prices" || k === "closes" || k === "history" || k === "mom_score_series") continue;
+      out[k] = card[k];
+    }
+    return out;
+  }
+  function mergeCards(a, b) {
+    var out = copyCard(a);
+    if (!b || typeof b !== "object") return out;
+    for (var k in b) {
+      if (k === "why" || k === "pills" || k === "_card" || k === "card") continue;
+      if (k === "px_series" || k === "prices" || k === "closes" || k === "history" || k === "mom_score_series") continue;
+      var v = b[k];
+      if (v == null || v === "") continue;
+      if (out[k] == null || out[k] === "") out[k] = v;
+    }
+    if (Array.isArray(b.enrich_pills) && b.enrich_pills.length) {
+      out.enrich_pills = (Array.isArray(out.enrich_pills) ? out.enrich_pills : []).concat(b.enrich_pills);
+    }
+    if (Array.isArray(b.tags) && b.tags.length && (!out.tags || !out.tags.length)) out.tags = b.tags.slice();
     return out;
   }
   function mergePills(card, extra) {
@@ -381,7 +761,8 @@ def strip_js() -> str:
   }
   function normalizeCard(card, row) {
     row = row || {};
-    var out = copyCard(card);
+    var embedded = row.card || row._card || null;
+    var out = mergeCards(card, embedded);
     var display = shortOf(out.d || out.t || out.ticker || out.name || out.symbol || row.t || row.ticker || row.d || "");
     if (display) {
       if (!out.t) out.t = display;
@@ -391,6 +772,9 @@ def strip_js() -> str:
     }
     if (out.score == null && row.score != null) out.score = row.score;
     if (out.mom_score == null && row.score != null) out.mom_score = row.score;
+    ["day","r20","rs63","atr_pct","R20","RS63"].forEach(function (k) {
+      if ((out[k] == null || out[k] === "") && row[k] != null && row[k] !== "") out[k] = row[k];
+    });
     if (isBandDump(out.why) || (row.why && out.why === row.why)) delete out.why;
     var extra = Array.isArray(row.pills) && row.pills.length ? row.pills.slice() : whyPills(row);
     if (row.label && !extra.some(function (p) { return p && p.key === "mom-streak"; })) {
@@ -403,6 +787,9 @@ def strip_js() -> str:
       });
     }
     out.enrich_pills = mergePills(out, extra);
+    aliasStats(out);
+    var tags = activeTagsFromCard(out);
+    if (tags.length) out.tags = tags;
     return out;
   }
 
@@ -423,13 +810,14 @@ def strip_js() -> str:
     c = c || {};
     var t = esc(shortOf(c.d || c.t || c.ticker || c.name || ""));
     var score = c.score != null ? c.score : (c.mom_score != null ? c.mom_score : "");
+    var day = fmt(c.day != null ? c.day : (c.Day != null ? c.Day : (c.ret_1d != null ? c.ret_1d : null)));
     var r20 = fmt(c.r20 != null ? c.r20 : (c.R20 != null ? c.R20 : null));
     var rs63 = fmt(c.rs63 != null ? c.rs63 : (c.RS63 != null ? c.RS63 : null));
-    var atr = fmt(c.atrs != null ? c.atrs : (c.atr != null ? c.atr : (c.ATRS != null ? c.ATRS : (c.ATR != null ? c.ATR : null))));
+    var atr = fmt(c.atr_pct != null ? c.atr_pct : (c.atrs != null ? c.atrs : (c.atr != null ? c.atr : (c.ATRS != null ? c.ATRS : (c.ATR != null ? c.ATR : null)))));
     return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(c.ticker || t) + '">' +
       "<header><h2>" + t + '</h2><span class="sc">' + esc(String(score)) + "</span>" +
       '<div class="pills">' + pillsHTML(c.enrich_pills) + "</div></header>" +
-      '<div class="stats"><span>R20 ' + esc(r20) + "</span><span>RS63 " + esc(rs63) + "</span><span>ATRS " + esc(atr) + "</span></div>" +
+      '<div class="stats"><span>Day ' + esc(day) + "</span><span>R20 " + esc(r20) + "</span><span>RS63 " + esc(rs63) + "</span><span>ATR% " + esc(atr) + "</span></div>" +
       "</article>";
   }
 
@@ -468,38 +856,208 @@ def strip_js() -> str:
       host.appendChild(span);
     }
   }
-  function chipifyTags(node) {
-    var roots = node.querySelectorAll(".tags, .tgs, .tag-row, .tg-row, .triggers, .flags-row, .taggrid");
-    function paint(el, forceOn) {
-      if (!el || !el.classList) return;
-      var text = (el.textContent || "").replace(/\s+/g, " ").trim();
-      if (!text || text.length > 28) return;
-      el.classList.add("badge", "spike-chip", "fd-tag-chip");
-      var on = forceOn || /\bon\b/.test(el.className) || el.getAttribute("data-on") === "1";
-      var off = /\boff\b/.test(el.className) || el.getAttribute("data-on") === "0";
-      if (on) { el.classList.add("fd-tag-on"); el.classList.remove("fd-tag-off"); }
-      else if (off) { el.classList.add("fd-tag-off"); el.classList.remove("fd-tag-on"); }
-      else el.classList.add("fd-tag-on");
+  function isChip(el) {
+    if (!el || !el.classList) return false;
+    return el.classList.contains("badge") || el.classList.contains("spike-chip") ||
+      el.classList.contains("fd-tag-chip") || el.classList.contains("fd-bb-band") ||
+      !!(el.getAttribute && el.getAttribute("data-key"));
+  }
+  function ownText(el) {
+    if (!el) return "";
+    var t = "";
+    for (var n = el.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 3) t += n.textContent;
     }
-    var i, j, kids, anyOn;
-    if (roots.length) {
-      for (i = 0; i < roots.length; i++) {
-        roots[i].classList.add("fd-tag-wrap");
-        kids = roots[i].children;
-        anyOn = false;
-        for (j = 0; j < kids.length; j++) {
-          if (/\bon\b/.test(kids[j].className) || kids[j].getAttribute("data-on") === "1") anyOn = true;
-        }
-        for (j = 0; j < kids.length; j++) paint(kids[j], !anyOn);
+    return String(t || "").replace(/\s+/g, " ").trim();
+  }
+  function isOnCell(el) {
+    if (!el) return false;
+    var cls = el.className || "";
+    if (/\boff\b/.test(cls) || (el.getAttribute && el.getAttribute("data-on") === "0")) return false;
+    if (/\bon\b/.test(cls) || (el.getAttribute && el.getAttribute("data-on") === "1")) return true;
+    try {
+      var op = (window.getComputedStyle ? getComputedStyle(el).opacity : "") || "";
+      if (op && parseFloat(op) < 0.45) return false;
+    } catch (e0) {}
+    return false;
+  }
+  function catalogCells(node) {
+    var cells = [];
+    var els = node.querySelectorAll("*");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (isChip(el)) continue;
+      if (el.closest && el.closest(".fd-paper, .pills, .chips, .badges")) continue;
+      var own = ownText(el);
+      var full = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      var label = catalogKey(own) || (el.children.length === 0 ? catalogKey(full) : "");
+      if (!label) continue;
+      var childHits = 0;
+      for (var c = 0; c < el.children.length; c++) {
+        var ct = ownText(el.children[c]) || String(el.children[c].textContent || "").replace(/\s+/g, " ").trim();
+        if (catalogKey(ct)) childHits++;
       }
-      return;
+      if (childHits >= 2) continue;
+      cells.push({ el: el, label: label });
     }
-    var spans = node.querySelectorAll("span.tg, span.tag, .tg, .tag");
-    anyOn = false;
-    for (i = 0; i < spans.length; i++) {
-      if (/\bon\b/.test(spans[i].className) || spans[i].getAttribute("data-on") === "1") anyOn = true;
+    return cells;
+  }
+  function catalogHitsIn(text) {
+    var up = String(text || "").toUpperCase();
+    var hits = [];
+    for (var i = 0; i < TAG_CATALOG.length; i++) {
+      if (up.indexOf(TAG_CATALOG[i]) >= 0) hits.push(TAG_CATALOG[i]);
     }
-    for (i = 0; i < spans.length; i++) paint(spans[i], !anyOn);
+    return hits;
+  }
+  function findTextDump(node) {
+    var els = node.querySelectorAll("div, span, p, pre, td, section, b, i");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (isChip(el)) continue;
+      if (el.children.length > 2) continue;
+      if (catalogHitsIn(el.textContent).length >= 6) return el;
+    }
+    return null;
+  }
+  function hideGhostMatrix(node, card) {
+    var active = activeTagsFromCard(card);
+    var cells = catalogCells(node);
+    var dump = findTextDump(node);
+    var i;
+    if (cells.length >= 6) {
+      if (!active.length) {
+        for (i = 0; i < cells.length; i++) {
+          if (isOnCell(cells[i].el) && active.indexOf(cells[i].label) < 0) active.push(cells[i].label);
+        }
+      }
+      var parents = [];
+      for (i = 0; i < cells.length; i++) {
+        var par = cells[i].el.parentElement;
+        if (!par || par === node) {
+          cells[i].el.classList.add("fd-tag-off", "fd-tag-ghost");
+          if (cells[i].el.parentNode) cells[i].el.parentNode.removeChild(cells[i].el);
+          continue;
+        }
+        if (parents.indexOf(par) < 0) parents.push(par);
+      }
+      for (i = 0; i < parents.length; i++) {
+        var kidCat = 0;
+        for (var ch = 0; ch < parents[i].children.length; ch++) {
+          var kid = parents[i].children[ch];
+          var kt = ownText(kid) || String(kid.textContent || "").replace(/\s+/g, " ").trim();
+          if (catalogKey(kt)) kidCat++;
+        }
+        if (kidCat >= 6 || (parents[i].children.length && kidCat * 2 >= parents[i].children.length)) {
+          parents[i].classList.add("fd-tag-matrix");
+          if (parents[i].parentNode) parents[i].parentNode.removeChild(parents[i]);
+        } else {
+          for (var k2 = 0; k2 < cells.length; k2++) {
+            if (cells[k2].el.parentElement === parents[i]) {
+              cells[k2].el.classList.add("fd-tag-off", "fd-tag-ghost");
+              if (cells[k2].el.parentNode) cells[k2].el.parentNode.removeChild(cells[k2].el);
+            }
+          }
+        }
+      }
+    } else if (dump) {
+      dump.classList.add("fd-tag-matrix");
+      if (dump.parentNode) dump.parentNode.removeChild(dump);
+    } else {
+      var offs = node.querySelectorAll(".tg.off, .tag.off, [data-on='0']");
+      for (i = 0; i < offs.length; i++) {
+        offs[i].classList.add("fd-tag-off", "fd-tag-ghost");
+        if (offs[i].parentNode) offs[i].parentNode.removeChild(offs[i]);
+      }
+      var ons = node.querySelectorAll(".tg.on, .tag.on, [data-on='1']");
+      for (i = 0; i < ons.length; i++) {
+        if (isChip(ons[i])) continue;
+        var lab = String(ons[i].textContent || "").replace(/\s+/g, " ").trim();
+        if (lab && lab.length <= 28) {
+          ons[i].classList.add("badge", "spike-chip", "fd-tag-chip", "fd-tag-on");
+          if (active.indexOf(lab) < 0) active.push(lab);
+        }
+      }
+    }
+    if (cells.length >= 6 || dump) node.setAttribute("data-fd-ghost-stripped", "1");
+    if (active.length) {
+      injectPills(node, active.map(function (lab) {
+        return { key: "fd-tag-" + lab, label: lab, cls: "fd-tag-on", title: lab };
+      }));
+    }
+  }
+  function isEmptyStat(text) {
+    var t = String(text || "").replace(/\s+/g, " ").trim();
+    return !t || t === "-" || t === "—" || t === "–" || t === "−";
+  }
+  function fillLabeled(node, names, val) {
+    if (val == null || val === "") return;
+    var shown = String(val);
+    var els = node.querySelectorAll("span, b, i, em, dt, dd, div, td, th, strong, small, label");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.closest && el.closest(".fd-paper, .pills, .fd-tag-matrix, .chips, .badges")) continue;
+      var t = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      var up = t.toUpperCase();
+      for (var n = 0; n < names.length; n++) {
+        var lab = names[n].toUpperCase();
+        if (up === lab) {
+          var sib = el.nextElementSibling;
+          if (sib && isEmptyStat(sib.textContent)) { sib.textContent = shown; return; }
+          for (var c = 0; c < el.children.length; c++) {
+            if (isEmptyStat(el.children[c].textContent)) { el.children[c].textContent = shown; return; }
+          }
+        }
+        if (up === lab + " -" || up === lab + " —" || up === lab + " –" || up === lab + " −") {
+          el.textContent = names[n] + " " + shown;
+          return;
+        }
+        if (up.indexOf(lab + " ") === 0 && isEmptyStat(up.slice(lab.length))) {
+          el.textContent = names[n] + " " + shown;
+          return;
+        }
+      }
+    }
+  }
+  function fillStats(node, card) {
+    var m = (card && card.metrics) || {};
+    fillLabeled(node, ["Day"], pickNum(m, ["day_pct", "r1_pct", "day"]) != null ? pickNum(m, ["day_pct", "r1_pct", "day"]) : pickNum(card, DAY_KEYS));
+    fillLabeled(node, ["R20"], pickNum(m, ["r20_pct", "r20"]) != null ? pickNum(m, ["r20_pct", "r20"]) : pickNum(card, R20_KEYS));
+    fillLabeled(node, ["RS63"], pickNum(m, ["rs_63", "rs63"]) != null ? pickNum(m, ["rs_63", "rs63"]) : pickNum(card, RS63_KEYS));
+    fillLabeled(node, ["ATR%", "ATRS", "ATR"], pickNum(m, ["atr_pct", "atr"]) != null ? pickNum(m, ["atr_pct", "atr"]) : pickNum(card, ATR_KEYS));
+    rewriteAtr(node, card);
+  }
+  function rewriteAtr(node, card) {
+    if (!node) return;
+    var m = (card && card.metrics) || {};
+    var atr = pickNum(m, ["atr_pct", "atr"]);
+    if (atr == null) atr = pickNum(card, ATR_KEYS);
+    if (atr == null) return;
+    var shown = fmtAtr(atr);
+    if (!shown) return;
+    var els = node.querySelectorAll("span, b, i, em, dt, dd, div, td, th, strong, small, label");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.closest && el.closest(".fd-paper, .pills, .chips, .badges")) continue;
+      var text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+      var up = text.toUpperCase();
+      if (up === "ATR%" || up === "ATR" || up === "ATRS") {
+        var sib = el.nextElementSibling;
+        if (sib) { sib.textContent = shown; return; }
+        for (var c = 0; c < el.children.length; c++) {
+          el.children[c].textContent = shown;
+          return;
+        }
+      }
+      if (up.indexOf("ATR% ") === 0 || up.indexOf("ATRS ") === 0 || up.indexOf("ATR ") === 0) {
+        var lab = up.indexOf("ATR%") === 0 ? "ATR%" : (up.indexOf("ATRS") === 0 ? "ATRS" : "ATR");
+        el.textContent = lab + " " + shown;
+        return;
+      }
+    }
+  }
+  function chipifyTags(node, card) {
+    hideGhostMatrix(node, card);
   }
   function stripBandWhy(node, card) {
     var labels = {};
@@ -531,9 +1089,7 @@ def strip_js() -> str:
   function polishNode(node, card) {
     if (!node || node.nodeType !== 1) return node;
     node.classList.add("fd-card");
-    ensurePillsHost(node);
-    injectPills(node, (card && card.enrich_pills) || []);
-    chipifyTags(node);
+    fillStats(node, card);
     stripBandWhy(node, card);
     node.setAttribute("data-fd-card-polished", "1");
     return node;
@@ -550,11 +1106,14 @@ def strip_js() -> str:
   function wrapCardHTML() {
     var fn = null;
     try { fn = window.cardHTML; } catch (e0) { fn = null; }
-    if (typeof fn === "function" && fn.__fdCard) return fn;
+    if (typeof fn === "function" && (fn.__fdCard || fn.__fdPaper)) {
+      window.cardHTML = fn;
+      return fn;
+    }
     if (typeof fn !== "function") {
       try { if (typeof cardHTML === "function") fn = cardHTML; } catch (e1) { fn = null; }
     }
-    if (typeof fn === "function" && fn.__fdCard) {
+    if (typeof fn === "function" && (fn.__fdCard || fn.__fdPaper)) {
       window.cardHTML = fn;
       return fn;
     }
@@ -590,14 +1149,30 @@ def strip_js() -> str:
   }
   function renderRow(row) {
     row = row || {};
-    var card = normalizeCard(findCard(row.ticker || row.t || row.d), row);
+    var ticker = row.ticker || row.t || row.d;
+    if (!shortOf(ticker)) return null;
+    var found = findCard(ticker);
+    var card = found || normalizeCard(row.card || null, row);
+    if (!shortOf((card && (card.t || card.d || card.ticker)) || ticker)) return null;
+    if (found) {
+      if (!card.metrics || typeof card.metrics !== "object") card.metrics = {};
+      var m = card.metrics;
+      var rm = (row.metrics && typeof row.metrics === "object") ? row.metrics : {};
+      if (m.r20_pct == null && (rm.r20_pct != null || row.r20 != null)) m.r20_pct = rm.r20_pct != null ? rm.r20_pct : row.r20;
+      if (m.rs_63 == null && (rm.rs_63 != null || row.rs63 != null)) m.rs_63 = rm.rs_63 != null ? rm.rs_63 : row.rs63;
+      if (m.atr_pct == null && (rm.atr_pct != null || row.atr_pct != null)) m.atr_pct = rm.atr_pct != null ? rm.atr_pct : row.atr_pct;
+    }
     var node = renderCard(card);
     if (!node) return null;
     node.classList.remove("hide", "fd-bb-hid", "gics-hid");
     node.addEventListener("click", function (ev) {
       if (ev.target && ev.target.closest && ev.target.closest(".fd-paper, [data-fd-paper-act]")) return;
-      var sel = window.selectTicker || (typeof selectTicker === "function" ? selectTicker : null);
-      if (sel) sel(card.t || card.d || card.ticker || row.t);
+      var sel = null;
+      try { sel = window.selectTicker; } catch (e0) { sel = null; }
+      if (typeof sel !== "function") {
+        try { if (typeof selectTicker === "function") sel = selectTicker; } catch (e1) { sel = null; }
+      }
+      if (typeof sel === "function") sel(card.t || card.d || card.ticker || row.t);
     });
     return node;
   }
@@ -608,6 +1183,8 @@ def strip_js() -> str:
   window.__FD_FIND_CARD__ = findCard;
   window.__FD_WHY_PILLS__ = whyPills;
   window.__FD_CARD_COLLECT__ = collectCards;
+  window.__FD_POLISH_NODE__ = polishNode;
+  window.__FD_HIDE_GHOST__ = hideGhostMatrix;
   wrapCardHTML();
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wrapCardHTML);
   setTimeout(wrapCardHTML, 0);
@@ -634,18 +1211,15 @@ def _ensure_css(html_text: str) -> str:
 
 def _ensure_js(html_text: str) -> str:
     script = f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
-    text, n = re.subn(
+    text = re.sub(
         rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
-        lambda _m: script,
-        html_text,
-        count=1,
+        "",
+        html_text or "",
         flags=re.I | re.S,
     )
-    if n:
-        return text
-    if "</body>" in html_text:
-        return html_text.replace("</body>", script + "</body>", 1)
-    return html_text + script
+    if "</body>" in text:
+        return text.replace("</body>", script + "</body>", 1)
+    return text + script
 
 
 def ensure_embedded(html_text: str) -> str:
