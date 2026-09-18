@@ -144,6 +144,40 @@ class RankingTests(unittest.TestCase):
         self.assertGreater(b["breakout_score"], a["breakout_score"])
 
 
+    def test_slim_payload_embeds_portable_stats_and_tags(self) -> None:
+        ranked = {
+            "breakout": [
+                {
+                    "t": "SPCX",
+                    "ticker": "SPCX US Equity",
+                    "score": 9,
+                    "delta": 2,
+                    "lookback": 7,
+                    "why": "band 9 · +2 / 7d",
+                    "_card": {
+                        "t": "SPCX",
+                        "r20": 1.2,
+                        "rs63": 0.4,
+                        "atr_pct": 2.1,
+                        "tags": ["MA FAN", "BREAKOUT"],
+                        "px_series": list(range(200)),
+                    },
+                }
+            ],
+            "breakdown": [],
+        }
+        payload = bo.slim_payload(ranked)
+        card = payload["breakout"][0]["card"]
+        self.assertEqual(card["r20"], 1.2)
+        self.assertEqual(card["rs63"], 0.4)
+        self.assertEqual(card["atr_pct"], 2.1)
+        self.assertEqual(card["tags"], ["MA FAN", "BREAKOUT"])
+        self.assertNotIn("px_series", card)
+        blob = json.dumps(payload)
+        self.assertNotIn("px_series", blob)
+        self.assertIn("fd-bb-band", json.dumps(payload["breakout"][0]["pills"]))
+
+
 class EmbedTests(unittest.TestCase):
     def test_ensure_embedded_injects_nav_and_db_not_sectors(self) -> None:
         html = """<!DOCTYPE html><html><head></head><body>
@@ -324,6 +358,8 @@ function syncNav() {}
         pill_labels = [p.get("label") for p in data["breakout"][0].get("pills") or []]
         self.assertTrue(any(str(lab).startswith("band ") for lab in pill_labels))
         self.assertFalse(any(" · " in str(lab) for lab in pill_labels))
+        card = data["breakout"][0].get("card") or {}
+        self.assertEqual(card.get("t") or card.get("d"), "CLIMB")
         self.assertIn('id="view-breakout"', filled)
         self.assertNotRegex(filled, r'<article\b[^>]*fd-bb-card')
         self.assertNotIn("No breakout names this Refresh.", filled)

@@ -540,7 +540,7 @@ def rank_book(
 
 
 def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
-    """JSON-safe db (no card objects)."""
+    """JSON-safe db. Each row carries a slim portable MOM card (no series)."""
     ranked = ranked or {}
 
     def slim(rows: Any, score_key: str) -> list[dict[str, Any]]:
@@ -548,21 +548,22 @@ def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
         for row in rows or []:
             if not isinstance(row, Mapping):
                 continue
-            out.append(
-                {
-                    "t": row.get("t") or _short(str(row.get("ticker") or "")),
-                    "ticker": row.get("ticker"),
-                    "score": row.get("score"),
-                    "delta": row.get("delta"),
-                    "lookback": row.get("lookback"),
-                    "streak": row.get("streak"),
-                    "side": row.get("side"),
-                    "label": row.get("label"),
-                    score_key: row.get(score_key),
-                    "why": row.get("why"),
-                    "pills": card_render.why_pills(row),
-                }
-            )
+            src = row.get("_card") if isinstance(row.get("_card"), Mapping) else None
+            payload = {
+                "t": row.get("t") or _short(str(row.get("ticker") or "")),
+                "ticker": row.get("ticker"),
+                "score": row.get("score"),
+                "delta": row.get("delta"),
+                "lookback": row.get("lookback"),
+                "streak": row.get("streak"),
+                "side": row.get("side"),
+                "label": row.get("label"),
+                score_key: row.get(score_key),
+                "why": row.get("why"),
+                "pills": card_render.why_pills(row),
+                "card": card_render.portable_card(src, row),
+            }
+            out.append(payload)
         return out
 
     return {
