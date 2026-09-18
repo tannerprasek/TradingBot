@@ -32,8 +32,9 @@ import s_score  # noqa: E402
 LOG = logging.getLogger("desk_dash")
 HTML_NAME = "factorbook.html"
 
-# Live factorbook.html is ~2.7MB. Never replace that class of file with the
-# skinny enrich-only grid — patch GICS + streak into the existing HTML.
+# Live factorbook.html is the large patched Desktop desk (~4.8MB) with
+# paintPxChart / Paper / Experimental / Breakout. Never replace that class of
+# file with the skinny enrich-only generator grid — patch via ensure_embedded.
 LIVE_MIN_BYTES = 1_000_000
 LIVE_NAV_MARKERS = (
     "Refresh",
@@ -328,6 +329,11 @@ def _fmt(value: Any, digits: int = 2) -> str:
 def looks_like_live_desk(html_text: str) -> bool:
     if not html_text:
         return False
+    # Tanner's Desktop factorbook.html — paintPxChart name-drill, not generator SVG.
+    if "paintPxChart" in html_text and (
+        "data-px-svg" in html_text or "data-px-json" in html_text
+    ):
+        return True
     if all(marker in html_text for marker in LIVE_NAV_MARKERS):
         return True
     return len(html_text.encode("utf-8")) >= LIVE_MIN_BYTES
@@ -809,8 +815,8 @@ def write_combined(
 ) -> Path:
     """Write ``factorbook.html``. Always embeds filled GICS db + strip JS.
 
-    If a live (~2.7MB / nav) dashboard already exists, **patch** it in place.
-    Never replace it with the skinny enrich-only grid.
+    If a live (~4.8MB / paintPxChart / nav) dashboard already exists, **patch**
+    it in place. Never replace it with the skinny enrich-only grid.
     """
     base = Path(root) if root is not None else HERE
     dest = Path(path) if path is not None else base / HTML_NAME
