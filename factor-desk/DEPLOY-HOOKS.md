@@ -438,7 +438,7 @@ book_delta.write_snapshot(snap, root=PATHS["fb_root"])  # gitignored desk_snapsh
 
 **Never** call `breakout.ensure_embedded(html)` / `ensure_embedded(html, None)` on the live dash **as the only write** — that leaves `#fd-breakout-db` alone, but Desktop must still pass `ranked` so the JSON stays filled. `ranked=None` **does** refresh `#fd-breakout-js` (it must not skip the JS patch).
 
-Breakout/Breakdown must render **dense MOM cards** (ticker, score, Day/R20/RS63/ATR%, spike chips) — **not** skinny `article.fd-bb-card` stubs, **not** live `cardHTML` (that paints the 12-label gray digest), and **not** a tab-specific ghost matrix. `card_render.ensure_embedded` (before `breakout.ensure_embedded`) emits:
+Breakout/Breakdown must render **the same `cardHTML` chrome as Momentum Up** (pills, status, streak, metrics, blurb, Buy/Sell) — **not** skinny `article.fd-bb-card` stubs and **not** a tab-specific dense fallback. `renderRow` finds the live MOM card by ticker and calls `cardHTML(card)`. `card_render.ensure_embedded` (before `breakout.ensure_embedded`) emits:
 
 - `#fd-card-css` chip chrome on `article.card` (not scoped to a tab) so MA FAN / CLOSE HI / 52W HI / enrich pills match Momentum Up `.badge.spike-chip`
 - `#fd-card-js` wrapping live `window.cardHTML` plus `window.__FD_RENDER_CARD__(card)` / `window.__FD_RENDER_ROW__(row)`
@@ -449,7 +449,7 @@ Breakout/Breakdown must render **dense MOM cards** (ticker, score, Day/R20/RS63/
 - `#view-breakout` / `#view-breakdown` with `.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`
 - empty hidden `#fd-bb-breakout` / `#fd-bb-breakdown` so old CSS cannot paint stubs
 - `#fd-breakout-db` rows with top-level numeric `day`/`r20`/`rs63`/`atr_pct` **and** nested `metrics.r20_pct` / `rs_63` / `atr_pct` (the shape live `cardHTML` reads). Stats come from scraping the ~396 live HTML MOM card objects at embed time (there is **no** `#fd-mom-db`), else `px_series` / `prices_long.csv`. Nested `card` is never left `null` when a ticker exists.
-- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, tries `__FD_RENDER_ROW__` only if it does not paint a digest matrix, otherwise builds the dense MOM-style card — **never** `cardHTML(card)` (`renderRow` is banned from that fallback). Short `band 10` / `+3/7d` / streak chips — **not** a brown why dump. `fmtPct` is `(x*100).toFixed(d)+"%"`; `fmtAtr` does not `*100` when `abs(atr_pct) >= 1`.
+- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, looks up the MOM card by ticker, and calls **`cardHTML(card)`** (same function Mom Up uses). Capture-phase card click → `selectTicker`; panes do not have `data-view`. `fmtPct` is `(x*100).toFixed(d)+"%"`; `fmtAtr` does not `*100` when `abs(atr_pct) >= 1`.
 
 ### Live `setView` / `hideAllPanes` / `paintView` (required on Desktop)
 
@@ -515,7 +515,7 @@ Pills (`DA·A` / `DA·B` / `DA·C` / `DA`) appear when a recent `YYYY-MM-DD-*.md
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
 | `card_render.py` | **recopy** — wrap live `cardHTML`; portable chip CSS; `__FD_RENDER_CARD__` / `__FD_RENDER_ROW__`; Day/R20/RS63/ATR% aliases |
-| `breakout.py` | **recopy** — never call `cardHTML` from BB `renderRow`; scrape live HTML `"metrics":{r20_pct,rs_63,atr_pct}` (no `fd-mom-db`) onto ranked `#fd-breakout-db` rows; dense Day/R20/RS63/ATR%; nav listener is nav-only so card click → `selectTicker` (name-drill), not `show(breakdown)` |
+| `breakout.py` | **recopy** — `renderRow` = find MOM card by ticker → `cardHTML(card)` (full Mom chrome); scrape live HTML `"metrics":{r20_pct,rs_63,atr_pct}` onto `#fd-breakout-db`; capture click on BB cards → `selectTicker` (not `show(breakdown)`); `fmtAtr` does not `*100` when `abs(atr_pct)>=1` |
 | `book_delta.py` | new — since-last-Refresh strip |
 | `desk_hitch.py` | new — DA hitch pills |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |

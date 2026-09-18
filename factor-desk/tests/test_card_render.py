@@ -278,7 +278,7 @@ const row = {{
     {{key:"fd-bb-band", label:"band 9", cls:"fd-bb-band"}},
     {{key:"fd-bb-delta", label:"+2/7d", cls:"fd-bb-delta-up"}}
   ],
-  card: {{ t:"SPCX", d:"SPCX", score:9, r20:1.2, rs63:0.4, atr_pct:2.1, tags:["MA FAN","BREAKOUT"] }}
+  card: {{ t:"SPCX", d:"SPCX", score:9, r20:0.012, rs63:0.004, atr_pct:2.1, tags:["MA FAN","BREAKOUT"] }}
 }};
 const node = window.__FD_RENDER_ROW__(row);
 if (!node) {{ console.log(JSON.stringify({{error:"no node"}})); process.exit(2); }}
@@ -314,9 +314,9 @@ console.log(JSON.stringify(report));
             self.assertNotIn("HM/HL", chips)
             self.assertNotIn("V.EMA", text)
             self.assertNotIn("SQUEEZE", text)
-            self.assertIn("R20 1.2", text)
-            self.assertIn("RS63 0.4", text)
-            self.assertIn("ATR% 2.1", text)
+            self.assertIn("R20 1.2%", text)
+            self.assertIn("RS63 0.4%", text)
+            self.assertIn("ATR% 2.1%", text)
             self.assertIn("Day ", cr.strip_js())
 
 

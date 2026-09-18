@@ -97,7 +97,7 @@ PX_SERIES_KEYS: tuple[str, ...] = (
 
 DB_SCRIPT_ID = "fd-breakout-db"
 JS_SCRIPT_ID = "fd-breakout-js"
-JS_VER = "pr17-html-metrics-map"
+JS_VER = "pr17-mom-cardhtml"
 CSS_STYLE_ID = "fd-breakout-css"
 PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
@@ -1156,14 +1156,12 @@ article.fd-bb-card, .fd-bb-card {{
 
 
 def strip_js() -> str:
-    """Fill #breakout-grid / #breakdown-grid with dense MOM-style cards.
+    """Fill Breakout/Breakdown grids with the **same** ``cardHTML`` Mom Up uses.
 
-    Tabs only choose which rows to show. Markup comes from
-    ``window.__FD_RENDER_ROW__`` when that path does **not** paint a digest
-    matrix. Breakout **never** calls live ``cardHTML`` — that fallback is
-    what paints the 12-label gray ghost. Missing portable render → dense
-    ticker / score / Day / R20 / RS63 / ATR% card. Capture-phase click
-    stops the live topnav listener. ``show`` is ``window.__FD_BB_SHOW__``.
+    Ranked rows only pick tickers. ``renderRow`` looks up the live MOM card
+    (``__FD_FIND_CARD__`` / ``MOM.up|down|cards``) and calls ``cardHTML(card)``
+    so pills, status, streak, metrics, blurb, and Paper Buy/Sell match Mom Up.
+    Capture-phase card click calls ``selectTicker`` and does not ``setView``.
     """
     view_ids = json.dumps(list(NATIVE_VIEW_IDS))
     return rf"""
@@ -1171,7 +1169,7 @@ def strip_js() -> str:
   var BB_VER = "{JS_VER}";
   if (window.__FD_BB_BOUND__ === BB_VER) return;
   window.__FD_BB_BOUND__ = BB_VER;
-  window.__FD_BB_NO_CARDHTML_FALLBACK__ = true;
+  window.__FD_BB_USE_CARDHTML__ = true;
   window.__FD_BB_PORTABLE_FIX__ = true;
   var DB_ID = "fd-breakout-db";
   var VIEW_BO = "view-breakout";
@@ -1404,21 +1402,87 @@ def strip_js() -> str:
         "<span>ATR% " + esc(fmtAtr(row.atr_pct)) + "</span>" +
       "</div></article>";
   }}
-  function hasGhostMatrix(node) {{
-    if (!node || !node.querySelectorAll) return false;
-    var n = 0;
-    var els = node.querySelectorAll("div, span, td, li, b, i, small");
-    for (var i = 0; i < els.length; i++) {{
-      var el = els[i];
-      if (el.classList && (el.classList.contains("badge") || el.classList.contains("spike-chip"))) continue;
-      var own = "";
-      for (var c = el.firstChild; c; c = c.nextSibling) {{
-        if (c.nodeType === 3) own += c.textContent;
-      }}
-      var lab = String(own || "").replace(/\s+/g, " ").trim().toUpperCase();
-      if (TAG_SET[lab]) n++;
+  function liveCardHTML() {{
+    var fn = null;
+    try {{ if (typeof window.cardHTML === "function") fn = window.cardHTML; }} catch (e0) {{}}
+    if (typeof fn !== "function") {{
+      try {{ if (typeof cardHTML === "function") fn = cardHTML; }} catch (e1) {{}}
     }}
-    return n >= 6;
+    return fn;
+  }}
+  function findMomCard(ticker) {{
+    var want = shortOf(ticker);
+    if (!want) return null;
+    if (typeof window.__FD_FIND_CARD__ === "function") {{
+      try {{
+        var hit = window.__FD_FIND_CARD__(ticker);
+        if (hit && typeof hit === "object") return hit;
+      }} catch (e0) {{}}
+    }}
+    var bags = [];
+    function addList(src) {{
+      if (!src) return;
+      if (Array.isArray(src)) {{ for (var i = 0; i < src.length; i++) bags.push(src[i]); return; }}
+      if (typeof src !== "object") return;
+      if (src.t != null || src.ticker != null || src.d != null || src.score != null) {{ bags.push(src); return; }}
+      var keys = Object.keys(src);
+      for (var k = 0; k < keys.length; k++) addList(src[keys[k]]);
+    }}
+    var mom = window.MOM || {{}};
+    addList(mom.cards); addList(mom.up); addList(mom.down); addList(mom.all);
+    addList(mom.flags); addList(mom.watch); addList(mom.outliers); addList(mom.search);
+    addList(window.CARDS); addList(window.MOM_CARDS); addList(window.FLAGS);
+    addList(window.WATCH); addList(window.OUTLIERS); addList(window.BOOK);
+    for (var i = 0; i < bags.length; i++) {{
+      var c = bags[i];
+      if (!c || typeof c !== "object") continue;
+      if (shortOf(c.t || c.ticker || c.d || c.name || c.symbol || "") === want) return c;
+    }}
+    return null;
+  }}
+  function stampMetrics(card, row) {{
+    card = card || {{}};
+    row = row || {{}};
+    var m = {{}};
+    function take(src) {{
+      if (!src || typeof src !== "object") return;
+      for (var k in src) if (src[k] != null && src[k] !== "" && m[k] == null) m[k] = src[k];
+    }}
+    take(card.metrics);
+    take(row.metrics);
+    if (row.card && row.card.metrics) take(row.card.metrics);
+    if (row.r20 != null && m.r20_pct == null) m.r20_pct = row.r20;
+    if (row.rs63 != null && m.rs_63 == null) m.rs_63 = row.rs63;
+    if (row.atr_pct != null && m.atr_pct == null) m.atr_pct = row.atr_pct;
+    if (row.day != null && m.day_pct == null) m.day_pct = row.day;
+    if (Object.keys(m).length) card.metrics = m;
+    if (m.r20_pct != null) {{ if (card.r20 == null) card.r20 = m.r20_pct; if (card.R20 == null) card.R20 = m.r20_pct; }}
+    if (m.rs_63 != null) {{ if (card.rs63 == null) card.rs63 = m.rs_63; if (card.RS63 == null) card.RS63 = m.rs_63; }}
+    if (m.atr_pct != null) {{
+      if (card.atr_pct == null) card.atr_pct = m.atr_pct;
+      if (card.atrs == null) card.atrs = m.atr_pct;
+    }}
+    if (m.day_pct != null && card.day == null) card.day = m.day_pct;
+    return card;
+  }}
+  function momCardForRow(row) {{
+    row = row || {{}};
+    var t = row.t || row.ticker || (row.card && (row.card.t || row.card.ticker)) || "";
+    var found = findMomCard(t);
+    var card = {{}};
+    var src = found || (row.card && typeof row.card === "object" ? row.card : null);
+    if (src) {{
+      for (var k in src) {{
+        if (k === "px_series" || k === "prices" || k === "closes" || k === "history" || k === "mom_score_series") continue;
+        card[k] = src[k];
+      }}
+    }}
+    if (!card.t) card.t = shortOf(t);
+    if (!card.d) card.d = card.t;
+    if (!card.ticker) card.ticker = row.ticker || t || card.t;
+    if (card.score == null && row.score != null) card.score = row.score;
+    if (card.mom_score == null && row.score != null) card.mom_score = row.score;
+    return stampMetrics(card, row);
   }}
   function drillTicker(ticker) {{
     var t = ticker;
@@ -1454,35 +1518,24 @@ def strip_js() -> str:
     node.classList.remove("hide", "fd-bb-hid", "gics-hid");
     return bindSelect(node, row, card);
   }}
-  function tryPortable(row) {{
-    if (typeof window.__FD_RENDER_ROW__ === "function") {{
-      try {{
-        var node = window.__FD_RENDER_ROW__(row);
-        if (node && !hasGhostMatrix(node)) {{
-          node.classList.remove("hide", "fd-bb-hid", "gics-hid");
-          return bindSelect(node, row, row.card || row);
-        }}
-      }} catch (e0) {{}}
-    }}
-    var render = window.__FD_RENDER_CARD__;
-    var norm = window.__FD_NORMALIZE_CARD__;
-    if (typeof render === "function") {{
-      try {{
-        var card = typeof norm === "function" ? norm(row.card || null, row) : (row.card || row);
-        var painted = render(card);
-        if (painted && !hasGhostMatrix(painted)) {{
-          painted.classList.remove("hide", "fd-bb-hid", "gics-hid");
-          return bindSelect(painted, row, card);
-        }}
-      }} catch (e1) {{}}
-    }}
-    return null;
-  }}
   function renderRow(row) {{
     row = mergeStats(row || {{}});
-    var node = tryPortable(row);
-    if (node) return node;
-    return fromHTML(denseHTML(row), row, row.card || row);
+    var card = momCardForRow(row);
+    var fn = liveCardHTML();
+    if (typeof fn === "function") {{
+      try {{
+        var html = fn(card);
+        var node = fromHTML(html, row, card);
+        if (node) return node;
+      }} catch (e0) {{}}
+    }}
+    if (typeof window.__FD_RENDER_CARD__ === "function") {{
+      try {{
+        var painted = window.__FD_RENDER_CARD__(card);
+        if (painted) return bindSelect(painted, row, card);
+      }} catch (e1) {{}}
+    }}
+    return fromHTML(denseHTML(row), row, card);
   }}
   function fillGrid(grid, rows) {{
     if (!grid) return;
@@ -1586,10 +1639,21 @@ def strip_js() -> str:
     document.removeEventListener("click", window.__FD_BB_CLICK__, true);
   }}
   window.__FD_BB_CLICK__ = function (ev) {{
-    if (ev.target && ev.target.closest && ev.target.closest("article.card, .card")) return;
-    var t = ev.target && ev.target.closest
-      ? ev.target.closest("#topnav .nav-btn, #topnav .btn, nav .nav-btn, nav .btn, .topnav .nav-btn, button[data-view], button[data-fd-breakout], button[data-fd-breakdown], #fd-nav-breakout, #fd-nav-breakdown")
-      : ev.target;
+    var target = ev.target;
+    if (target && target.closest && target.closest(".fd-paper, [data-fd-paper-act], [data-fd-paper-buy], [data-fd-paper-sell]")) return;
+    var card = target && target.closest
+      ? target.closest("#breakout-grid article.card, #breakdown-grid article.card, #view-breakout article.card, #view-breakdown article.card, #breakout-grid .card, #breakdown-grid .card")
+      : null;
+    if (card) {{
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+      drillTicker(card.getAttribute("data-t") || card.getAttribute("data-ticker") || "");
+      return;
+    }}
+    var t = target && target.closest
+      ? target.closest("#topnav .nav-btn, #topnav .btn, #topnav button[data-view], nav .nav-btn, nav > .btn, .topnav .nav-btn, button[data-fd-breakout], button[data-fd-breakdown], #fd-nav-breakout, #fd-nav-breakdown")
+      : target;
     var kind = kindOf(t);
     if (!kind) return;
     if (kind === "breakout" || kind === "breakdown") {{
@@ -1635,11 +1699,11 @@ def panes_html(ranked: Mapping[str, Any] | None = None, article_html=None) -> st
     _ = (ranked, article_html)
     return "\n".join(
         [
-            f'<div id="{VIEW_BREAKOUT_ID}" class="view-pane hide" data-view="breakout">',
+            f'<div id="{VIEW_BREAKOUT_ID}" class="view-pane hide">',
             '  <div class="ph">Breakout</div>',
             f'  <div class="grid dense" id="{GRID_BREAKOUT_ID}"></div>',
             "</div>",
-            f'<div id="{VIEW_BREAKDOWN_ID}" class="view-pane hide" data-view="breakdown">',
+            f'<div id="{VIEW_BREAKDOWN_ID}" class="view-pane hide">',
             '  <div class="ph">Breakdown</div>',
             f'  <div class="grid dense" id="{GRID_BREAKDOWN_ID}"></div>',
             "</div>",

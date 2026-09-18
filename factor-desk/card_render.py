@@ -26,7 +26,7 @@ from typing import Any, Mapping, MutableMapping
 
 CSS_STYLE_ID = "fd-card-css"
 JS_SCRIPT_ID = "fd-card-js"
-JS_VER = "pr17-stats"
+JS_VER = "pr17-mom-cardhtml"
 
 _BAND_WHY_RE = re.compile(r"^band\s", re.I)
 _DUMP_PILL_KEYS = frozenset({"fd-bb"})
@@ -544,7 +544,7 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
-  var CARD_VER = "pr17-stats";
+  var CARD_VER = "pr17-mom-cardhtml";
   if (window.__FD_CARD_BOUND__ === CARD_VER) return;
   window.__FD_CARD_BOUND__ = CARD_VER;
 
@@ -553,10 +553,19 @@ def strip_js() -> str:
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
-  function fmt(v) {
-    if (v == null || v === "") return "—";
-    if (typeof v === "number" && isFinite(v)) return String(v);
-    return String(v);
+  function fmtPct(x, d) {
+    d = (d == null) ? 1 : d;
+    if (x == null || x === "") return "—";
+    var n = Number(x);
+    if (!isFinite(n)) return "—";
+    return (n * 100).toFixed(d) + "%";
+  }
+  function fmtAtr(x) {
+    if (x == null || x === "") return "—";
+    var n = Number(x);
+    if (!isFinite(n)) return "—";
+    if (Math.abs(n) < 1) return (n * 100).toFixed(1) + "%";
+    return n.toFixed(1) + "%";
   }
   function isBandDump(text) { return /^\s*band\s/i.test(String(text || "")); }
   function deltaUp(d) { var n = parseFloat(d); return !(isFinite(n) && n < 0); }
@@ -824,10 +833,10 @@ def strip_js() -> str:
     c = c || {};
     var t = esc(shortOf(c.d || c.t || c.ticker || c.name || ""));
     var score = c.score != null ? c.score : (c.mom_score != null ? c.mom_score : "");
-    var day = fmt(c.day != null ? c.day : (c.Day != null ? c.Day : (c.ret_1d != null ? c.ret_1d : null)));
-    var r20 = fmt(c.r20 != null ? c.r20 : (c.R20 != null ? c.R20 : null));
-    var rs63 = fmt(c.rs63 != null ? c.rs63 : (c.RS63 != null ? c.RS63 : null));
-    var atr = fmt(c.atr_pct != null ? c.atr_pct : (c.atrs != null ? c.atrs : (c.atr != null ? c.atr : (c.ATRS != null ? c.ATRS : (c.ATR != null ? c.ATR : null)))));
+    var day = fmtPct(c.day != null ? c.day : (c.Day != null ? c.Day : (c.ret_1d != null ? c.ret_1d : (c.metrics && c.metrics.day_pct))));
+    var r20 = fmtPct(c.r20 != null ? c.r20 : (c.R20 != null ? c.R20 : (c.metrics && c.metrics.r20_pct)));
+    var rs63 = fmtPct(c.rs63 != null ? c.rs63 : (c.RS63 != null ? c.RS63 : (c.metrics && c.metrics.rs_63)));
+    var atr = fmtAtr(c.atr_pct != null ? c.atr_pct : (c.atrs != null ? c.atrs : (c.atr != null ? c.atr : (c.ATRS != null ? c.ATRS : (c.ATR != null ? c.ATR : (c.metrics && c.metrics.atr_pct))))));
     return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(c.ticker || t) + '">' +
       "<header><h2>" + t + '</h2><span class="sc">' + esc(String(score)) + "</span>" +
       '<div class="pills">' + pillsHTML(c.enrich_pills) + "</div></header>" +
@@ -1034,10 +1043,14 @@ def strip_js() -> str:
     }
   }
   function fillStats(node, card) {
-    fillLabeled(node, ["Day"], pickNum(card, DAY_KEYS));
-    fillLabeled(node, ["R20"], pickNum(card, R20_KEYS));
-    fillLabeled(node, ["RS63"], pickNum(card, RS63_KEYS));
-    fillLabeled(node, ["ATR%", "ATRS", "ATR"], pickNum(card, ATR_KEYS));
+    var day = pickNum(card, DAY_KEYS);
+    var r20 = pickNum(card, R20_KEYS);
+    var rs63 = pickNum(card, RS63_KEYS);
+    var atr = pickNum(card, ATR_KEYS);
+    if (day != null) fillLabeled(node, ["Day"], fmtPct(day));
+    if (r20 != null) fillLabeled(node, ["R20"], fmtPct(r20));
+    if (rs63 != null) fillLabeled(node, ["RS63"], fmtPct(rs63));
+    if (atr != null) fillLabeled(node, ["ATR%", "ATRS", "ATR"], fmtAtr(atr));
   }
   function chipifyTags(node, card) {
     hideGhostMatrix(node, card);
