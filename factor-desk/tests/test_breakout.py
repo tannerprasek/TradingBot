@@ -277,6 +277,9 @@ function syncNav() {}
         self.assertIn("enrich_pills", js)
         self.assertIn('"fd-bb"', js)
         self.assertIn('"mom-streak"', js)
+        self.assertIn("if (!out.d) out.d = display", js)
+        self.assertIn("card.d = card.d || display", js)
+        self.assertIn("if (!display) return null", js)
         self.assertNotIn("fd-bb-card", js)
         self.assertIn('class="btn nav-btn"', out)
 

@@ -151,6 +151,7 @@ NATIVE_VIEW_IDS: tuple[str, ...] = (
     "view-breakout",
     "view-breakdown",
     VIEW_ID,
+    "view-paper",
 )
 
 _ALLOWLIST_RE = re.compile(

@@ -196,7 +196,7 @@ class WeekScorecardTests(unittest.TestCase):
         self.assertEqual(sc["tz"], "America/Edmonton")
 
 
-class HomeStripTests(unittest.TestCase):
+class PaperTabTests(unittest.TestCase):
     def test_open_rows_use_marks_and_short_sign(self) -> None:
         book = pt.empty_book()
         pt.apply_click(book, "AAPL", "buy", 100.0, when="2026-09-17T00:00:00Z")
@@ -209,51 +209,99 @@ class HomeStripTests(unittest.TestCase):
         self.assertIn("MSFT SHORT", rows["MSFT"]["label"])
 
     def test_empty_opens_copy(self) -> None:
-        html = pt.home_host_html(pt.empty_book(), {})
+        html = pt.panes_html(pt.empty_book(), {})
         self.assertIn("no open paper", html)
         self.assertIn("no closed yet this week", html)
-        self.assertIn('id="fd-paper-home"', html)
+        self.assertIn('id="view-paper"', html)
+        self.assertIn('data-view="paper"', html)
         self.assertIn("America/Edmonton", html)
+        self.assertIn("data-fd-paper-open", html)
+        self.assertIn("Closed trades", html)
+        self.assertEqual(pt.home_host_html(pt.empty_book(), {}), "")
 
-    def test_compact_after_twelve_opens(self) -> None:
+    def test_open_rows_list_every_position(self) -> None:
         book = pt.empty_book()
         for i in range(15):
             pt.apply_click(book, f"T{i:02d}", "buy", 10.0 + i, when=f"2026-09-17T00:{i:02d}:00Z")
         opens = pt.open_rows(book, {f"T{i:02d}": 11.0 for i in range(15)})
         self.assertEqual(len(opens), 15)
-        html = pt.home_host_html(book, {f"T{i:02d}": 11.0 for i in range(15)})
-        self.assertIn("more 3", html)
-        self.assertEqual(html.count("data-fd-paper-ticker="), 15)
-        self.assertLessEqual(pt.OPEN_SHOW_MAX, 12)
-        self.assertEqual(pt.OPEN_SHOW_MAX, 12)
+        html = pt.panes_html(book, {f"T{i:02d}": 11.0 for i in range(15)})
+        self.assertNotIn("more 3", html)
+        self.assertEqual(html.count("data-fd-paper-ticker="), 45)  # row + chip + Close per open
+        self.assertEqual(html.count("data-fd-paper-close="), 15)
+        self.assertIn(">Close</button>", html)
 
-    def test_ensure_embedded_injects_home_strip_near_book(self) -> None:
+    def test_ensure_embedded_injects_paper_tab_not_chrome_strip(self) -> None:
         html = """<!DOCTYPE html><html><head></head><body>
-<nav><button>Momentum Up</button></nav>
+<nav>
+  <button data-view="options">Options</button>
+  <button data-view="experimental">Experimental</button>
+</nav>
 <div id="fd-book-delta" class="fd-book-delta"><span class="fd-book-delta-kicker">book</span></div>
+<div id="fd-paper-home" class="fd-paper-home"><span class="fd-paper-chip">CNH LONG @ 13.63  100.00%</span></div>
 <article class="card" data-t="AAPL">AAPL</article>
-<script>function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</article>';}</script>
+<script>
+function hideAllPanes() {
+  ["home","view-mom-up","view-mom-down","view-outliers","view-options","view-sectors","search-pane"].forEach(function(id){
+    var el = document.getElementById(id);
+    if (el) el.classList.add("hide");
+  });
+}
+function paintView(v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+}
+function setView(v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+  hideAllPanes();
+  paintView(v);
+  paint();
+}
+function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</article>';}
+</script>
 </body></html>"""
         out = pt.ensure_embedded(html, {"AAPL": 12.0})
-        delta_at = out.find('id="fd-book-delta"')
-        home_at = out.find('id="fd-paper-home"')
-        self.assertGreater(delta_at, 0)
-        self.assertGreater(home_at, delta_at)
+        self.assertNotIn('id="fd-paper-home"', out)
+        self.assertIn('id="view-paper"', out)
+        self.assertIn('id="fd-nav-paper"', out)
+        self.assertRegex(out, r'<button\b[^>]*data-view=["\']paper["\']')
         self.assertIn("no open paper", out)
         self.assertIn("no closed yet this week", out)
         self.assertIn("America/Edmonton", out)
+        self.assertIn("data-fd-paper-open", out)
+        self.assertIn("data-fd-paper-close", out)
+        self.assertIn("|paper", out)
+        self.assertIn(pt.SETVIEW_MARKER, out)
+        self.assertIn(pt.HIDEALL_MARKER, out)
         js = pt.strip_js()
-        self.assertIn("paintHome", js)
+        self.assertIn("paintTab", js)
+        self.assertIn("__FD_PAPER_SHOW__", js)
         self.assertIn("selectTicker", js)
-        self.assertIn("OPEN_LIMIT = 12", js)
-        self.assertIn("weekStartMs", js)
-        self.assertIn(".fd-paper-chip[hidden]", pt.strip_css())
+        self.assertIn("data-fd-paper-close", js)
+        self.assertIn("data-fd-paper-open", js)
         self.assertIn("Already long — sell to close", js)
         self.assertIn("Previous trades", out)
         self.assertIn(">Buy</button>", pt.chrome_html("AAPL", mark=12.0))
         again = pt.ensure_embedded(out, None)
-        self.assertEqual(again.count('id="fd-paper-home"'), 1)
+        self.assertEqual(again.count('id="view-paper"'), 1)
         self.assertEqual(again.count('id="fd-paper-js"'), 1)
+        self.assertEqual(again.count('id="fd-nav-paper"'), 1)
+        self.assertNotIn('id="fd-paper-home"', again)
+        nav_at = again.find('data-view="options"')
+        paper_at = again.find('id="fd-nav-paper"')
+        exp_at = again.find('data-view="experimental"')
+        self.assertGreater(paper_at, nav_at)
+        self.assertGreater(paper_at, exp_at)
+
+    def test_inline_close_uses_opposite_click(self) -> None:
+        book = pt.empty_book()
+        pt.apply_click(book, "AMGN", "buy", 78.11)
+        res = pt.apply_click(book, "AMGN", "sell", 80.0)
+        self.assertEqual(res["action"], "close_long")
+        self.assertNotIn("AMGN", book["positions"])
+        book2 = pt.empty_book()
+        pt.apply_click(book2, "PWR", "sell", 617.64)
+        res2 = pt.apply_click(book2, "PWR", "buy", 600.0)
+        self.assertEqual(res2["action"], "close_short")
 
 
 class EmbedTests(unittest.TestCase):
@@ -338,11 +386,15 @@ window.MOM = { cards: [{ t: "AAPL", ticker: "AAPL US Equity", px_last: 12.5, sco
             self.assertGreater(out.stat().st_size, 2_000_000)
             self.assertIn('id="fd-paper-js"', text)
             self.assertIn('id="fd-paper-marks"', text)
-            self.assertIn('id="fd-paper-home"', text)
+            self.assertIn('id="view-paper"', text)
+            self.assertIn('id="fd-nav-paper"', text)
+            self.assertNotIn('id="fd-paper-home"', text)
             self.assertIn("no open paper", text)
             self.assertIn("no closed yet this week", text)
             self.assertIn("fd-paper-book", text)
             self.assertIn("data-fd-paper-act", text)
+            self.assertIn("data-fd-paper-open", text)
+            self.assertIn("data-fd-paper-close", text)
             self.assertIn("Momentum Up", text)
             self.assertIn("Momentum Down", text)
             self.assertIn("AAPL", json.loads(

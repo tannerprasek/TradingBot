@@ -24,14 +24,18 @@ card ``price`` / ``px`` / ``px_last`` / ``PX_LAST`` / last Refresh print /
 last point of ``px_series``, then ``#fd-paper-marks``, then ``MOM.cards``.
 Missing mark → buttons disabled, ``title`` explains why.
 
-Home strip (not a tab)
-----------------------
-Tiny ``#fd-paper-home`` next to BOOK / baseline: open longs/shorts from
-``fd-paper-book`` plus a week scorecard since Monday 00:00
-``America/Edmonton``. No extra persistence. Opens >12 collapse.
+Paper tab (not a home chrome strip)
+-----------------------------------
+Top-nav **Paper** (``data-view="paper"``, ``#fd-nav-paper``) opens
+``#view-paper``: open positions with live P&L % and inline **Close**,
+ticker + Buy/Sell to open at the current mark, week scorecard since
+Monday 00:00 ``America/Edmonton``, and collapsible closed trades.
+Same ``fd-paper-book`` store as card Buy/Sell. Never inject
+``#fd-paper-home`` into top chrome / BOOK delta.
 
-Live FLAGS/WATCH/MOM chrome is left alone except this card strip. Recopy
-``paper_trade.py`` to Desktop; do **not** wholesale replace ``desk_dash.py``.
+Live FLAGS/WATCH/MOM chrome is left alone except the card Buy/Sell
+strip. Recopy ``paper_trade.py`` to Desktop; do **not** wholesale
+replace ``desk_dash.py``.
 """
 
 from __future__ import annotations
@@ -66,7 +70,80 @@ DB_SCRIPT_ID = "fd-paper-marks"
 JS_SCRIPT_ID = "fd-paper-js"
 CSS_STYLE_ID = "fd-paper-css"
 HOST_CLASS = "fd-paper"
-HOME_HOST_ID = "fd-paper-home"
+HOME_HOST_ID = "fd-paper-home"  # legacy chrome strip — stripped, never re-injected
+VIEW_ID = "view-paper"
+NAV_ID = "fd-nav-paper"
+TAB_ID = "fd-paper-tab"
+OPENS_ID = "fd-paper-opens"
+WEEK_ID = "fd-paper-week"
+CLOSED_ID = "fd-paper-closed"
+TICKER_INPUT_ID = "fd-paper-ticker"
+SETVIEW_MARKER = "/*fd-paper-setview*/"
+HIDEALL_MARKER = "/*fd-paper-hideall*/"
+PAINTVIEW_MARKER = "/*fd-paper-paintview*/"
+
+BTN_PAPER = (
+    f'<button type="button" class="btn nav-btn" id="{NAV_ID}" '
+    'data-view="paper" data-fd-paper-nav="1">Paper</button>'
+)
+
+NATIVE_VIEW_IDS: tuple[str, ...] = (
+    "home",
+    "view-mom-up",
+    "view-mom-down",
+    "view-outliers",
+    "view-options",
+    "view-sectors",
+    "search-pane",
+    "view-breakout",
+    "view-breakdown",
+    "view-experimental",
+    VIEW_ID,
+)
+
+_ALLOWLIST_RE = re.compile(
+    r"home\|mom-up\|mom-down\|outliers\|options"
+    r"(?:\|sectors)?(?:\|breakout\|breakdown)?(?:\|experimental)?(?!\|paper)",
+    re.I,
+)
+_SETVIEW_FN_RE = re.compile(
+    r"(function\s+setView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{)",
+    re.I,
+)
+_PAINTVIEW_FN_RE = re.compile(
+    r"(function\s+paintView\s*\(\s*(\w+)\s*(?:,[^)]*)?\)\s*\{)",
+    re.I,
+)
+_HIDEALL_FN_RE = re.compile(
+    r"(function\s+hideAllPanes\s*\(\s*\)\s*\{)",
+    re.I,
+)
+_VIEW_ID_ARRAY_RE = re.compile(
+    r"""((?:\[\s*["']home["']\s*,\s*["']view-mom-up["']\s*,\s*["']view-mom-down["']"""
+    r"""\s*,\s*["']view-outliers["']\s*,\s*["']view-options["']"""
+    r"""(?:\s*,\s*["']view-sectors["'])?(?:\s*,\s*["']search-pane["'])?"""
+    r"""(?:\s*,\s*["']view-breakout["'])?(?:\s*,\s*["']view-breakdown["'])?"""
+    r"""(?:\s*,\s*["']view-experimental["'])?))"""
+    r"""(?![^\]]*(?:view-paper))(\s*\])""",
+    re.I,
+)
+_VIEW_SEL_RE = re.compile(
+    r"(#home\s*,\s*#view-mom-up\s*,\s*#view-mom-down\s*,\s*#view-outliers\s*,\s*"
+    r"#view-options(?:\s*,\s*#view-sectors)?(?:\s*,\s*#search-pane)?"
+    r"(?:\s*,\s*#view-breakout)?(?:\s*,\s*#view-breakdown)?"
+    r"(?:\s*,\s*#view-experimental)?)"
+    r"(?![^\"';)]*(?:#view-paper))",
+    re.I,
+)
+_DIV_TOKEN_RE = re.compile(r"<\s*(/)?\s*div\b([^>]*)>", re.I)
+_OPTIONS_VIEW_BTN_RE = re.compile(
+    r'(<button\b(?=[^>]*data-view=["\']options["\'])[^>]*>\s*Options\s*</button>)',
+    re.I | re.S,
+)
+_EXPERIMENTAL_BTN_RE = re.compile(
+    r'(<button\b(?=[^>]*(?:data-view=["\']experimental["\']|>\s*Experimental))[^>]*>\s*Experimental\s*</button>)',
+    re.I | re.S,
+)
 
 NO_MARK_REASON = "No mark price — need card price / PX_LAST / last Refresh print"
 TOAST_ALREADY_LONG = "Already long — sell to close"
@@ -74,7 +151,7 @@ TOAST_ALREADY_SHORT = "Already short — buy to close"
 
 # Week scorecard window: Monday 00:00 America/Edmonton (documented in DEPLOY-HOOKS §10).
 WEEK_TZ_NAME = "America/Edmonton"
-OPEN_SHOW_MAX = 12
+OPEN_SHOW_MAX = 12  # legacy chip-strip cap; the Paper tab lists every open
 EMPTY_OPENS = "no open paper"
 EMPTY_WEEK = "no closed yet this week"
 
@@ -727,65 +804,98 @@ def scorecard_line(card: Mapping[str, Any] | None) -> str:
     return f"{count} closed · {hit} · {win_s} · {loss_s}"
 
 
-def home_host_html(
+def closed_rows(book: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """All closed trades, newest first — Paper tab history list."""
+    rows = iter_closed(book)
+    rows.sort(
+        key=lambda r: (str(r.get("closed_at") or ""), str(r.get("ticker") or "")),
+        reverse=True,
+    )
+    return rows
+
+
+def _open_row_html(row: Mapping[str, Any]) -> str:
+    ret = row.get("pnl_pct")
+    cls = "fd-paper-chip"
+    if ret is not None:
+        cls += " fd-paper-up" if ret >= 0 else " fd-paper-down"
+    ticker = html.escape(str(row.get("ticker") or ""), quote=True)
+    label = html.escape(str(row.get("label") or ticker))
+    return (
+        f'<div class="fd-paper-open-row" data-fd-paper-ticker="{ticker}">'
+        f'<button type="button" class="{cls}" data-fd-paper-ticker="{ticker}">{label}</button>'
+        f'<button type="button" class="fd-paper-btn fd-paper-close" data-fd-paper-close="1" '
+        f'data-fd-paper-ticker="{ticker}">Close</button>'
+        f"</div>"
+    )
+
+
+def panes_html(
     book: Mapping[str, Any] | None = None,
     marks: Mapping[str, Any] | None = None,
     *,
     now: datetime | None = None,
 ) -> str:
-    """Dense Home strip next to BOOK / baseline. JS re-paints from localStorage."""
+    """Paper tab pane. JS re-paints opens / scorecard / closed from localStorage."""
     opens = open_rows(book, marks) if book else []
-    shown = opens[:OPEN_SHOW_MAX]
-    extra = opens[OPEN_SHOW_MAX:]
     score = week_scorecard(book, now=now) if book else {
         "count": 0,
         "empty": True,
         "tz": WEEK_TZ_NAME,
     }
-    bits = [
-        f'<div id="{HOME_HOST_ID}" class="fd-paper-home" role="region" '
-        f'aria-label="Paper book" data-week-tz="{html.escape(WEEK_TZ_NAME, quote=True)}">',
-        '<span class="fd-paper-home-kicker">paper</span>',
-        '<span class="fd-paper-home-opens">',
-    ]
-    if not shown:
-        bits.append(f'<span class="fd-paper-home-empty">{html.escape(EMPTY_OPENS)}</span>')
+    closed = closed_rows(book) if book else []
+    if opens:
+        open_inner = "".join(_open_row_html(row) for row in opens)
     else:
-        for row in shown:
-            ret = row.get("pnl_pct")
-            cls = "fd-paper-chip"
-            if ret is not None:
-                cls += " fd-paper-up" if ret >= 0 else " fd-paper-down"
-            ticker = html.escape(str(row.get("ticker") or ""), quote=True)
-            label = html.escape(str(row.get("label") or ticker))
-            bits.append(
-                f'<button type="button" class="{cls}" data-fd-paper-ticker="{ticker}">{label}</button>'
-            )
-        if extra:
-            bits.append(
-                f'<button type="button" class="fd-paper-home-more" data-fd-paper-more="1">'
-                f"more {len(extra)}</button>"
-            )
-            bits.append('<span class="fd-paper-home-extra">')
-            for row in extra:
-                ret = row.get("pnl_pct")
-                cls = "fd-paper-chip"
-                if ret is not None:
-                    cls += " fd-paper-up" if ret >= 0 else " fd-paper-down"
-                ticker = html.escape(str(row.get("ticker") or ""), quote=True)
-                label = html.escape(str(row.get("label") or ticker))
-                bits.append(
-                    f'<button type="button" class="{cls}" data-fd-paper-ticker="{ticker}">{label}</button>'
-                )
-            bits.append("</span>")
-    bits.append("</span>")
-    bits.append('<span class="fd-paper-home-kicker">week</span>')
+        open_inner = f'<p class="fd-paper-home-empty">{html.escape(EMPTY_OPENS)}</p>'
+    closed_bits: list[str] = []
+    for row in closed:
+        line = (
+            f"{_date_label(row.get('closed_at'))} · {str(row.get('ticker') or '')} · "
+            f"{str(row.get('side') or '').upper()} · {fmt_pct(_row_ret(row))}"
+        )
+        closed_bits.append(f"<li>{html.escape(line)}</li>")
+    closed_items = "".join(closed_bits)
+    n_closed = len(closed)
+    summary = f"Closed trades ({n_closed})" if n_closed else "Closed trades"
     empty_cls = " fd-paper-home-empty" if score.get("empty") else ""
-    bits.append(
-        f'<span class="fd-paper-home-score{empty_cls}">{html.escape(scorecard_line(score))}</span>'
+    tz = html.escape(WEEK_TZ_NAME, quote=True)
+    return "\n".join(
+        [
+            f'<div id="{VIEW_ID}" class="view-pane hide" data-view="paper" hidden>',
+            '  <div class="ph">Paper</div>',
+            f'  <div class="fd-paper-tab" id="{TAB_ID}" role="region" '
+            f'aria-label="Paper book" data-week-tz="{tz}">',
+            '    <form class="fd-paper-open-form" id="fd-paper-open-form" action="javascript:void(0)">',
+            '      <label class="fd-paper-open-label">Open',
+            f'        <input id="{TICKER_INPUT_ID}" type="text" placeholder="ticker" '
+            'autocomplete="off" spellcheck="false" />',
+            "      </label>",
+            '      <button type="button" class="fd-paper-btn fd-paper-buy" data-fd-paper-open="buy">Buy</button>',
+            '      <button type="button" class="fd-paper-btn fd-paper-sell" data-fd-paper-open="sell">Sell</button>',
+            "    </form>",
+            '    <section class="fd-paper-opens-sec">',
+            '      <span class="fd-paper-home-kicker">open</span>',
+            f'      <div id="{OPENS_ID}" class="fd-paper-opens">{open_inner}</div>',
+            "    </section>",
+            '    <section class="fd-paper-week-sec">',
+            '      <span class="fd-paper-home-kicker">week</span>',
+            f'      <span id="{WEEK_ID}" class="fd-paper-home-score{empty_cls}">'
+            f"{html.escape(scorecard_line(score))}</span>",
+            "    </section>",
+            f'    <details class="fd-paper-hist fd-paper-closed">',
+            f"      <summary>{html.escape(summary)}</summary>",
+            f'      <ul id="{CLOSED_ID}">{closed_items}</ul>',
+            "    </details>",
+            "  </div>",
+            "</div>",
+        ]
     )
-    bits.append("</div>")
-    return "".join(bits)
+
+
+def home_host_html(*_args: Any, **_kwargs: Any) -> str:
+    """Legacy chrome strip. Always empty — Paper lives in ``#view-paper``."""
+    return ""
 
 
 def _script_json(blob: str) -> str:
@@ -872,13 +982,80 @@ def strip_css() -> str:
   pointer-events: none;
 }}
 #{HOME_HOST_ID}, .fd-paper-home {{
+  display: none !important;
+}}
+#{VIEW_ID},
+#{VIEW_ID}.hide,
+#{VIEW_ID}[hidden] {{
+  display: none !important;
+}}
+body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
+#{VIEW_ID}.fd-paper-on {{
+  display: block !important;
+}}
+#{VIEW_ID} .ph {{
+  font: 650 13px/1.2 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  margin: 0 0 10px;
+  color: #9ca3af;
+}}
+.fd-paper-tab {{
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 720px;
+  font: 650 10px/1.15 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+}}
+.fd-paper-open-form {{
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 6px;
-  margin: 0 0 10px;
-  min-height: 22px;
-  font: 650 10px/1.15 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  gap: 8px;
+}}
+.fd-paper-open-label {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #9ca3af;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}}
+#{TICKER_INPUT_ID} {{
+  font: 650 12px/1.2 "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  padding: 4px 8px;
+  border-radius: 3px;
+  border: 1px solid #4b5563;
+  background: #111827;
+  color: #e5e7eb;
+  width: 8.5em;
+  text-transform: uppercase;
+}}
+.fd-paper-opens-sec, .fd-paper-week-sec {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}}
+.fd-paper-opens {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}}
+.fd-paper-open-row {{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}}
+.fd-paper-close {{
+  color: #fde68a;
+  border-color: #a3a3a3;
+}}
+.nav-btn[data-view="paper"].is-on,
+.nav-btn[data-view="paper"].on,
+.btn.nav-btn[data-view="paper"].on,
+#{NAV_ID}.is-on, #{NAV_ID}.on {{
+  border-color: #93c5fd;
+  color: #fff;
 }}
 .fd-paper-home-kicker {{
   font: 650 10px/1.15 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
@@ -886,9 +1063,6 @@ def strip_css() -> str:
   color: #6b7280;
   text-transform: uppercase;
   margin-right: 2px;
-}}
-.fd-paper-home-opens {{
-  display: contents;
 }}
 .fd-paper-chip {{
   display: inline-block;
@@ -905,7 +1079,6 @@ def strip_css() -> str:
 .fd-paper-chip:hover {{ color: #fff; }}
 .fd-paper-chip.fd-paper-up {{ color: #6ee7b7; border-color: #34d399; }}
 .fd-paper-chip.fd-paper-down {{ color: #fda4af; border-color: #fb7185; }}
-.fd-paper-chip[hidden], #{HOME_HOST_ID} [hidden] {{ display: none !important; }}
 .fd-paper-home-empty, .fd-paper-home-score.fd-paper-home-empty {{
   color: #6b7280;
   letter-spacing: 0.03em;
@@ -915,18 +1088,9 @@ def strip_css() -> str:
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.03em;
 }}
-.fd-paper-home-more {{
-  font: 650 10px/1.15 "Segoe UI", ui-sans-serif, system-ui, sans-serif;
-  color: #9ca3af;
-  background: transparent;
-  border: 1px dashed #4b5563;
-  border-radius: 3px;
-  padding: 2px 7px;
-  cursor: pointer;
+.fd-paper-closed {{
+  margin-top: 4px;
 }}
-.fd-paper-home-extra {{ display: none; flex-wrap: wrap; gap: 4px; }}
-.fd-paper-home-extra.is-on {{ display: contents; }}
-.fd-paper-home.is-expanded .fd-paper-home-extra {{ display: contents; }}
 """.strip()
 
 
@@ -956,8 +1120,14 @@ def strip_js() -> str:
   var EMPTY_OPENS = """ + empty_opens + r""";
   var EMPTY_WEEK = """ + empty_week + r""";
   var HOME_ID = "fd-paper-home";
+  var VIEW = "view-paper";
+  var NAV_ID = "fd-nav-paper";
+  var OPENS_ID = "fd-paper-opens";
+  var WEEK_ID = "fd-paper-week";
+  var CLOSED_ID = "fd-paper-closed";
+  var TICKER_ID = "fd-paper-ticker";
+  var NATIVE_VIEWS = """ + json.dumps(list(NATIVE_VIEW_IDS)) + r""";
   var toastTimer = null;
-  var homeExpanded = false;
 
   function $(id) { return document.getElementById(id); }
   function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
@@ -1262,73 +1432,202 @@ def strip_js() -> str:
       (isFinite(entry) ? entry.toFixed(2) : "—") + "  " + fmtPct(ret);
     return btn;
   }
-  function paintHome() {
+  function closeBtn(ticker) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "fd-paper-btn fd-paper-close";
+    btn.setAttribute("data-fd-paper-close", "1");
+    btn.setAttribute("data-fd-paper-ticker", ticker);
+    btn.textContent = "Close";
+    return btn;
+  }
+  function stripLegacyHome() {
     var host = $(HOME_ID);
-    if (!host) return;
+    if (host && host.parentNode) host.parentNode.removeChild(host);
+  }
+  function paintTab() {
+    stripLegacyHome();
+    var opensEl = $(OPENS_ID);
+    var weekEl = $(WEEK_ID);
+    var closedEl = $(CLOSED_ID);
+    if (!opensEl && !$(VIEW)) return;
     var book = loadBook();
     var opens = openList(book);
     var sc = weekScorecard(book);
-    var expanded = homeExpanded;
-    host.innerHTML = "";
-    host.setAttribute("data-week-tz", WEEK_TZ);
-    var kicker = document.createElement("span");
-    kicker.className = "fd-paper-home-kicker";
-    kicker.textContent = "paper";
-    host.appendChild(kicker);
-    if (!opens.length) {
-      var empty = document.createElement("span");
-      empty.className = "fd-paper-home-empty";
-      empty.textContent = EMPTY_OPENS;
-      host.appendChild(empty);
-    } else {
-      var shown = opens.slice(0, OPEN_LIMIT);
-      var extra = opens.slice(OPEN_LIMIT);
-      shown.forEach(function (row) { host.appendChild(chipEl(row)); });
-      if (extra.length) {
-        var more = document.createElement("button");
-        more.type = "button";
-        more.className = "fd-paper-home-more";
-        more.setAttribute("data-fd-paper-more", "1");
-        more.textContent = expanded ? "less" : ("more " + extra.length);
-        host.appendChild(more);
-        extra.forEach(function (row) {
-          var chip = chipEl(row);
-          if (!expanded) chip.hidden = true;
-          chip.setAttribute("data-fd-paper-extra", "1");
-          host.appendChild(chip);
+    var tab = $("fd-paper-tab");
+    if (tab) tab.setAttribute("data-week-tz", WEEK_TZ);
+    if (opensEl) {
+      opensEl.innerHTML = "";
+      if (!opens.length) {
+        var empty = document.createElement("p");
+        empty.className = "fd-paper-home-empty";
+        empty.textContent = EMPTY_OPENS;
+        opensEl.appendChild(empty);
+      } else {
+        opens.forEach(function (row) {
+          var ticker = shortOf(row.ticker || "");
+          var wrap = document.createElement("div");
+          wrap.className = "fd-paper-open-row";
+          wrap.setAttribute("data-fd-paper-ticker", ticker);
+          wrap.appendChild(chipEl(row));
+          wrap.appendChild(closeBtn(ticker));
+          opensEl.appendChild(wrap);
         });
-        host.classList.toggle("is-expanded", expanded);
       }
     }
-    var weekK = document.createElement("span");
-    weekK.className = "fd-paper-home-kicker";
-    weekK.textContent = "week";
-    host.appendChild(weekK);
-    var score = document.createElement("span");
-    score.className = "fd-paper-home-score" + (sc.empty ? " fd-paper-home-empty" : "");
-    score.textContent = scoreLine(sc);
-    host.appendChild(score);
+    if (weekEl) {
+      weekEl.className = "fd-paper-home-score" + (sc.empty ? " fd-paper-home-empty" : "");
+      weekEl.textContent = scoreLine(sc);
+    }
+    if (closedEl) {
+      var details = closedEl.closest ? closedEl.closest("details") : null;
+      var wasOpen = details ? details.open : false;
+      closedEl.innerHTML = "";
+      var closedMap = (book && book.closed) || {};
+      var rows = [];
+      Object.keys(closedMap).forEach(function (key) {
+        var items = closedMap[key] || [];
+        for (var i = 0; i < items.length; i++) {
+          var row = items[i] || {};
+          rows.push(row);
+        }
+      });
+      rows.sort(function (a, b) {
+        var ac = String(a.closed_at || ""), bc = String(b.closed_at || "");
+        if (ac < bc) return 1; if (ac > bc) return -1;
+        var at = String(a.ticker || ""), bt = String(b.ticker || "");
+        return at < bt ? -1 : (at > bt ? 1 : 0);
+      });
+      for (var j = 0; j < rows.length; j++) {
+        var c = rows[j] || {};
+        var li = document.createElement("li");
+        var r = (c.ret_pct != null) ? Number(c.ret_pct) : pnlPct(c.side, c.entry, c.exit);
+        li.textContent = dateLabel(c.closed_at) + " · " + shortOf(c.ticker || "") + " · " +
+          String(c.side || "").toUpperCase() + " · " + fmtPct(r);
+        closedEl.appendChild(li);
+      }
+      if (details) {
+        var sum = details.querySelector("summary");
+        if (sum) sum.textContent = rows.length ? ("Closed trades (" + rows.length + ")") : "Closed trades";
+        details.open = wasOpen;
+      }
+    }
   }
-  function onHomeClick(ev) {
-    var more = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-more]") : null;
-    if (more) {
+  function paintHome() { paintTab(); }
+  function hideNativeViews() {
+    for (var i = 0; i < NATIVE_VIEWS.length; i++) {
+      var el = $(NATIVE_VIEWS[i]);
+      if (!el) continue;
+      if (NATIVE_VIEWS[i] === VIEW) continue;
+      el.classList.add("hide");
+    }
+  }
+  function setOn(btn, on) {
+    if (!btn) return;
+    btn.classList.toggle("is-on", !!on);
+    btn.classList.toggle("on", !!on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  function navButtons() {
+    return document.querySelectorAll("#topnav .btn, #topnav .nav-btn, .topnav .nav-btn, nav .btn, nav .nav-btn, [data-view], [data-fd-paper-nav]");
+  }
+  function oursOf(b) {
+    var view = (b.getAttribute("data-view") || "");
+    return view === "paper" || b.getAttribute("data-fd-paper-nav") === "1" || b.id === NAV_ID;
+  }
+  function syncNav(on) {
+    var buttons = navButtons();
+    for (var i = 0; i < buttons.length; i++) {
+      var b = buttons[i];
+      if (on) setOn(b, oursOf(b));
+      else if (oursOf(b)) setOn(b, false);
+    }
+  }
+  function showPaper(on) {
+    stripLegacyHome();
+    var pane = $(VIEW);
+    if (on) {
+      hideNativeViews();
+      if (pane) {
+        pane.classList.remove("hide");
+        pane.classList.add("fd-paper-on");
+        pane.removeAttribute("hidden");
+      }
+      paintTab();
+      document.body.setAttribute("data-view", "paper");
+      document.body.setAttribute("data-fd-paper", "1");
+      syncNav(true);
+      return;
+    }
+    if (pane) {
+      pane.classList.add("hide");
+      pane.classList.remove("fd-paper-on");
+      pane.setAttribute("hidden", "hidden");
+    }
+    var home = $("home");
+    if (home) home.classList.remove("hide");
+    document.body.removeAttribute("data-fd-paper");
+    if (document.body.getAttribute("data-view") === "paper") {
+      document.body.removeAttribute("data-view");
+    }
+    syncNav(false);
+  }
+  window.__FD_PAPER_SHOW__ = function () { showPaper(true); };
+  window.__FD_PAPER_HIDE__ = function () { showPaper(false); };
+  function kindOf(btn) {
+    if (!btn || !btn.getAttribute) return "";
+    var view = (btn.getAttribute("data-view") || "").toLowerCase();
+    if (view === "paper" || btn.getAttribute("data-fd-paper-nav") === "1" || btn.id === NAV_ID) return "paper";
+    var label = (btn.textContent || "").replace(/\s+/g, " ").trim();
+    if (label === "Paper") return "paper";
+    if (btn.id === "refresh" || btn.id === "options-refresh") return "";
+    if (btn.closest && btn.closest("#topnav, nav, .topnav") && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || view)) return "other";
+    if (btn.classList && (btn.classList.contains("nav-btn") || view)) return "other";
+    return "";
+  }
+  document.addEventListener("click", function (ev) {
+    var t = ev.target && ev.target.closest ? ev.target.closest("button, [data-view], [data-fd-paper-nav]") : ev.target;
+    var kind = kindOf(t);
+    if (!kind) return;
+    if (kind === "paper") {
       ev.preventDefault();
       ev.stopPropagation();
       if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-      homeExpanded = !homeExpanded;
-      paintHome();
-      return true;
+      showPaper(true);
+      return;
     }
-    var chip = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-ticker]") : null;
-    if (!chip) return false;
-    ev.preventDefault();
-    ev.stopPropagation();
-    if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-    var t = chip.getAttribute("data-fd-paper-ticker") || "";
-    var sel = selectFn();
-    if (sel && t) sel(t);
-    return true;
+    if (kind === "other") showPaper(false);
+  }, true);
+  function installSetViewBridge() {
+    var orig = window.setView;
+    if (typeof orig !== "function" || orig.__fdPaper) return;
+    window.setView = function (v) {
+      var kind = String(v || "").toLowerCase();
+      if (kind === "paper") {
+        showPaper(true);
+        return;
+      }
+      showPaper(false);
+      return orig.apply(this, arguments);
+    };
+    window.setView.__fdPaper = true;
   }
+  function tabTicker() {
+    var input = $(TICKER_ID);
+    return shortOf(input && input.value);
+  }
+  function applyTabTrade(ticker, act) {
+    var key = shortOf(ticker);
+    if (!key) { showToast("No ticker"); return; }
+    var card = findMomCard(key);
+    var mark = markOf(key, null, card);
+    var book = loadBook();
+    var res = applyClick(book, key, act, mark);
+    if (res.toast) showToast(res.toast);
+    if (res.ok && res.action !== "noop") saveBook(book);
+    paintAll();
+  }
+  function onHomeClick(ev) { return false; }
   function showToast(text) {
     if (!text) return;
     var el = $("fd-paper-toast");
@@ -1424,9 +1723,41 @@ def strip_js() -> str:
     return host;
   }
   function onPaperClick(ev) {
+    var openBtn = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-open]") : null;
+    if (openBtn) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+      if (openBtn.disabled) return;
+      applyTabTrade(tabTicker(), openBtn.getAttribute("data-fd-paper-open"));
+      return;
+    }
+    var closeBtn = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-close]") : null;
+    if (closeBtn) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+      var ct = closeBtn.getAttribute("data-fd-paper-ticker") || "";
+      var bookC = loadBook();
+      var posC = (bookC.positions || {})[shortOf(ct)];
+      var actC = posC && posC.side === "short" ? "buy" : "sell";
+      applyTabTrade(ct, actC);
+      return;
+    }
+    var chip = ev.target && ev.target.closest ? ev.target.closest("#" + VIEW + " [data-fd-paper-ticker]") : null;
+    if (chip && !chip.getAttribute("data-fd-paper-close") && !chip.getAttribute("data-fd-paper-act")) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+      var tChip = chip.getAttribute("data-fd-paper-ticker") || "";
+      var sel = selectFn();
+      if (sel && tChip) sel(tChip);
+      return;
+    }
     var home = ev.target && ev.target.closest ? ev.target.closest("#" + HOME_ID) : null;
     if (home) {
-      onHomeClick(ev);
+      ev.preventDefault();
+      ev.stopPropagation();
       return;
     }
     var btn = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-act]") : null;
@@ -1453,7 +1784,7 @@ def strip_js() -> str:
   }
   function hydrateCard(node, card) {
     if (!node || !node.querySelector) return;
-    if (node.closest && node.closest("nav, .topnav, #gics-filter-strip, #fd-book-delta, #fd-paper-home, #view-experimental, #sscore-grid")) return;
+    if (node.closest && node.closest("nav, .topnav, #gics-filter-strip, #fd-book-delta, #fd-paper-home, #view-paper, #view-experimental, #sscore-grid")) return;
     if (node.getAttribute && node.getAttribute("data-fd-sscore") === "1") return;
     if (node.classList && node.classList.contains("fd-ss-card")) return;
     if (!(node.matches && (node.matches("article.card, article, .card") || node.hasAttribute("data-t") || node.hasAttribute("data-ticker")))) {
@@ -1474,7 +1805,7 @@ def strip_js() -> str:
     try {
       var nodes = document.querySelectorAll("article.card, article[data-t], article[data-ticker], .grid .card, .grid.dense .card");
       for (var i = 0; i < nodes.length; i++) hydrateCard(nodes[i], null);
-      paintHome();
+      paintTab();
     } finally { painting = false; }
   }
   function injectIntoHtml(html, card) {
@@ -1512,9 +1843,9 @@ def strip_js() -> str:
         for (var j = 0; j < added.length; j++) {
           var n = added[j];
           if (!n || n.nodeType !== 1) continue;
-          if (n.id === "fd-paper-toast" || n.id === "fd-paper-home") continue;
-          if (n.classList && (n.classList.contains("fd-paper") || n.classList.contains("fd-paper-home") || n.classList.contains("fd-paper-chip"))) continue;
-          if (n.closest && n.closest("#fd-paper-home")) continue;
+          if (n.id === "fd-paper-toast" || n.id === "fd-paper-home" || n.id === "view-paper" || n.id === "fd-paper-tab" || n.id === "fd-paper-opens") continue;
+          if (n.classList && (n.classList.contains("fd-paper") || n.classList.contains("fd-paper-home") || n.classList.contains("fd-paper-chip") || n.classList.contains("fd-paper-tab") || n.classList.contains("fd-paper-open-row"))) continue;
+          if (n.closest && (n.closest("#fd-paper-home") || n.closest("#view-paper"))) continue;
           if (n.matches && n.matches("article.card, article[data-t], article[data-ticker], .card")) {
             need = true;
             break;
@@ -1531,11 +1862,21 @@ def strip_js() -> str:
   }
   function install() {
     wrapCardHTML();
+    installSetViewBridge();
+    stripLegacyHome();
     paintAll();
     observe();
     if (!window.__FD_PAPER_CLICK__) {
       window.__FD_PAPER_CLICK__ = true;
       document.addEventListener("click", onPaperClick, true);
+    }
+    var form = $("fd-paper-open-form");
+    if (form && !form.__fdPaperBound) {
+      form.__fdPaperBound = true;
+      form.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        applyTabTrade(tabTicker(), "buy");
+      });
     }
   }
   window.__FD_PAPER_APPLY__ = applyClick;
@@ -1543,7 +1884,8 @@ def strip_js() -> str:
   window.__FD_PAPER_MARK__ = markOf;
   window.__FD_PAPER_PAINT__ = paintAll;
   window.__FD_PAPER_LOAD__ = loadBook;
-  window.__FD_PAPER_PAINT_HOME__ = paintHome;
+  window.__FD_PAPER_PAINT_HOME__ = paintTab;
+  window.__FD_PAPER_PAINT_TAB__ = paintTab;
   window.__FD_PAPER_SCORECARD__ = weekScorecard;
   window.__FD_PAPER_WEEK_START__ = weekStartMs;
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install);
@@ -1569,21 +1911,172 @@ def _ensure_css(html_text: str) -> str:
     return css + html_text
 
 
-def _ensure_home_host(html_text: str) -> str:
-    host = home_host_html()
-    if re.search(rf'id=["\']{HOME_HOST_ID}["\']', html_text, re.I):
-        return re.sub(
-            rf'<div\b[^>]*\bid=["\']{HOME_HOST_ID}["\'][^>]*>.*?</div>',
-            host,
-            html_text,
-            count=1,
-            flags=re.I | re.S,
-        )
+def _find_tag_span(html_text: str, elem_id: str) -> tuple[int, int] | None:
+    text = html_text or ""
+    opener = re.compile(
+        rf'<div\b(?=[^>]*\bid=["\']{re.escape(elem_id)}["\'])[^>]*>',
+        re.I,
+    )
+    match = opener.search(text)
+    if not match:
+        return None
+    start = match.start()
+    depth = 1
+    for tok in _DIV_TOKEN_RE.finditer(text, match.end()):
+        closing = bool(tok.group(1))
+        rest = tok.group(2) or ""
+        self_close = rest.rstrip().endswith("/")
+        if closing:
+            depth -= 1
+            if depth == 0:
+                return start, tok.end()
+        elif self_close:
+            continue
+        else:
+            depth += 1
+    return None
+
+
+def _strip_home_host(html_text: str) -> str:
+    """Remove leftover ``#fd-paper-home`` from top chrome / BOOK host."""
+    text = html_text or ""
+    span = _find_tag_span(text, HOME_HOST_ID)
+    while span:
+        start, end = span
+        while end < len(text) and text[end] in " \t\r\n":
+            end += 1
+        text = text[:start] + text[end:]
+        span = _find_tag_span(text, HOME_HOST_ID)
+    text = re.sub(
+        rf'<div\b[^>]*\bid=["\']{HOME_HOST_ID}["\'][^>]*>.*?</div>\s*',
+        "",
+        text,
+        flags=re.I | re.S,
+    )
+    return text
+
+
+def _has_nav_button(html_text: str) -> bool:
+    text = html_text or ""
+    patterns = (
+        rf'<button\b[^>]*\bdata-view=["\']paper["\']',
+        rf'<button\b[^>]*\bdata-fd-paper-nav=["\']1["\']',
+        rf'<button\b[^>]*\bid=["\']{re.escape(NAV_ID)}["\']',
+    )
+    return any(re.search(pat, text, re.I | re.S) for pat in patterns)
+
+
+def _ensure_nav(html_text: str) -> str:
+    if _has_nav_button(html_text):
+        return html_text
+    pair = "\n  " + BTN_PAPER
+    m = _EXPERIMENTAL_BTN_RE.search(html_text)
+    if m:
+        return html_text[: m.end()] + pair + html_text[m.end() :]
+    m = _OPTIONS_VIEW_BTN_RE.search(html_text)
+    if m:
+        return html_text[: m.end()] + pair + html_text[m.end() :]
+    if "<nav" in html_text.lower():
+        return re.sub(r"(</nav>)", pair + r"\n\1", html_text, count=1, flags=re.I)
+    return pair + "\n" + html_text
+
+
+def _patch_setview_allowlist(html_text: str) -> str:
+    text = html_text or ""
+    if re.search(
+        r"home\|mom-up\|mom-down\|outliers\|options(?:\|sectors)?(?:\|breakout\|breakdown)?(?:\|experimental)?\|paper",
+        text,
+        re.I,
+    ):
+        return text
+    return _ALLOWLIST_RE.sub(lambda m: m.group(0) + "|paper", text)
+
+
+def _early_return_snippet(marker: str, param: str) -> str:
+    return (
+        f"{marker}"
+        f"if({param}===\"paper\"){{"
+        f"if(window.__FD_PAPER_SHOW__)window.__FD_PAPER_SHOW__();"
+        f"if(typeof syncNav===\"function\")syncNav();"
+        f"return;}}"
+    )
+
+
+def _replace_or_inject_early_return(
+    html_text: str,
+    *,
+    marker: str,
+    fn_re: re.Pattern[str],
+) -> str:
+    text = html_text or ""
+    existing = re.search(
+        re.escape(marker) + r'if\((\w+)==="paper".*?return;\}',
+        text,
+        re.S,
+    )
+    if existing:
+        return text[: existing.start()] + _early_return_snippet(marker, existing.group(1)) + text[existing.end() :]
+
+    def inject(match: re.Match[str]) -> str:
+        head, param = match.group(1), match.group(2)
+        return f"{head}{_early_return_snippet(marker, param)}"
+
+    return fn_re.sub(inject, text, count=1)
+
+
+def _hideall_snippet() -> str:
+    return (
+        f"{HIDEALL_MARKER}"
+        '["view-paper"].forEach(function(id){'
+        "var el=document.getElementById(id);"
+        'if(el){el.classList.add("hide");el.classList.remove("fd-paper-on");'
+        'el.setAttribute("hidden","hidden");}'
+        'if(document.body)document.body.removeAttribute("data-fd-paper");'
+        "});"
+    )
+
+
+def _patch_hideall_panes(html_text: str) -> str:
+    text = html_text or ""
+    snippet = _hideall_snippet()
+    existing = re.search(
+        re.escape(HIDEALL_MARKER) + r'\["view-paper"\]\.forEach\(function\(id\)\{.*?\}\);',
+        text,
+        re.S,
+    )
+    if existing:
+        return text[: existing.start()] + snippet + text[existing.end() :]
+    return _HIDEALL_FN_RE.sub(lambda m: m.group(1) + snippet, text, count=1)
+
+
+def _patch_view_id_lists(html_text: str) -> str:
+    text = html_text or ""
+    text = _VIEW_ID_ARRAY_RE.sub(
+        r'\1,"view-paper"\2',
+        text,
+    )
+    text = _VIEW_SEL_RE.sub(
+        r"\1, #view-paper",
+        text,
+    )
+    return text
+
+
+def _patch_setview(html_text: str) -> str:
+    text = _patch_setview_allowlist(html_text)
+    text = _replace_or_inject_early_return(html_text=text, marker=SETVIEW_MARKER, fn_re=_SETVIEW_FN_RE)
+    text = _replace_or_inject_early_return(html_text=text, marker=PAINTVIEW_MARKER, fn_re=_PAINTVIEW_FN_RE)
+    text = _patch_hideall_panes(text)
+    return _patch_view_id_lists(text)
+
+
+def _insert_host(html_text: str, host: str) -> str:
+    for elem_id in ("view-experimental", "view-breakdown", "view-mom-down", "view-mom-up"):
+        span = _find_tag_span(html_text, elem_id)
+        if span:
+            return html_text[: span[1]] + "\n" + host + html_text[span[1] :]
     for pat in (
-        r'(<div\b[^>]*\bid=["\']fd-book-delta["\'][^>]*>.*?</div>)',
-        r'(<div\b[^>]*\bid=["\']gics-filter-strip["\'][^>]*>.*?</div>)',
         r"(<nav\b[^>]*>.*?</nav>)",
-        r'(<div\b[^>]*class=["\'][^"\']*(?:filter-strip|filters|chip-row)[^"\']*["\'][^>]*>.*?</div>)',
         r"(<h1\b[^>]*>.*?</h1>)",
         r"(<body\b[^>]*>)",
     ):
@@ -1591,6 +2084,22 @@ def _ensure_home_host(html_text: str) -> str:
         if match:
             return html_text[: match.end()] + "\n" + host + html_text[match.end() :]
     return host + "\n" + html_text
+
+
+def _ensure_panes(html_text: str, *, replace: bool = True) -> str:
+    has_view = _find_tag_span(html_text, VIEW_ID) is not None
+    if has_view and not replace:
+        return html_text
+    host = panes_html()
+    span = _find_tag_span(html_text, VIEW_ID)
+    if span:
+        return html_text[: span[0]] + host + html_text[span[1] :]
+    return _insert_host(html_text, host)
+
+
+def _ensure_home_host(html_text: str) -> str:
+    """Back-compat alias: strip chrome strip, do not re-inject it."""
+    return _strip_home_host(html_text)
 
 
 def _ensure_db(html_text: str, marks: Mapping[str, Any] | None) -> str:
@@ -1625,15 +2134,19 @@ def _ensure_js(html_text: str) -> str:
 
 
 def ensure_embedded(html_text: str, marks: Mapping[str, Any] | None = None) -> str:
-    """CSS + marks db + Home strip + cardHTML wrap JS. Safe on live ~2.7MB HTML.
+    """CSS + marks db + Paper tab + cardHTML wrap JS. Safe on live ~2.7MB HTML.
 
     ``marks=None`` still injects JS/CSS so Buy/Sell hydrate from ``MOM.cards`` /
     localStorage after Refresh. Pass ``marks_db(cards, book=book)`` on a write.
-    Home ``#fd-paper-home`` sits next to BOOK / baseline and reads ``fd-paper-book``.
+    ``#view-paper`` is a top-nav tab (not a home chrome strip) and reads
+    ``fd-paper-book``. Leftover ``#fd-paper-home`` is stripped.
     """
     text = html_text or ""
+    text = _strip_home_host(text)
+    text = _ensure_nav(text)
     text = _ensure_css(text)
-    text = _ensure_home_host(text)
+    text = _patch_setview(text)
+    text = _ensure_panes(text, replace=True)
     if marks is not None or not re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', text, re.I):
         text = _ensure_db(text, marks if marks is not None else {})
     text = _ensure_js(text)

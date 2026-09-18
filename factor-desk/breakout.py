@@ -106,6 +106,7 @@ NATIVE_VIEW_IDS: tuple[str, ...] = (
     VIEW_BREAKOUT_ID,
     VIEW_BREAKDOWN_ID,
     "view-experimental",
+    "view-paper",
 )
 _ALLOWLIST_RE = re.compile(
     r"home\|mom-up\|mom-down\|outliers\|options(?:\|sectors)?(?!\|breakout)",
@@ -658,10 +659,16 @@ def strip_js() -> str:
     return null;
   }}
   function withPills(card, row) {{
+    row = row || {{}};
     var out = {{}};
     if (card) {{ for (var k in card) out[k] = card[k]; }}
-    if (!out.t) out.t = row.t || shortOf(row.ticker) || "";
-    if (!out.ticker) out.ticker = row.ticker || out.t;
+    var display = shortOf(out.d || out.t || out.ticker || out.name || out.symbol || row.t || row.ticker || row.d || "");
+    if (display) {{
+      if (!out.t) out.t = display;
+      if (!out.d) out.d = display;
+      if (!out.name) out.name = display;
+      if (!out.ticker) out.ticker = row.ticker || out.ticker || display;
+    }}
     if (out.score == null && row.score != null) out.score = row.score;
     if (out.mom_score == null && row.score != null) out.mom_score = row.score;
     var pills = Array.isArray(out.enrich_pills) ? out.enrich_pills.slice() : [];
@@ -696,6 +703,12 @@ def strip_js() -> str:
     var fn = htmlFn();
     if (!fn) return null;
     var card = withPills(findMomCard(row.ticker || row.t), row);
+    var display = shortOf(card.d || card.t || card.ticker || card.name || row.t || row.ticker || "");
+    if (!display) return null;
+    card.d = card.d || display;
+    card.t = card.t || display;
+    card.name = card.name || display;
+    if (!card.ticker) card.ticker = row.ticker || display;
     var wrap = document.createElement("div");
     wrap.innerHTML = fn(card);
     var node = wrap.firstElementChild;
@@ -703,7 +716,7 @@ def strip_js() -> str:
     node.classList.remove("hide", "fd-bb-hid", "gics-hid");
     node.addEventListener("click", function () {{
       var sel = selectFn();
-      if (sel) sel(card.t || card.ticker || row.t);
+      if (sel) sel(card.t || card.d || card.ticker || row.t);
     }});
     return node;
   }}
@@ -964,7 +977,7 @@ def _patch_hideall_panes(html_text: str) -> str:
         return text
     snippet = (
         f"{HIDEALL_MARKER}"
-        '["view-breakout","view-breakdown","view-experimental"].forEach(function(id){'
+        '["view-breakout","view-breakdown","view-experimental","view-paper"].forEach(function(id){'
         'var el=document.getElementById(id);if(el)el.classList.add("hide");});'
     )
     return _HIDEALL_FN_RE.sub(lambda m: m.group(1) + snippet, text, count=1)
