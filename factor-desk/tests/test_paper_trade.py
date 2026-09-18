@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -117,6 +118,143 @@ class MarkTests(unittest.TestCase):
         self.assertEqual(db["MSFT"], 400.0)
 
 
+class WeekScorecardTests(unittest.TestCase):
+    """Monday 00:00 America/Edmonton window + signed hit/win/loss."""
+
+    NOW = datetime(2026, 9, 18, 15, 0, tzinfo=timezone.utc)  # Friday
+
+    def _closed(self, ticker: str, side: str, entry: float, exit_px: float, closed_at: str) -> dict:
+        book = pt.empty_book()
+        pos = {"ticker": ticker, "side": side, "entry": entry, "opened_at": "2026-09-01T00:00:00Z"}
+        row = pt.close_position(pos, exit_px, closed_at)
+        book["closed"][pt._short(ticker)] = [row]
+        return book
+
+    def _merge(self, *books: dict) -> dict:
+        out = pt.empty_book()
+        for book in books:
+            for key, rows in book["closed"].items():
+                out["closed"].setdefault(key, []).extend(rows)
+        return out
+
+    def test_week_start_is_monday_edmonton(self) -> None:
+        start = pt.week_start(self.NOW)
+        self.assertEqual(start.tzinfo.key if hasattr(start.tzinfo, "key") else pt.WEEK_TZ_NAME, "America/Edmonton")
+        self.assertEqual(start.weekday(), 0)
+        self.assertEqual(start.hour, 0)
+        self.assertEqual(start.minute, 0)
+        # 2026-09-14 is MDT (UTC-6) → 06:00 UTC
+        self.assertEqual(start.astimezone(timezone.utc).isoformat(), "2026-09-14T06:00:00+00:00")
+
+    def test_monday_edmonton_midnight_is_in_week(self) -> None:
+        book = self._closed("AAPL", "long", 100.0, 110.0, "2026-09-14T06:00:00Z")
+        rows = pt.closed_this_week(book, now=self.NOW)
+        self.assertEqual(len(rows), 1)
+
+    def test_sunday_night_edmonton_is_previous_week(self) -> None:
+        # Monday 05:59 UTC = Sunday 23:59 America/Edmonton
+        book = self._closed("AAPL", "long", 100.0, 110.0, "2026-09-14T05:59:59Z")
+        self.assertEqual(pt.closed_this_week(book, now=self.NOW), [])
+        self.assertTrue(pt.week_scorecard(book, now=self.NOW)["empty"])
+
+    def test_hit_rate_and_avg_win_loss_signed_for_shorts(self) -> None:
+        book = self._merge(
+            self._closed("AAA", "long", 100.0, 110.0, "2026-09-15T12:00:00Z"),   # +10 win
+            self._closed("BBB", "short", 100.0, 90.0, "2026-09-16T12:00:00Z"),   # +10 win (price fell)
+            self._closed("CCC", "short", 100.0, 110.0, "2026-09-17T12:00:00Z"),  # -10 loss (price rose)
+            self._closed("DDD", "long", 100.0, 95.0, "2026-09-18T12:00:00Z"),    # -5 loss
+        )
+        sc = pt.week_scorecard(book, now=self.NOW)
+        self.assertEqual(sc["count"], 4)
+        self.assertEqual(sc["hits"], 2)
+        self.assertAlmostEqual(sc["hit_rate"], 50.0)
+        self.assertAlmostEqual(sc["avg_win"], 10.0)
+        self.assertAlmostEqual(sc["avg_loss"], -7.5)
+        self.assertIn("4 closed", pt.scorecard_line(sc))
+        self.assertIn("50% hit", pt.scorecard_line(sc))
+        self.assertIn("avg win +10.00%", pt.scorecard_line(sc))
+        self.assertIn("avg loss -7.50%", pt.scorecard_line(sc))
+
+    def test_zero_return_is_not_a_hit(self) -> None:
+        book = self._merge(
+            self._closed("AAA", "long", 100.0, 110.0, "2026-09-15T12:00:00Z"),
+            self._closed("BBB", "long", 100.0, 100.0, "2026-09-16T12:00:00Z"),
+        )
+        sc = pt.week_scorecard(book, now=self.NOW)
+        self.assertEqual(sc["count"], 2)
+        self.assertEqual(sc["hits"], 1)
+        self.assertAlmostEqual(sc["hit_rate"], 50.0)
+        self.assertAlmostEqual(sc["avg_win"], 10.0)
+        self.assertIsNone(sc["avg_loss"])
+        self.assertIn("avg loss —", pt.scorecard_line(sc))
+
+    def test_empty_week_copy(self) -> None:
+        sc = pt.week_scorecard(pt.empty_book(), now=self.NOW)
+        self.assertEqual(sc["count"], 0)
+        self.assertTrue(sc["empty"])
+        self.assertEqual(pt.scorecard_line(sc), "no closed yet this week")
+        self.assertEqual(sc["tz"], "America/Edmonton")
+
+
+class HomeStripTests(unittest.TestCase):
+    def test_open_rows_use_marks_and_short_sign(self) -> None:
+        book = pt.empty_book()
+        pt.apply_click(book, "AAPL", "buy", 100.0, when="2026-09-17T00:00:00Z")
+        pt.apply_click(book, "MSFT", "sell", 200.0, when="2026-09-17T01:00:00Z")
+        rows = {r["ticker"]: r for r in pt.open_rows(book, {"AAPL": 110.0, "MSFT": 180.0})}
+        self.assertAlmostEqual(rows["AAPL"]["pnl_pct"], 10.0)
+        self.assertEqual(rows["AAPL"]["side"], "long")
+        self.assertAlmostEqual(rows["MSFT"]["pnl_pct"], 10.0)
+        self.assertEqual(rows["MSFT"]["side"], "short")
+        self.assertIn("MSFT SHORT", rows["MSFT"]["label"])
+
+    def test_empty_opens_copy(self) -> None:
+        html = pt.home_host_html(pt.empty_book(), {})
+        self.assertIn("no open paper", html)
+        self.assertIn("no closed yet this week", html)
+        self.assertIn('id="fd-paper-home"', html)
+        self.assertIn("America/Edmonton", html)
+
+    def test_compact_after_twelve_opens(self) -> None:
+        book = pt.empty_book()
+        for i in range(15):
+            pt.apply_click(book, f"T{i:02d}", "buy", 10.0 + i, when=f"2026-09-17T00:{i:02d}:00Z")
+        opens = pt.open_rows(book, {f"T{i:02d}": 11.0 for i in range(15)})
+        self.assertEqual(len(opens), 15)
+        html = pt.home_host_html(book, {f"T{i:02d}": 11.0 for i in range(15)})
+        self.assertIn("more 3", html)
+        self.assertEqual(html.count("data-fd-paper-ticker="), 15)
+        self.assertLessEqual(pt.OPEN_SHOW_MAX, 12)
+        self.assertEqual(pt.OPEN_SHOW_MAX, 12)
+
+    def test_ensure_embedded_injects_home_strip_near_book(self) -> None:
+        html = """<!DOCTYPE html><html><head></head><body>
+<nav><button>Momentum Up</button></nav>
+<div id="fd-book-delta" class="fd-book-delta"><span class="fd-book-delta-kicker">book</span></div>
+<article class="card" data-t="AAPL">AAPL</article>
+<script>function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</article>';}</script>
+</body></html>"""
+        out = pt.ensure_embedded(html, {"AAPL": 12.0})
+        delta_at = out.find('id="fd-book-delta"')
+        home_at = out.find('id="fd-paper-home"')
+        self.assertGreater(delta_at, 0)
+        self.assertGreater(home_at, delta_at)
+        self.assertIn("no open paper", out)
+        self.assertIn("no closed yet this week", out)
+        self.assertIn("America/Edmonton", out)
+        js = pt.strip_js()
+        self.assertIn("paintHome", js)
+        self.assertIn("selectTicker", js)
+        self.assertIn("OPEN_LIMIT = 12", js)
+        self.assertIn("weekStartMs", js)
+        self.assertIn("Already long — sell to close", js)
+        self.assertIn("Previous trades", out)
+        self.assertIn(">Buy</button>", pt.chrome_html("AAPL", mark=12.0))
+        again = pt.ensure_embedded(out, None)
+        self.assertEqual(again.count('id="fd-paper-home"'), 1)
+        self.assertEqual(again.count('id="fd-paper-js"'), 1)
+
+
 class EmbedTests(unittest.TestCase):
     def test_ensure_embedded_injects_buttons_and_storage(self) -> None:
         html = """<!DOCTYPE html><html><head></head><body>
@@ -199,6 +337,9 @@ window.MOM = { cards: [{ t: "AAPL", ticker: "AAPL US Equity", px_last: 12.5, sco
             self.assertGreater(out.stat().st_size, 2_000_000)
             self.assertIn('id="fd-paper-js"', text)
             self.assertIn('id="fd-paper-marks"', text)
+            self.assertIn('id="fd-paper-home"', text)
+            self.assertIn("no open paper", text)
+            self.assertIn("no closed yet this week", text)
             self.assertIn("fd-paper-book", text)
             self.assertIn("data-fd-paper-act", text)
             self.assertIn("Momentum Up", text)
