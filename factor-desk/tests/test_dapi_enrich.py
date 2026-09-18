@@ -8,10 +8,11 @@ import sys
 import tempfile
 import unittest
 from datetime import date, timedelta
+import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -328,12 +329,122 @@ class RefreshHookTests(unittest.TestCase):
             with urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as resp:
                 health = json.loads(resp.read().decode("utf-8"))
             self.assertTrue(health["ok"])
-            with urlopen(f"http://127.0.0.1:{port}/refresh?intraday=1", timeout=5) as resp:
+            with urlopen(f"http://127.0.0.1:{port}/refresh?intraday=1&tickers=AAPL", timeout=5) as resp:
                 self.assertEqual(resp.status, 202)
                 body = json.loads(resp.read().decode("utf-8"))
             self.assertTrue(body["intraday"])
+            self.assertFalse(body["options"])
+            self.assertEqual(body["kind"], "refresh")
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                with add_server._STATE_LOCK:
+                    if not add_server._STATE["busy"]:
+                        break
+                time.sleep(0.05)
         finally:
             httpd.shutdown()
+
+    def test_run_refresh_skips_options_pulse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = add_server.run_refresh(tickers=["AAPL"], intraday=False, root=root)
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["options"])
+            self.assertEqual(result["kind"], "refresh")
+            self.assertIsNone(result["opt_err"])
+            self.assertFalse((root / "options_abnormal.json").is_file())
+            self.assertTrue((root / "dapi_enrichment.json").is_file())
+
+    def test_run_options_refresh_writes_abnormal_and_rebuilds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = add_server.run_options_refresh(tickers=["AAPL"], root=root)
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["options"])
+            self.assertEqual(result["kind"], "options")
+            self.assertTrue((root / "options_abnormal.json").is_file())
+            self.assertTrue((root / "factorbook.html").is_file())
+            html = (root / "factorbook.html").read_text(encoding="utf-8")
+            self.assertIn("Options Refresh", html)
+            self.assertIn('id="sidecar-progress"', html)
+            data = json.loads((root / "options_abnormal.json").read_text(encoding="utf-8"))
+            self.assertIn("AAPL US Equity", data["names"])
+
+    def test_http_options_refresh_aliases(self) -> None:
+        add_server._STATE.update(
+            {
+                "busy": False,
+                "pct": 0,
+                "stage": "idle",
+                "error": None,
+                "last": None,
+                "intraday": False,
+                "options": False,
+                "kind": "idle",
+            }
+        )
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), add_server.DeskHandler)
+        port = httpd.server_address[1]
+        t = Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{port}/options-refresh?tickers=AAPL", timeout=5) as resp:
+                self.assertEqual(resp.status, 202)
+                body = json.loads(resp.read().decode("utf-8"))
+            self.assertTrue(body["options"])
+            self.assertEqual(body["kind"], "options")
+
+            deadline = time.time() + 8
+            busy = True
+            while time.time() < deadline:
+                with add_server._STATE_LOCK:
+                    busy = add_server._STATE["busy"]
+                if not busy:
+                    break
+                time.sleep(0.05)
+            self.assertFalse(busy)
+
+            req = Request(
+                f"http://127.0.0.1:{port}/api/refresh_live",
+                data=json.dumps({"options": 1, "tickers": ["AAPL"]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 202)
+                body = json.loads(resp.read().decode("utf-8"))
+            self.assertTrue(body["options"])
+            self.assertEqual(body["kind"], "options")
+
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                with add_server._STATE_LOCK:
+                    busy = add_server._STATE["busy"]
+                if not busy:
+                    break
+                time.sleep(0.05)
+
+            req = Request(
+                f"http://127.0.0.1:{port}/refresh",
+                data=json.dumps({"options": 0, "intraday": 0, "tickers": ["AAPL"]}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=5) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            self.assertFalse(body["options"])
+            self.assertEqual(body["kind"], "refresh")
+        finally:
+            httpd.shutdown()
+
+
+class ParseFlagTests(unittest.TestCase):
+    def test_parse_options_default_off(self) -> None:
+        self.assertFalse(add_server.parse_options({}, None))
+        self.assertFalse(add_server.parse_options({}, {"options": 0}))
+        self.assertTrue(add_server.parse_options({"options": ["1"]}, None))
+        self.assertTrue(add_server.parse_options({}, {"options": 1}))
+        self.assertTrue(add_server.parse_options({}, {"options": "yes"}))
 
 
 class HtmlPillsTests(unittest.TestCase):
