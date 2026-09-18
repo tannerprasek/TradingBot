@@ -648,6 +648,7 @@ except Exception:
 | --- | --- |
 | `s_score.py` | **new** — Experimental S-score tab + residual panel writer |
 | `breakout.py` | **recopy** — hide `#view-experimental` from Breakout/Breakdown |
+| `paper_trade.py` | **recopy** — skip Buy/Sell hydration on `.fd-ss-card` / `#view-experimental` |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/S-SCORE.md` | optional, for the desk |
 
