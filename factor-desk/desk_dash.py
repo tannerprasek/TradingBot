@@ -741,7 +741,8 @@ def render_html(
   <h1>{html.escape(title)}</h1>
   <p class="meta">asof {asof or "—"} · Refresh / Momentum Up / Down / Breakout / Breakdown · GICS chips + mom streak vs 5 · intraday={"on" if intra else "off"}</p>
   {gics_filter.render_strip(sectors)}
-  {book_delta.host_html(delta)}
+    {book_delta.host_html(delta)}
+    {paper_trade.home_host_html()}
   {gics_note}
   {empty}
   {breakout.panes_html(ranked)}
