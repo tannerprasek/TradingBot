@@ -21,7 +21,8 @@ so color flips over time. No arrows / callouts.
 Live ``paintPxChart`` already draws SMA20/50/200 + 52w high; the wrap
 segments the white ``#e6edf3`` price path and does not pile on duplicate
 MAs. Trend flags come only from real ``px`` / SMA50 / SMA200 (never SVG
-pixel-Y). ``padR`` stays small so the series draws to the right edge.
+pixel-Y). DETAIL name-drill never uses the ``sourcePoly`` ``-p.y`` painter.
+Plot box matches viewBox (220px, overflow hidden); ``padR`` is 36.
 
 Skinny generator cards get a compact SVG sparkline when a price (or score)
 series is available. Live ~4.8MB HTML is patched: overlay JS + JSON db.
@@ -72,9 +73,9 @@ COLOR_NA = "#93c5fd"
 # Live Desktop paintPxChart (factorbook.html) — do not assume generator SVG.
 LIVE_PX_W = 760
 LIVE_PX_H = 220
-LIVE_PX_H_NEW = 300
+LIVE_PX_H_NEW = 220
 LIVE_PX_PAD_R = 8
-LIVE_PX_PAD_R_NEW = 8
+LIVE_PX_PAD_R_NEW = 36
 LIVE_PX_PRICE = "#e6edf3"
 
 TAG_KEYS = ("tag_triggers", "tags", "digest_tags", "chart_tags", "triggered_tags")
@@ -838,21 +839,23 @@ def strip_css() -> str:
   position: absolute; inset: 0; width: 100%; height: 100%;
   pointer-events: none; overflow: visible;
 }
-/* Live paintPxChart host: taller plot, less ribbon stretch, room on the right. */
+/* Live paintPxChart host: keep 760×220 viewBox, do not blow the card. */
+.px-chart-wrap, [data-px-wrap], [data-px-chart] {
+  overflow: hidden;
+  max-width: 1100px;
+}
 [data-px-svg], svg[data-px-svg], #detail-chart [data-px-svg], #name-chart [data-px-svg],
 #fd-name-drill svg, .name-chart [data-px-svg], .detail-chart [data-px-svg] {
   display: block;
   width: 100% !important;
   max-width: 1100px;
-  height: 320px !important;
-  min-height: 300px;
-  overflow: visible !important;
-  clip-path: none !important;
+  height: 220px !important;
+  min-height: 0;
+  overflow: hidden !important;
 }
 #detail-chart, #name-chart, #fd-name-drill, .name-chart, .detail-chart, [data-px-chart] {
   max-width: 1040px;
-  overflow: visible;
-  clip-path: none;
+  overflow: hidden;
 }
 /* volume n/a stays in the HTML legend — never centered over the plot */
 .px-leg .volnote, [data-px-leg] .volnote {
@@ -982,7 +985,9 @@ def overlay_js() -> str:
     with segmented green/red **only after** at least one segment is appended.
     If wrap/parse fails, the original white path is restored. Flags come from
     real ``px`` / SMA series only (length mismatch pads/slices — never pixel-Y
-    SMAs). ``padR`` stays small; 1W/1M/YTD/Trend chips are cleaned up.
+    SMAs). DETAIL / ``isPxHost`` charts never use the ``sourcePoly`` ``-p.y``
+    painter. Plot box matches viewBox 760×220 (``overflow:hidden``,
+    ``xMidYMid meet``); ``padR`` is 36. 1W/1M/YTD/Trend chips are cleaned up.
     Generator ``svg.fd-chart`` is already painted in Python (``data-fd-trend=1``).
     """
     return r"""
@@ -997,11 +1002,13 @@ def overlay_js() -> str:
   var SMA_SLOW = 200;
   var LIVE_PX_W = 760;
   var LIVE_PX_H = 220;
-  var LIVE_PX_H_NEW = 300;
+  var LIVE_PX_H_NEW = 220;
   var LIVE_PX_PAD_R = 8;
-  var LIVE_PX_PAD_R_NEW = 8;
+  var LIVE_PX_PAD_R_NEW = 36;
   var LIVE_PX_PRICE = "#e6edf3";
   var restylingPx = false;
+  window.__FD_NO_PIXEL_MA__ = true;
+  window.__FD_CHART_BOX__ = true;
 
   function db() {
     var el = document.getElementById("fd-chart-db");
@@ -1507,21 +1514,32 @@ def overlay_js() -> str:
   }
   function applyAspect(svg) {
     if (!svg) return;
-    svg.setAttribute("overflow", "visible");
-    svg.style.overflow = "visible";
-    svg.removeAttribute("clip-path");
-    svg.style.clipPath = "none";
+    svg.setAttribute("overflow", "hidden");
+    svg.style.overflow = "hidden";
     var vb = svg.viewBox && svg.viewBox.baseVal;
     var W = (vb && vb.width) ? vb.width : LIVE_PX_W;
     var H = (vb && vb.height) ? vb.height : LIVE_PX_H;
-    if (H && H <= LIVE_PX_H + 1) {
-      svg.setAttribute("height", String(LIVE_PX_H_NEW));
-    }
+    svg.setAttribute("width", String(W || LIVE_PX_W));
+    svg.setAttribute("height", String(H || LIVE_PX_H_NEW));
     svg.style.width = "100%";
     svg.style.maxWidth = "1100px";
-    svg.style.height = "320px";
-    if (W) svg.setAttribute("viewBox", "0 0 " + W + " " + (vb && vb.height ? vb.height : LIVE_PX_H));
-    svg.setAttribute("preserveAspectRatio", "none");
+    svg.style.height = (H || LIVE_PX_H_NEW) + "px";
+    if (W) svg.setAttribute("viewBox", "0 0 " + W + " " + (H || LIVE_PX_H));
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    var wrap = svg.closest ? svg.closest(".px-chart-wrap, [data-px-wrap], [data-px-chart]") : (svg.parentElement || null);
+    if (wrap && wrap.style) wrap.style.overflow = "hidden";
+    stripRecentBand(svg);
+  }
+  function stripRecentBand(svg) {
+    if (!svg || !svg.querySelectorAll) return;
+    Array.prototype.forEach.call(svg.querySelectorAll("rect"), function (el) {
+      var fill = ((el.getAttribute("fill") || "") + (el.style && el.style.fill || "")).toLowerCase().replace(/\s/g, "");
+      var cls = ((el.getAttribute("class") || "") + " " + (el.getAttribute("data-band") || "") + " " + (el.getAttribute("id") || "")).toLowerCase();
+      var op = parseFloat(el.getAttribute("opacity") || (el.style && el.style.opacity) || "1");
+      if (/recent/.test(cls) || (/#c8b48a|rgb\(\s*200\s*,\s*180\s*,\s*138\s*\)/.test(fill) && (!isFinite(op) || op <= 0.15))) {
+        el.parentNode && el.parentNode.removeChild(el);
+      }
+    });
   }
   function ensureHtmlLegend(wrap, svg) {
     var host = resolvePxWrap(wrap);
@@ -1681,8 +1699,7 @@ def overlay_js() -> str:
       if (!src || src.indexOf("[native code]") >= 0) return null;
       if (src.indexOf("__fdPxPatched") >= 0) return fn;
       var next = src
-        .replace(/\bpadR\s*=\s*36\b/g, "padR=8")
-        .replace(/\bH\s*=\s*220\b/g, "H=300");
+        .replace(/\bpadR\s*=\s*8\b/g, "padR=36");
       if (next === src) return null;
       var expr = /^\s*function(\s+[A-Za-z0-9_$]+)?\s*\(/.test(next) ? "(" + next + ")" : next;
       var patched = (0, eval)(expr);
@@ -1879,7 +1896,12 @@ def overlay_js() -> str:
   }
   function drawTrend(chart) {
     if (!chart || chart.tagName === "CANVAS") return;
-    if (isPxHost(chart)) { restylePxChart(chart); return; }
+    // DETAIL / live paintPxChart: real px vs SMA50/SMA200 only. Never pixel-Y.
+    if (isPxHost(chart) || isDetailChart(chart)) {
+      restylePxChart(chart);
+      return;
+    }
+    if (window.__FD_NO_PIXEL_MA__) return;
     if (chart.getAttribute && chart.getAttribute("data-fd-trend") === "1") return;
     if (chart.classList && chart.classList.contains("fd-chart") && chart.querySelector("[data-fd-trend-seg], [data-fd-ma]")) return;
     var src = sourcePoly(chart);
@@ -1984,8 +2006,8 @@ def overlay_js() -> str:
       var chart = charts[i];
       if (chart.closest && chart.closest("nav, .topnav")) continue;
       polishTags(chart);
-      if (isPxHost(chart)) continue;
-      drawTrend(chart);
+      if (isPxHost(chart) || isDetailChart(chart)) restylePxChart(chart);
+      else if (!window.__FD_NO_PIXEL_MA__) drawTrend(chart);
       var rec = recOf(tickerOf(chart), map);
       if (rec) drawStreak(chart, rec);
     }
