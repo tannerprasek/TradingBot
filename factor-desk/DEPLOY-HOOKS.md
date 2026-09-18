@@ -449,7 +449,7 @@ Breakout/Breakdown must render **the same `cardHTML` chrome as Momentum Up** (pi
 - `#view-breakout` / `#view-breakdown` with `.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`
 - empty hidden `#fd-bb-breakout` / `#fd-bb-breakdown` so old CSS cannot paint stubs
 - `#fd-breakout-db` rows with top-level numeric `day`/`r20`/`rs63`/`atr_pct` **and** nested `metrics.r20_pct` / `rs_63` / `atr_pct` (the shape live `cardHTML` reads). Stats come from scraping the ~396 live HTML MOM card objects at embed time (there is **no** `#fd-mom-db`), else `px_series` / `prices_long.csv`. Nested `card` is never left `null` when a ticker exists.
-- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, looks up the MOM card by ticker, and calls **`cardHTML(card)`** (same function Mom Up uses). Capture-phase card click → `selectTicker`; panes do not have `data-view`. `fmtPct` is `(x*100).toFixed(d)+"%"`; `fmtAtr` does not `*100` when `abs(atr_pct) >= 1`.
+- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, looks up the MOM card by ticker, and calls **`cardHTML(card)`** (same function Mom Up uses). Capture-phase card click → `selectTicker`. `atr_pct` is already percent points — do not `*100` again.
 
 ### Live `setView` / `hideAllPanes` / `paintView` (required on Desktop)
 
