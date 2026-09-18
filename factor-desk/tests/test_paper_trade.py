@@ -196,6 +196,25 @@ MOM.cards = window.MOM.cards;
         self.assertEqual(pt.mark_of({"raw": {"PX_LAST": 190.5}}), 190.5)
         self.assertIsNone(pt.mark_of({"px": {"LAST": 0}}))
 
+    def test_px_by_series_last_not_return_field(self) -> None:
+        rec = {"b": 13.5, "o": 13.4, "p": [13.1, 13.63], "r": 0.012, "h": 13.7, "hi": 13.8, "last": 0.012}
+        self.assertEqual(pt.mark_of(rec), 13.63)
+        self.assertIsNone(pt.mark_of({"t": "CNH", "last": 0.012}))
+        html = (
+            "<script>window.px = { by: { "
+            "CNH: { p: [13.1, 13.63], last: 0.012, r: 0.012 }, "
+            "PWR: { p: [600, 629.65], last: -0.02, r: -0.02 } "
+            "} };</script>"
+            '<script>window.MOM = { cards: [{ t: "CNH", last: 0.012 }] };</script>'
+        )
+        db = pt.marks_db([], book=None, html=html)
+        self.assertEqual(db["CNH"], 13.63)
+        self.assertEqual(db["PWR"], 629.65)
+        self.assertNotEqual(db.get("CNH"), 0.012)
+        js = pt.strip_js()
+        self.assertIn("harvestPxBy", js)
+        self.assertIn("markFromPxByRec", js)
+
     def test_marks_db_harvests_html_when_cards_empty(self) -> None:
         html = (
             "<script>window.MOM = { cards: [{ t: 'CNH', last: 14.99 }], "

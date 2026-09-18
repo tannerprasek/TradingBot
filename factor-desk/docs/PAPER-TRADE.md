@@ -25,7 +25,7 @@ Closed history on the card uses the same sign. Dates are the close stamp (`YYYY-
 
 ## Mark price
 
-First finite `> 0` among: `paper_mark`, `px_last` / `PX_LAST` / `LAST_PRICE`, `price` / `px` / `last` / `close`, **`px.LAST` payload**, last Refresh print, last point of `px_series`, then `#fd-paper-marks`, then `window.MOM.cards` **and** `MOM.up` / `down` / `flags` / `watch` / `px` (not only `MOM.cards` when that array exists). If none: both buttons **disabled**, `title` = `No mark price — need card price / PX_LAST / last Refresh print`. Tab Buy/Sell / Close reuse this resolver. Client `harvestAllMarks` fills `#fd-paper-marks` from MOM even when the JSON db starts as `{}`.
+First finite `> 0` among: live **`px.by[ticker].p[-1]`** (dense-desk print on `{b,o,p,r,h,hi}`), `paper_mark`, `px_last` / `PX_LAST` / `LAST_PRICE`, `price` / `px` / `close`, **`px.LAST` payload**, last Refresh print, last point of `px_series`, then `#fd-paper-marks`, then `window.MOM.cards` **and** `MOM.up` / `down` / `flags` / `watch` / `px`. Card **`last` is a return, not a dollar price** — it is not used as a mark. If none: both buttons **disabled**, `title` = `No mark price — need card price / PX_LAST / last Refresh print`. Tab Buy/Sell / Close reuse this resolver. Client `harvestAllMarks` fills `#fd-paper-marks` from `px.by` / MOM even when the JSON db starts as `{}`.
 
 Missing or non-positive mark is **never** treated as 0 in P&L (that would paint every long −100% and every short +100%). Open rows show `—` for Mark and Return %; Close is disabled until a real mark exists. On Refresh, `marks_db` is rebuilt from live card prices and merged with `#fd-paper-marks` / `data-px` already on the HTML so a write cannot wipe prints.
 

@@ -311,16 +311,60 @@ def _series_last(value: Any) -> float | None:
     return px if px is not None and px > 0 else None
 
 
-def mark_of(card: Mapping[str, Any] | None) -> float | None:
-    """Best available mark on a card / enrich rec / MOM row."""
+def _payload_last(card: Mapping[str, Any] | None) -> float | None:
+    """Live ``px.by[ticker]`` print: ``{b, o, p:[closes], r, h, hi}`` → ``p[-1]``.
+
+    Dense-desk ``last`` is a **return**, not a dollar price — never use it here.
+    """
     if not card:
         return None
+    for key in ("p", "closes"):
+        raw = card.get(key)
+        if isinstance(raw, (list, tuple)) and raw:
+            px = _series_last(raw)
+            if px is not None:
+                return px
+    by = card.get("by") if isinstance(card.get("by"), Mapping) else None
+    px_map = card.get("px") or card.get("PX") or card.get("payload")
+    if by is None and isinstance(px_map, Mapping):
+        if isinstance(px_map.get("by"), Mapping):
+            by = px_map.get("by")
+        elif any(isinstance(v, Mapping) and isinstance(v.get("p"), (list, tuple)) for v in px_map.values()):
+            by = px_map
+        else:
+            last = dapi_enrich.as_float(px_map.get("LAST") or px_map.get("PX_LAST"))
+            return last if last is not None and last > 0 else None
+    if not isinstance(by, Mapping):
+        return None
+    hint = card.get("t") or card.get("ticker") or card.get("symbol")
+    rec = None
+    if hint:
+        rec = by.get(str(hint)) or by.get(_short(str(hint)))
+    if isinstance(rec, Mapping):
+        px = _payload_last(rec)
+        if px is not None:
+            return px
+    return None
+
+
+def mark_of(card: Mapping[str, Any] | None) -> float | None:
+    """Best available mark on a card / enrich rec / MOM / px.by row."""
+    if not card:
+        return None
+    payload = _payload_last(card)
+    if payload is not None:
+        return payload
+    skip_last = isinstance(card.get("p"), (list, tuple)) or card.get("r") is not None
     for key in MARK_KEYS:
         raw = card.get(key)
         if isinstance(raw, Mapping):
             continue
+        if skip_last and str(key).lower() == "last":
+            continue
         px = dapi_enrich.as_float(raw)
         if px is not None and px > 0:
+            if str(key).lower() == "last" and px < 5:
+                continue
             return px
     # Case-insensitive Last / PX_LAST on live MOM cards.
     lowered = {str(k).lower(): v for k, v in card.items()}
@@ -328,8 +372,12 @@ def mark_of(card: Mapping[str, Any] | None) -> float | None:
         raw = lowered.get(key.lower())
         if isinstance(raw, Mapping):
             continue
+        if skip_last and str(key).lower() == "last":
+            continue
         px = dapi_enrich.as_float(raw)
         if px is not None and px > 0:
+            if str(key).lower() == "last" and px < 5:
+                continue
             return px
     for key in SERIES_KEYS:
         raw = card.get(key)
@@ -410,7 +458,7 @@ _JSON_SCRIPT_RE = re.compile(
     re.I | re.S,
 )
 _MOM_ASSIGN_RE = re.compile(
-    r"(?:window\.)?(?:MOM(?:_CARDS)?(?:\s*\.\s*(?:cards|up|down|flags|watch|all))?|BOOK|NAMES)\s*=\s*",
+    r"(?:window\.)?(?:MOM(?:_CARDS)?(?:\s*\.\s*(?:cards|up|down|flags|watch|all|px))?|BOOK|NAMES|px|PX)\s*=\s*",
     re.I,
 )
 _TICKER_TOKEN_RE = re.compile(r"^[A-Z][A-Z0-9./-]{0,11}$")
@@ -475,6 +523,9 @@ _STRUCT_KEYS = frozenset(
         "LASTPRICE",
         "PXCLOSE",
         "ADJCLOSE",
+        "BY",
+        "P",
+        "HI",
     }
 )
 _TICKER_FIELD_RE = re.compile(
@@ -517,7 +568,7 @@ def _collect_mark(
             _put_mark(out, str(hint), px)
         for key, val in obj.items():
             key_s = str(key)
-            if _looks_like_ticker(key_s):
+            if _looks_like_ticker(key_s) and not (ticker_hint and len(_short(key_s)) <= 1):
                 if isinstance(val, Mapping):
                     _collect_mark(out, val, ticker_hint=key_s, _depth=_depth + 1)
                 elif isinstance(val, (list, tuple)):
@@ -1692,28 +1743,63 @@ def strip_js() -> str:
   function markFromPxPayload(px) {
     if (px == null) return null;
     var direct = num(px);
-    if (direct) return direct;
+    if (direct && direct >= 5) return direct;
     if (typeof px !== "object") return null;
-    return num(px.LAST || px.Last || px.last || px.PX_LAST || px.px_last || px.CLOSE || px.close || px.value || px.price);
+    var fromP = seriesLast(px.p) || seriesLast(px.closes);
+    if (fromP) return fromP;
+    return num(px.LAST || px.PX_LAST || px.px_last || px.CLOSE || px.close || px.value || px.price);
+  }
+  function markFromPxByRec(rec) {
+    if (rec == null) return null;
+    if (typeof rec !== "object") return num(rec);
+    return seriesLast(rec.p) || seriesLast(rec.closes) || num(rec.PX_LAST || rec.LAST);
+  }
+  function harvestPxBy(root) {
+    if (!root || typeof root !== "object") return;
+    var by = root.by || (root.px && root.px.by) || (root.PX && root.PX.by);
+    if (!by || typeof by !== "object") {
+      var keys0 = Object.keys(root);
+      var sample = keys0.length ? root[keys0[0]] : null;
+      if (sample && typeof sample === "object" && Array.isArray(sample.p)) by = root;
+      else return;
+    }
+    Object.keys(by).forEach(function (k) {
+      var t = shortOf(k);
+      var m = markFromPxByRec(by[k]);
+      if (t && m) rememberMark(t, m);
+    });
   }
   function markFromCard(card, depth) {
     if (!card || typeof card !== "object") return null;
     depth = depth || 0;
     if (depth > 6) return null;
+    var fromP = seriesLast(card.p) || seriesLast(card.closes);
+    if (fromP) return fromP;
+    if (card.by && typeof card.by === "object") {
+      var recB = card.by[card.t] || card.by[card.ticker] || card.by[shortOf(card.t || card.ticker || "")];
+      var fromBy = markFromPxByRec(recB);
+      if (fromBy) return fromBy;
+    }
     var payload = markFromPxPayload(card.px || card.PX || card.payload);
     if (payload) return payload;
-    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","lastPx","pxLast","PxLast","LAST_PX","Last","LAST","mark","mark_px","price","px","last","close","px_close","adj_close","PX_CLOSE","last_print","print","trd_px"];
+    var skipLast = Array.isArray(card.p) || card.r != null;
+    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","lastPx","pxLast","PxLast","LAST_PX","Last","LAST","mark","mark_px","price","px","close","px_close","adj_close","PX_CLOSE","last_print","print","trd_px"];
+    if (!skipLast) keys.push("last");
     for (var i = 0; i < keys.length; i++) {
       var v = num(card[keys[i]]);
-      if (v) return v;
+      if (v && !(String(keys[i]).toLowerCase() === "last" && v < 5)) return v;
     }
     for (var k in card) {
       if (!Object.prototype.hasOwnProperty.call(card, k)) continue;
       var nk = String(k).toLowerCase().replace(/[^a-z0-9]/g, "");
       if (!MARK_KEY_NORM[nk]) continue;
+      if (nk === "last" && skipLast) continue;
       var raw = card[k];
       var nv = num(raw);
-      if (nv) return nv;
+      if (nv) {
+        if (nk === "last" && nv < 5) continue;
+        return nv;
+      }
       if (raw && typeof raw === "object" && !Array.isArray(raw)) {
         var nested = markFromCard(raw, depth + 1);
         if (nested) return nested;
@@ -1730,7 +1816,7 @@ def strip_js() -> str:
       var oc = num(card.ohlc.c || card.ohlc.close || card.ohlc.last);
       if (oc) return oc;
     }
-    var seriesKeys = ["px_series","prices","closes","px","last_refresh","refresh_px","series","hist","ys","spark"];
+    var seriesKeys = ["px_series","prices","closes","p","last_refresh","refresh_px","series","hist","ys","spark"];
     for (var j = 0; j < seriesKeys.length; j++) {
       var sraw = card[seriesKeys[j]];
       if (typeof sraw !== "object") continue;
@@ -1772,6 +1858,11 @@ def strip_js() -> str:
   function harvestAllMarks() {
     try {
       var mom = window.MOM || {};
+      harvestPxBy(window.px);
+      harvestPxBy(window.PX);
+      harvestPxBy(mom);
+      harvestPxBy(mom.px);
+      harvestPxBy(mom.payload);
       var cards = momCards();
       for (var i = 0; i < cards.length; i++) {
         var c = cards[i] || {};
