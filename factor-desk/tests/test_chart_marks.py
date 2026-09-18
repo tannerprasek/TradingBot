@@ -403,9 +403,22 @@ class MaTrendTests(unittest.TestCase):
         self.assertIn("s200", js)
         self.assertIn("fd-px-chip", js)
         self.assertIn("close > s50 && close > s200", js)
+        self.assertIn("showPricePath", js)
+        hide_fn = js[js.find("function hidePricePath"): js.find("function showPricePath")]
+        self.assertIn("NEVER hide until green/red segments exist", hide_fn)
+        self.assertIn("hasTrendSegs(host)", hide_fn)
+        self.assertIn("showPricePath(el)", hide_fn)
+        show_fn = js[js.find("function showPricePath"): js.find("function remapAttrX")]
+        self.assertIn("#e6edf3", show_fn)
+        restyle = js[js.find("function restylePxChart"): js.find("function patchPaintSource")]
+        self.assertGreater(restyle.find("hidePricePath(src)"), restyle.find("function emit"))
+        self.assertIn("if (drew) hidePricePath(src)", restyle)
+        self.assertIn("else showPricePath(src)", restyle)
+        self.assertIn("showPricePath(src)", restyle[restyle.find("catch"): ])
         self.assertIn("[data-px-svg]", css)
         self.assertIn("fd-px-chip", css)
         self.assertIn("height: 320px", css)
+        self.assertIn(":has([data-fd-trend-seg])", css)
         self.assertNotIn("function paintPxChart(wrap)", js)
 
 

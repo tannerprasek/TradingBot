@@ -20,10 +20,14 @@ so color flips over time. No arrows / callouts.
 
 Live ``paintPxChart`` already draws SMA20/50/200 + 52w high; the wrap
 segments the white ``#e6edf3`` price path and does not pile on duplicate
-MAs. ``padR`` is enlarged so the last print / marker is not clipped.
+MAs. The original path is hidden **only after** green/red segments exist
+(fail-open: a wrap miss keeps the white series). ``padR`` is enlarged so
+the last print / marker is not clipped.
 
 Skinny generator cards get a compact SVG sparkline when a price (or score)
 series is available. Live ~4.8MB HTML is patched: overlay JS + JSON db.
+Desktop: ``sync_live_paintpx.py`` calls ``ensure_embedded`` / ``inject_paintpx``
+on live ``factorbook.html`` (refuses files under 1MB; never skinny rewrite).
 """
 
 from __future__ import annotations
@@ -830,7 +834,9 @@ def strip_css() -> str:
   max-width: 1040px;
   overflow: visible;
 }
-[data-px-svg] [data-fd-trend-src], [data-fd-trend-src] {
+[data-px-svg]:has([data-fd-trend-seg]) [data-fd-trend-src],
+svg:has([data-fd-trend-seg]) [data-fd-trend-src],
+[data-fd-trend-src]:has(+ [data-fd-trend-seg]) {
   display: none !important;
   stroke: none !important;
   opacity: 0 !important;
@@ -1322,8 +1328,20 @@ def overlay_js() -> str:
     }
     return d;
   }
+  function hasTrendSegs(root) {
+    return !!(root && root.querySelector && root.querySelector("[data-fd-trend-seg]"));
+  }
   function hidePricePath(el) {
-    if (!el) return;
+    /* FAIL A: NEVER hide until green/red segments exist. */
+    if (!el) return false;
+    var host = el.ownerSVGElement || el.parentNode;
+    if (!hasTrendSegs(host)) {
+      showPricePath(el);
+      return false;
+    }
+    if (!el.getAttribute("data-fd-src-stroke")) {
+      el.setAttribute("data-fd-src-stroke", el.getAttribute("stroke") || LIVE_PX_PRICE);
+    }
     el.setAttribute("data-fd-trend-src", "1");
     el.setAttribute("stroke", "none");
     el.setAttribute("opacity", "0");
@@ -1332,6 +1350,20 @@ def overlay_js() -> str:
     el.style.opacity = "0";
     el.style.display = "none";
     el.style.visibility = "hidden";
+    return true;
+  }
+  function showPricePath(el) {
+    if (!el) return;
+    el.removeAttribute("data-fd-trend-src");
+    el.setAttribute("stroke", "#e6edf3");
+    el.setAttribute("fill", "none");
+    el.removeAttribute("opacity");
+    el.removeAttribute("display");
+    el.style.stroke = "#e6edf3";
+    el.style.fill = "none";
+    el.style.opacity = "1";
+    el.style.display = "";
+    el.style.visibility = "visible";
   }
   function remapAttrX(el, names, padL, oldInner, newInner) {
     names.forEach(function (name) {
@@ -1460,11 +1492,13 @@ def overlay_js() -> str:
       polishChips(host);
       var src = findPricePath(svg);
       if (!src) { ensureHtmlLegend(host, svg); return; }
-      if (src.getAttribute("data-fd-trend-src") === "1" && svg.querySelector("[data-fd-trend-seg]")) {
+      if (!hasTrendSegs(svg)) showPricePath(src);
+      if (src.getAttribute("data-fd-trend-src") === "1" && hasTrendSegs(svg)) {
         ensureHtmlLegend(host, svg);
         return;
       }
       Array.prototype.forEach.call(svg.querySelectorAll("[data-fd-trend-seg]"), function (n) { n.remove(); });
+      showPricePath(src);
       var pts = parsePoints(src);
       if (pts.length < 2) { ensureHtmlLegend(host, svg); return; }
       pts = expandPadR(svg, pts);
@@ -1478,17 +1512,15 @@ def overlay_js() -> str:
       if (px.length) {
         flags = drawnFlags(px, s50, s200);
         if (flags.length !== pts.length) {
-          var ys = pts.map(function (p) { return -p.y; });
-          flags = flagsFromSeries(ys, smaArr(ys, SMA_FAST), ys.length >= SMA_SLOW ? smaArr(ys, SMA_SLOW) : []);
+          if (flags.length > pts.length) flags = flags.slice(flags.length - pts.length);
+          else {
+            var ys = pts.map(function (p) { return -p.y; });
+            flags = flagsFromSeries(ys, smaArr(ys, SMA_FAST), ys.length >= SMA_SLOW ? smaArr(ys, SMA_SLOW) : []);
+          }
         }
       } else {
         var ys2 = pts.map(function (p) { return -p.y; });
         flags = flagsFromSeries(ys2, smaArr(ys2, SMA_FAST), ys2.length >= SMA_SLOW ? smaArr(ys2, SMA_SLOW) : []);
-      }
-      hidePricePath(src);
-      if (!flags.some(function (f) { return f === "pos" || f === "neg"; })) {
-        ensureHtmlLegend(host, svg);
-        return;
       }
       var parent = src.parentNode || svg;
       var start = 0;
@@ -1509,12 +1541,19 @@ def overlay_js() -> str:
         el.setAttribute("d", pathFromPts(chunk));
         parent.appendChild(el);
       }
-      for (var j = 1; j < flags.length; j++) {
-        var kind = flags[j] || "na";
-        if (kind !== cur) { emit(cur, start, j - 1); start = j; cur = kind; }
+      if (flags.some(function (f) { return f === "pos" || f === "neg"; })) {
+        for (var j = 1; j < flags.length; j++) {
+          var kind = flags[j] || "na";
+          if (kind !== cur) { emit(cur, start, j - 1); start = j; cur = kind; }
+        }
+        emit(cur, start, flags.length - 1);
       }
-      emit(cur, start, flags.length - 1);
+      var drew = hasTrendSegs(svg);
+      if (drew) hidePricePath(src);
+      else showPricePath(src);
       ensureHtmlLegend(host, svg);
+    } catch (err) {
+      try { showPricePath(src); } catch (e2) {}
     } finally {
       restylingPx = false;
     }
@@ -1713,8 +1752,6 @@ def overlay_js() -> str:
     if (ma200.length) parent.insertBefore(polyEl("fd-chart-ma200", ma200, {"data-fd-ma": "200"}), src);
     var flags = ys.map(function (c, idx) { return trendFlag(c, s50[idx], s200[idx]); });
     if (flags.every(function (f) { return f == null; })) return;
-    src.setAttribute("data-fd-trend-src", "1");
-    src.style.opacity = "0";
     var start = 0;
     var cur = flags[0] || "na";
     function emit(kind, a, b) {
@@ -1728,6 +1765,8 @@ def overlay_js() -> str:
       if (kind !== cur) { emit(cur, start, j - 1); start = j; cur = kind; }
     }
     emit(cur, start, flags.length - 1);
+    if (hasTrendSegs(parent) || hasTrendSegs(chart)) hidePricePath(src);
+    else showPricePath(src);
     var svg = chart.tagName === "svg" || chart.tagName === "SVG" ? chart : (chart.querySelector && chart.querySelector("svg"));
     if (svg && isDetailChart(chart)) addLegend(svg, (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width) || chart.getBoundingClientRect().width);
   }
@@ -1818,46 +1857,52 @@ def overlay_js() -> str:
 """.strip()
 
 
+def _upsert_block(text: str, pattern: str, block: str) -> str:
+    next_text, n = re.subn(pattern, lambda _m: block, text, count=1, flags=re.I | re.S)
+    if n:
+        return next_text
+    if "</head>" in block or block.lstrip().startswith("<style"):
+        if "</head>" in text:
+            return text.replace("</head>", block + "</head>", 1)
+    if "</body>" in text:
+        return text.replace("</body>", block + "</body>", 1)
+    return text + block
+
+
 def ensure_embedded(html_text: str, mapping: Mapping[str, Any] | None) -> str:
-    """Always leave chart CSS + db + overlay JS. Safe on live 2.7MB HTML."""
+    """Always leave chart CSS + overlay JS. Safe on live ~4.8MB HTML.
+
+    ``mapping=None`` re-injects CSS + the ``paintPxChart`` wrap without wiping
+    ``#fd-chart-db``. Pass a dict (including ``{}``) to replace the db.
+    """
     text = html_text or ""
     css = f'<style id="{CSS_STYLE_ID}">\n{strip_css()}\n</style>\n'
-    text, n_css = re.subn(
+    text = _upsert_block(
+        text,
         rf'<style\b[^>]*\bid=["\']{CSS_STYLE_ID}["\'][^>]*>.*?</style>\s*',
-        lambda _m: css,
-        text,
-        count=1,
-        flags=re.I | re.S,
+        css,
     )
-    if n_css == 0:
-        if "</head>" in text:
-            text = text.replace("</head>", css + "</head>", 1)
-        else:
-            text = css + text
-    db = embed_db(mapping)
-    text, n_db = re.subn(
-        rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
-        lambda _m: db,
-        text,
-        count=1,
-        flags=re.I | re.S,
-    )
-    if n_db == 0:
-        if "</body>" in text:
-            text = text.replace("</body>", db + "\n</body>", 1)
-        else:
-            text += db
+    have_db = bool(re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', text, re.I))
+    if mapping is not None or not have_db:
+        db = embed_db(mapping)
+        text = _upsert_block(
+            text,
+            rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
+            db + ("\n" if not have_db else ""),
+        )
     script = f'<script id="{JS_SCRIPT_ID}">\n{overlay_js()}\n</script>\n'
-    text, n_js = re.subn(
-        rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
-        lambda _m: script,
+    text = _upsert_block(
         text,
-        count=1,
-        flags=re.I | re.S,
+        rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
+        script,
     )
-    if n_js == 0:
-        if "</body>" in text:
-            text = text.replace("</body>", script + "</body>", 1)
-        else:
-            text += script
     return text
+
+
+def inject_paintpx(html_text: str) -> str:
+    """Patch live ``factorbook.html`` with the ``paintPxChart`` wrap.
+
+    CSS + overlay JS only. Does not rebuild skinny ``desk_dash`` HTML and does
+    not wipe ``#fd-chart-db`` / Paper / Experimental / Breakout.
+    """
+    return ensure_embedded(html_text, None)

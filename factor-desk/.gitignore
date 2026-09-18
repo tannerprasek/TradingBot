@@ -23,3 +23,5 @@ clean/*.csv
 *.png
 factorbook_desktop_latest.html
 factorbook.html
+*.bak-paintpx
+*.tmp-paintpx
