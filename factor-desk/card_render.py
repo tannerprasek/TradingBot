@@ -16,10 +16,16 @@ Breakout "why" / streak belong on ``enrich_pills`` as short chips
 
 Does not wholesale replace live ~2.7–4.8MB ``factorbook.html``. Recopy this
 module next to live ``desk_dash.py`` and call ``ensure_embedded``.
+
+Live ``cardHTML`` metrics row: ``metrics.atr_pct`` is already percent points
+(~1.5–4.8). ``fmtPct`` does ``(x*100).toFixed``, so ``fmtPct(m.atr_pct,1)``
+paints ~150–480%. ``r20_pct`` is a fraction and must keep ``fmtPct``. RS63
+stays ``fmtNum``.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Mapping, MutableMapping
 
@@ -28,6 +34,11 @@ JS_SCRIPT_ID = "fd-card-js"
 
 _BAND_WHY_RE = re.compile(r"^band\s", re.I)
 _DUMP_PILL_KEYS = frozenset({"fd-bb"})
+# Live desk: fmtPct(m.atr_pct,1) — object prefix + optional digits.
+_ATR_FMT_PCT_RE = re.compile(
+    r"fmtPct\s*\(\s*((?:[A-Za-z_$][\w$]*\s*\.\s*)+)atr_pct(\s*,\s*[^)]+)?\s*\)",
+    re.I,
+)
 
 
 def _short(ticker: Any) -> str:
@@ -42,6 +53,37 @@ def _fmt_g(value: Any) -> str:
         return f"{float(value):g}"
     except (TypeError, ValueError):
         return str(value)
+
+
+def fmt_atr_pct(value: Any, digits: int = 1) -> str:
+    """ATR% display. ``atr_pct`` is percent points; fractions still ×100."""
+    if value is None or value == "":
+        return "—"
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if not math.isfinite(x):
+        return "—"
+    n = 1 if digits is None else int(digits)
+    if abs(x) < 1:
+        return f"{x * 100:.{n}f}%"
+    return f"{x:.{n}f}%"
+
+
+def patch_live_atr_fmt(html_text: str) -> str:
+    """Rewrite live ``fmtPct(m.atr_pct,1)``; leave ``r20_pct`` on ``fmtPct``.
+
+    ``atr_pct`` is already percent points, so paint with ``fmtNum`` + ``"%"``.
+    Idempotent: the replacement no longer contains ``fmtPct(...atr_pct``.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        obj = match.group(1)
+        rest = match.group(2) or ",1"
+        return f'(fmtNum({obj}atr_pct{rest})+"%")'
+
+    return _ATR_FMT_PCT_RE.sub(repl, html_text or "")
 
 
 def _delta_up(delta: Any) -> bool:
@@ -265,6 +307,36 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
+  function fdFmtNum(x, n) {
+    if (x == null || x === "") return "—";
+    x = +x;
+    if (!isFinite(x)) return "—";
+    n = n == null ? 1 : n;
+    return x.toFixed(n);
+  }
+  function fdFmtPct(x, n) {
+    if (x == null || x === "") return "—";
+    x = +x;
+    if (!isFinite(x)) return "—";
+    n = n == null ? 1 : n;
+    return (x * 100).toFixed(n) + "%";
+  }
+  function fmtAtrPct(x, n) {
+    if (x == null || x === "") return "—";
+    x = +x;
+    if (!isFinite(x)) return "—";
+    n = n == null ? 1 : n;
+    if (Math.abs(x) < 1) {
+      var pctFn = (typeof window.fmtPct === "function") ? window.fmtPct : fdFmtPct;
+      return pctFn(x, n);
+    }
+    var numFn = (typeof window.fmtNum === "function") ? window.fmtNum : fdFmtNum;
+    return numFn(x, n) + "%";
+  }
+  window.fmtAtrPct = fmtAtrPct;
+  if (typeof window.fmtNum !== "function") window.fmtNum = fdFmtNum;
+  if (typeof window.fmtPct !== "function") window.fmtPct = fdFmtPct;
+
   if (window.__FD_CARD_BOUND__) return;
   window.__FD_CARD_BOUND__ = true;
 
@@ -277,6 +349,41 @@ def strip_js() -> str:
     if (v == null || v === "") return "—";
     if (typeof v === "number" && isFinite(v)) return String(v);
     return String(v);
+  }
+  function fmtNum(x, n) { return fdFmtNum(x, n); }
+  function fmtPct(x, n) { return fdFmtPct(x, n); }
+  function rewriteAtrCalls(src) {
+    return String(src).replace(
+      /fmtPct\s*\(\s*((?:[A-Za-z_$][\w$]*\s*\.\s*)+)atr_pct(\s*,\s*[^)]+)?\s*\)/gi,
+      function (_m, obj, rest) { return "(fmtNum(" + obj + "atr_pct" + (rest || ",1") + ")+\"%\")"; }
+    );
+  }
+  function rewriteAtrHtml(html) {
+    return String(html || "").replace(
+      /(ATR%?\s*)([+-]?\d+(?:\.\d+)?)(%)/gi,
+      function (all, label, num, pct) {
+        var x = parseFloat(num);
+        if (!isFinite(x)) return all;
+        if (Math.abs(x) >= 50) x = x / 100;
+        return label + x.toFixed(1) + pct;
+      }
+    );
+  }
+  function patchFnSource(fn) {
+    if (!fn || fn.__fdAtr) return fn;
+    try {
+      var src = Function.prototype.toString.call(fn);
+      var next = rewriteAtrCalls(src);
+      if (next === src) { fn.__fdAtr = true; return fn; }
+      var patched = (0, eval)("(" + next + ")");
+      if (typeof patched === "function") {
+        patched.__fdAtr = true;
+        patched.__fdInner = fn.__fdInner || fn;
+        return patched;
+      }
+    } catch (e) {}
+    fn.__fdAtr = true;
+    return fn;
   }
   function isBandDump(text) { return /^\s*band\s/i.test(String(text || "")); }
   function deltaUp(d) { var n = parseFloat(d); return !(isFinite(n) && n < 0); }
@@ -421,15 +528,21 @@ def strip_js() -> str:
   }
   function fallbackHTML(c) {
     c = c || {};
+    var m = (c.metrics && typeof c.metrics === "object") ? c.metrics : c;
     var t = esc(shortOf(c.d || c.t || c.ticker || c.name || ""));
     var score = c.score != null ? c.score : (c.mom_score != null ? c.mom_score : "");
-    var r20 = fmt(c.r20 != null ? c.r20 : (c.R20 != null ? c.R20 : null));
-    var rs63 = fmt(c.rs63 != null ? c.rs63 : (c.RS63 != null ? c.RS63 : null));
-    var atr = fmt(c.atrs != null ? c.atrs : (c.atr != null ? c.atr : (c.ATRS != null ? c.ATRS : (c.ATR != null ? c.ATR : null))));
+    var r20 = (m.r20_pct != null && m.r20_pct !== "")
+      ? fmtPct(m.r20_pct, 1)
+      : fmt(c.r20 != null ? c.r20 : (c.R20 != null ? c.R20 : null));
+    var rs63Val = (m.rs63 != null && m.rs63 !== "") ? m.rs63 : (c.rs63 != null ? c.rs63 : (c.RS63 != null ? c.RS63 : null));
+    var rs63 = (rs63Val != null && rs63Val !== "" && isFinite(+rs63Val)) ? fmtNum(rs63Val, 1) : fmt(rs63Val);
+    var atr = (m.atr_pct != null && m.atr_pct !== "")
+      ? fmtAtrPct(m.atr_pct, 1)
+      : fmt(c.atrs != null ? c.atrs : (c.atr != null ? c.atr : (c.ATRS != null ? c.ATRS : (c.ATR != null ? c.ATR : null))));
     return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(c.ticker || t) + '">' +
       "<header><h2>" + t + '</h2><span class="sc">' + esc(String(score)) + "</span>" +
       '<div class="pills">' + pillsHTML(c.enrich_pills) + "</div></header>" +
-      '<div class="stats"><span>R20 ' + esc(r20) + "</span><span>RS63 " + esc(rs63) + "</span><span>ATRS " + esc(atr) + "</span></div>" +
+      '<div class="stats"><span>R20 ' + esc(r20) + "</span><span>RS63 " + esc(rs63) + "</span><span>ATR% " + esc(atr) + "</span></div>" +
       "</article>";
   }
 
@@ -539,6 +652,7 @@ def strip_js() -> str:
     return node;
   }
   function polishHtml(html, card) {
+    html = rewriteAtrHtml(html);
     var wrap = document.createElement("div");
     wrap.innerHTML = String(html || "");
     var node = wrap.firstElementChild;
@@ -558,7 +672,10 @@ def strip_js() -> str:
       window.cardHTML = fn;
       return fn;
     }
-    var inner = (typeof fn === "function") ? fn : function (card) { return fallbackHTML(card); };
+    var raw = fn;
+    while (raw && raw.__fdInner) raw = raw.__fdInner;
+    if (typeof raw === "function") raw = patchFnSource(raw);
+    var inner = (typeof raw === "function") ? raw : ((typeof fn === "function") ? fn : function (card) { return fallbackHTML(card); });
     var wrapped = function (card) {
       var html = "";
       try { html = inner.apply(this, arguments); } catch (e) { html = ""; }
@@ -653,8 +770,10 @@ def ensure_embedded(html_text: str) -> str:
 
     Call **before** ``paper_trade.ensure_embedded`` so Buy/Sell still wrap the
     polished renderer. Breakout/Breakdown then mount via ``__FD_RENDER_ROW__``.
+    Patches live ``fmtPct(m.atr_pct,1)`` in ``C:\\Users\\MLP\\Desktop\\factorbook.html``
+    (and any copy ``write_combined`` writes) without replacing ``desk_dash.py``.
     """
-    text = html_text or ""
+    text = patch_live_atr_fmt(html_text or "")
     text = _ensure_css(text)
     text = _ensure_js(text)
     return text

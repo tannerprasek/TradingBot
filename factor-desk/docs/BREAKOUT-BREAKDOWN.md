@@ -54,7 +54,7 @@ Optional boosts (cheap card fields only — **no DAPI pull**):
 Top-nav **Breakout** / **Breakdown** sit beside Momentum Up / Down. Tabs **only rank/filter**; they do not invent card markup. Clicking a tab fills `#view-breakout` / `#view-breakdown` (`.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`) by resolving each ticker to a **full MOM-shaped card** and mounting it through the shared renderer:
 
 - [`card_render.py`](../card_render.py) wraps live `cardHTML` (fallback if missing) as `window.__FD_RENDER_CARD__` / `window.__FD_RENDER_ROW__`
-- Breakout JS calls `__FD_RENDER_ROW__(row)` — same ticker / score / tag chips / R20 / RS63 / ATR / Buy/Sell / previous trades as Momentum Up
+- Breakout JS calls `__FD_RENDER_ROW__(row)` — same ticker / score / tag chips / R20 / RS63 / ATR / Buy/Sell / previous trades as Momentum Up. ATR% is percent points (`fmtNum(m.atr_pct,1)+"%"`); `r20_pct` stays `fmtPct`
 - BB “why” is extra chips on the card object (`band 10`, `+3/7d`) plus the existing `mom-streak` pill — **not** a brown `.why` dump and not a long `fd-bb` text block
 - Tag chrome (MA FAN / CLOSE HI / 52W HI / …) is the same `.badge.spike-chip` language as MOM, with portable CSS on `article.card` so the node can move between `#breakout-grid`, `#home`, and mom grids without tab-specific fixups
 
