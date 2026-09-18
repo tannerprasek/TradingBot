@@ -1,15 +1,15 @@
-# Patch live Desktop factorbook.html with the paintPxChart MA-regime wrap.
-# Does NOT run desk_dash / write_dash (no skinny generator HTML).
+# After PR merge: copy wrap Python onto Desktop and patch live factorbook.html.
+# Does NOT copy HTML and does NOT run desk_dash / write_dash.
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pack = Split-Path -Parent $here
 $py = Join-Path $pack "sync_live_paintpx.py"
+$desktop = "C:\Users\MLP\Desktop\factorbook"
 if (-not (Test-Path $py)) {
-  $pack = "C:\Users\MLP\Desktop\factorbook"
+  $pack = $desktop
   $py = Join-Path $pack "sync_live_paintpx.py"
 }
-$html = "C:\Users\MLP\Desktop\factorbook\factorbook.html"
-if (-not (Test-Path $html)) {
-  $html = Join-Path $pack "factorbook.html"
+if (-not (Test-Path $py)) {
+  throw "sync_live_paintpx.py not found. Copy it from factor-desk/ after merge."
 }
-python $py --html $html
+python $py --deploy-desktop --desktop-root $desktop

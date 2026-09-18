@@ -7,13 +7,13 @@ Copying ``chart_marks.py`` alone does nothing until something calls
 lacks that hook, and running cloud ``desk_dash.py`` / ``write_dash.py``
 would emit skinny generator HTML.
 
-This script **only** injects chart CSS + overlay JS:
+This script **only** injects chart CSS + overlay JS. After merge, CoS:
 
-    python sync_live_paintpx.py
-    python sync_live_paintpx.py --html C:\\Users\\MLP\\Desktop\\factorbook\\factorbook.html
+    python factor-desk/sync_live_paintpx.py --deploy-desktop
 
-It refuses to write when the file is missing, smaller than 1MB, or not a
-live ``paintPxChart`` desk. It never imports ``desk_dash``.
+That copies ``chart_marks.py`` + ``sync_live_paintpx.py`` into
+``C:\\Users\\MLP\\Desktop\\factorbook`` and patches live HTML in place.
+It never copies ``factorbook.html`` and never imports ``desk_dash``.
 """
 
 from __future__ import annotations
@@ -38,7 +38,17 @@ PRESERVE_TOKENS = (
     "Breakout",
     "fd-paper-marks",
 )
-DESKTOP_DEFAULT = Path(r"C:\Users\MLP\Desktop\factorbook\factorbook.html")
+WRAP_NEEDLES = (
+    "wrapPaintPxChart",
+    "paintPxChart",
+    "padR=36",
+    "close > s50 && close > s200",
+    "#e6edf3",
+    "restylePxChart",
+)
+COS_PY_FILES = ("chart_marks.py", "sync_live_paintpx.py")
+DESKTOP_ROOT_DEFAULT = Path(r"C:\Users\MLP\Desktop\factorbook")
+DESKTOP_DEFAULT = DESKTOP_ROOT_DEFAULT / "factorbook.html"
 BACKUP_SUFFIX = ".bak-paintpx"
 
 
@@ -46,25 +56,83 @@ class SyncRefused(RuntimeError):
     """Live HTML is missing, too small, or not safe to patch."""
 
 
-def resolve_html_path(html: Path | str | None = None) -> Path:
-    if html is not None:
-        return Path(html)
-    local = HERE / "factorbook.html"
-    if local.is_file():
-        return local
-    if DESKTOP_DEFAULT.is_file():
-        return DESKTOP_DEFAULT
-    return local
+def desktop_html_path(desktop_root: Path | str | None = None) -> Path:
+    root = Path(desktop_root) if desktop_root is not None else DESKTOP_ROOT_DEFAULT
+    return root / "factorbook.html"
 
 
-def _size(text: str) -> int:
-    return len(text.encode("utf-8"))
+def require_wrap_source() -> None:
+    """Fail fast if CoS copied an old ``chart_marks.py`` without the PR13 wrap."""
+    js = chart_marks.overlay_js()
+    missing = [n for n in WRAP_NEEDLES if n not in js]
+    if missing:
+        raise SyncRefused(
+            "refuse: chart_marks.overlay_js is missing "
+            + ", ".join(repr(n) for n in missing)
+            + ". Recopy chart_marks.py from this pack (PR #13 wrap)."
+        )
 
 
 def looks_like_live_paintpx(html_text: str) -> bool:
     if not html_text:
         return False
     return all(marker in html_text for marker in LIVE_MARKERS)
+
+
+def file_looks_live(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size < MIN_BYTES:
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return looks_like_live_paintpx(text)
+
+
+def candidate_html_paths(
+    html: Path | str | None = None,
+    *,
+    desktop_root: Path | str | None = None,
+) -> list[Path]:
+    paths: list[Path] = []
+    if html is not None:
+        paths.append(Path(html))
+    paths.append(desktop_html_path(desktop_root))
+    paths.append(HERE / "factorbook.html")
+    cwd = Path.cwd() / "factorbook.html"
+    if cwd not in paths:
+        paths.append(cwd)
+    out: list[Path] = []
+    seen: set[str] = set()
+    for p in paths:
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def resolve_html_path(
+    html: Path | str | None = None,
+    *,
+    desktop_root: Path | str | None = None,
+) -> Path:
+    """Pick live Desktop HTML over a skinny generator file sitting in the pack."""
+    cands = candidate_html_paths(html, desktop_root=desktop_root)
+    if html is not None:
+        return Path(html)
+    for path in cands:
+        if file_looks_live(path):
+            return path
+    for path in cands:
+        if path.is_file():
+            return path
+    return cands[0]
+
+
+def _size(text: str) -> int:
+    return len(text.encode("utf-8"))
 
 
 def present_preserve_tokens(html_text: str) -> tuple[str, ...]:
@@ -76,6 +144,7 @@ def inject_paintpx(html_text: str, mapping: Mapping[str, Any] | None = None) -> 
 
     ``mapping=None`` (default) keeps existing ``#fd-chart-db``.
     """
+    require_wrap_source()
     if mapping is None:
         return chart_marks.inject_paintpx(html_text)
     return chart_marks.ensure_embedded(html_text, mapping)
@@ -130,18 +199,36 @@ def validate_patched(
         )
 
 
+def deploy_py_files(desktop_root: Path | str) -> list[str]:
+    """Copy wrap Python onto Desktop. Never copies ``factorbook.html``."""
+    root = Path(desktop_root)
+    copied: list[str] = []
+    for name in COS_PY_FILES:
+        if name.lower().endswith(".html"):
+            raise SyncRefused("refuse: will not copy HTML onto the live desk.")
+        src = HERE / name
+        if not src.is_file():
+            raise SyncRefused(f"refuse: {src} missing — cannot deploy {name}.")
+        dest = root / name
+        if dest.resolve() != src.resolve():
+            shutil.copy2(src, dest)
+        copied.append(str(dest))
+    return copied
+
+
 def patch_live_html(
     path: Path | str | None = None,
     *,
     mapping: Mapping[str, Any] | None = None,
     dry_run: bool = False,
     backup: bool = True,
+    desktop_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """Read live ``factorbook.html``, inject the wrap, write it back.
 
     Never calls ``desk_dash.write_combined`` / ``render_html``.
     """
-    dest = resolve_html_path(path)
+    dest = resolve_html_path(path, desktop_root=desktop_root)
     if not dest.is_file():
         raise SyncRefused(f"refuse: {dest} does not exist.")
     before = dest.read_text(encoding="utf-8")
@@ -156,6 +243,7 @@ def patch_live_html(
         "wrote": False,
         "dry_run": dry_run,
         "backup": None,
+        "copied": [],
     }
     if dry_run:
         return info
@@ -170,6 +258,37 @@ def patch_live_html(
     return info
 
 
+def deploy_desktop(
+    desktop_root: Path | str | None = None,
+    *,
+    dry_run: bool = False,
+    backup: bool = True,
+) -> dict[str, Any]:
+    """CoS one-shot: copy wrap Python to Desktop, then patch live HTML."""
+    root = Path(desktop_root) if desktop_root is not None else DESKTOP_ROOT_DEFAULT
+    html_path = root / "factorbook.html"
+    if not html_path.is_file():
+        raise SyncRefused(
+            f"refuse: {html_path} does not exist. "
+            "CoS patches the live Desktop desk; will not write a new factorbook.html."
+        )
+    before = html_path.read_text(encoding="utf-8")
+    validate_live_html(before, path=html_path)
+    require_wrap_source()
+    copied: list[str] = []
+    if not dry_run:
+        copied = deploy_py_files(root)
+    info = patch_live_html(
+        html_path,
+        dry_run=dry_run,
+        backup=backup,
+        desktop_root=root,
+    )
+    info["copied"] = copied
+    info["desktop_root"] = str(root)
+    return info
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=(
@@ -180,18 +299,37 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--html",
         default="",
-        help="Path to live factorbook.html (default: next to this script, else Desktop factorbook)",
+        help="Path to live factorbook.html (default: live Desktop file if >=1MB, else next to this script)",
+    )
+    p.add_argument(
+        "--desktop-root",
+        default="",
+        help=r"Desktop factorbook folder (default: C:\Users\MLP\Desktop\factorbook)",
+    )
+    p.add_argument(
+        "--deploy-desktop",
+        action="store_true",
+        help="CoS: copy chart_marks.py + sync_live_paintpx.py to Desktop, then patch live HTML",
     )
     p.add_argument("--dry-run", action="store_true", help="Validate and inject in memory; do not write")
     p.add_argument("--no-backup", action="store_true", help="Do not write factorbook.html.bak-paintpx")
     args = p.parse_args(argv)
-    dest = resolve_html_path(args.html or None)
+    desktop_root = Path(args.desktop_root) if args.desktop_root else DESKTOP_ROOT_DEFAULT
     try:
-        info = patch_live_html(
-            dest,
-            dry_run=args.dry_run,
-            backup=not args.no_backup,
-        )
+        if args.deploy_desktop:
+            info = deploy_desktop(
+                desktop_root,
+                dry_run=args.dry_run,
+                backup=not args.no_backup,
+            )
+        else:
+            dest = resolve_html_path(args.html or None, desktop_root=desktop_root)
+            info = patch_live_html(
+                dest,
+                dry_run=args.dry_run,
+                backup=not args.no_backup,
+                desktop_root=desktop_root,
+            )
     except SyncRefused as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -201,6 +339,8 @@ def main(argv: list[str] | None = None) -> int:
         f"({info['bytes_before']} → {info['bytes_after']} bytes); "
         f"preserved {info['preserved']}"
     )
+    if info.get("copied"):
+        print("copied: " + ", ".join(info["copied"]))
     if info.get("backup"):
         print(f"backup: {info['backup']}")
     print("Hard-reload the desk. Do not copy skinny generator factorbook.html.")

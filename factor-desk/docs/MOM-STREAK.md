@@ -61,10 +61,10 @@ Daily close series. **Positive (green):** `close > SMA50 AND close > SMA200`. **
 
 Copy `mom_streak.py` next to live `desk_dash.py`. See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §6. Do not replace FLAGS/WATCH/MOM ranking logic.
 
-For MA-regime name-drill coloring, recopy **`chart_marks.py`** and **`sync_live_paintpx.py`** into `C:\Users\MLP\Desktop\factorbook`, then run:
+For MA-regime name-drill coloring, after merge CoS runs:
 
 ```bat
-python sync_live_paintpx.py --html C:\Users\MLP\Desktop\factorbook\factorbook.html
+python factor-desk\sync_live_paintpx.py --deploy-desktop
 ```
 
-That injects the `paintPxChart` wrap via `chart_marks.ensure_embedded` / `inject_paintpx`. It refuses HTML &lt; 1MB and keeps Paper / Experimental / Breakout / `#fd-paper-marks`. Do **not** wholesale-replace live `factorbook.html` from the skinny generator and do **not** run `desk_dash.py` / `write_dash.py` on the live file. See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §8.
+That copies **`chart_marks.py`** + **`sync_live_paintpx.py`** into `C:\Users\MLP\Desktop\factorbook` and patches live `factorbook.html` via `chart_marks.ensure_embedded` / `inject_paintpx`. It refuses HTML &lt; 1MB and keeps Paper / Experimental / Breakout / `#fd-paper-marks`. Do **not** wholesale-replace live `factorbook.html` from the skinny generator and do **not** run `desk_dash.py` / `write_dash.py` on the live file. See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §8.
