@@ -43,3 +43,5 @@ First finite `> 0` among: `paper_mark`, `px_last` / `PX_LAST` / `LAST_PRICE`, `p
   - Collapsible **Closed trades** for the full local book.
 
 Leftover `#fd-paper-home` in top chrome is stripped and CSS-hidden. Mom Up/Down chrome is otherwise unchanged. `desk_dash.write_combined` always re-embeds `#fd-paper-marks` + `#view-paper` + wrap JS (`paper_trade.ensure_embedded`) so a Refresh rewrite cannot drop the tab.
+
+Paper nav capture calls `showPaper(true)` then `stopImmediatePropagation` so Experimental (`fd-sscore-js`) cannot treat Paper as `other` and unhide Home. Recopy `s_score.py` as well: `kindOf` returns `""` for `data-view` paper/breakout/breakdown, and `show(false)` does not unhide `#home` while Paper or Breakout is on.

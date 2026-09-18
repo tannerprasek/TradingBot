@@ -8,8 +8,8 @@ Cursor SCM cannot create a new GitHub repo (`createRepos` is unavailable). Cloud
 
 Canonical desktop copy:
 
-- `C:\Users\MLP\Desktop\factorbook`
-- Generated dashboard: `factorbook.html` (same folder)
+- Pack / Python: `C:\Users\MLP\Desktop\factorbook`
+- Live dashboard: `C:\Users\MLP\Desktop\factorbook.html` (sibling of the pack folder)
 
 Sidecar: `add_server.py` on port **8765**.
 

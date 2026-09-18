@@ -1592,8 +1592,8 @@ def strip_js() -> str:
     if (kind === "paper") {
       ev.preventDefault();
       ev.stopPropagation();
-      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
       showPaper(true);
+      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
       return;
     }
     if (kind === "other") showPaper(false);

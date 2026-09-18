@@ -389,23 +389,24 @@ Live name-drill is **`paintPxChart`** in the large Desktop `factorbook.html`. Re
 
 ### Exact Desktop copy (do this)
 
-Working folder: `C:\Users\MLP\Desktop\factorbook`
+Pack folder (Python): `C:\Users\MLP\Desktop\factorbook`  
+Live HTML: **`C:\Users\MLP\Desktop\factorbook.html`** (sibling of the pack folder — **not** `Desktop\factorbook\factorbook.html`).
 
 1. Copy **`chart_marks.py`** from this pack next to live `desk_dash.py` (overwrite the previous `chart_marks.py`).
-2. Copy **`sync_live_paintpx.py`** into the same folder.
+2. Copy **`sync_live_paintpx.py`** into the same folder. Recopy **`paper_trade.py`**, **`s_score.py`**, and **`breakout.py`** so Paper nav is not bounced to Home.
 3. Optional: copy `scripts/sync_live_paintpx.ps1`.
 4. From that folder, patch the live HTML (this calls `chart_marks.ensure_embedded` / `inject_paintpx` only):
 
 ```bat
 cd /d C:\Users\MLP\Desktop\factorbook
-python sync_live_paintpx.py --html C:\Users\MLP\Desktop\factorbook\factorbook.html
+python sync_live_paintpx.py --html C:\Users\MLP\Desktop\factorbook.html
 ```
 
 PowerShell equivalent: `.\scripts\sync_live_paintpx.ps1` after the two `.py` files are in `factorbook\`.
 
 5. The script **refuses** if `factorbook.html` is missing, **&lt; 1MB**, or has no `paintPxChart` / `[data-px-svg]` / `[data-px-json]`. It will not write skinny generator output.
-6. Confirm the printout still lists Paper / Experimental / Breakout / `fd-paper-marks`. A backup is `factorbook.html.bak-paintpx`.
-7. Hard-reload the desk (Ctrl+F5). Open a name: price path green when `close > SMA50 AND close > SMA200`, else red; native SMA overlays stay; last print not clipped (`padR` 8→36); 1W/1M/YTD chips cleaned up.
+6. Confirm the printout still lists Paper / Experimental / Breakout / `fd-paper-marks`. A backup is `factorbook.html.bak-paintpx` next to the live HTML.
+7. Hard-reload the desk (Ctrl+F5). Open a name: price path is visible; green when `close > SMA50 AND close > SMA200`, else red; if wrap cannot segment, the original white `#e6edf3` path stays. Native SMA overlays stay; last print not clipped (`padR` 8→36); 1W/1M/YTD chips cleaned up. **Paper** tab shows `#view-paper` (Buy/Sell + tables), not Home.
 
 **Do not** copy generated `factorbook.html` from git. **Do not** `python desk_dash.py` / `python write_dash.py` against the live folder.
 
@@ -424,14 +425,16 @@ That:
 | Does | Does not |
 | --- | --- |
 | Copies `chart_marks.py` + `sync_live_paintpx.py` → `C:\Users\MLP\Desktop\factorbook` | Copy `factorbook.html` / `desk_dash.py` / dumps |
-| Patches live Desktop HTML in place (`paintPxChart` wrap) | Run `desk_dash.write_combined` / skinny rewrite |
+| Patches live `C:\Users\MLP\Desktop\factorbook.html` (`paintPxChart` wrap) | Run `desk_dash.write_combined` / skinny rewrite |
 | Refuses if live HTML is missing, **&lt; 1MB**, or has no `paintPxChart` | Touch Paper / Experimental / Breakout / `#fd-paper-marks` |
 
-If the two `.py` files are already in the Desktop folder:
+`--deploy-desktop` looks for **`Desktop\factorbook.html`**, not `Desktop\factorbook\factorbook.html`. Recopy `paper_trade.py` + `s_score.py` + `breakout.py` into the pack folder so Refresh re-embeds Paper/Experimental nav (Experimental must not treat Paper as `other` and unhide Home).
+
+If the two wrap `.py` files are already in the pack folder:
 
 ```bat
 cd /d C:\Users\MLP\Desktop\factorbook
-python sync_live_paintpx.py
+python sync_live_paintpx.py --html C:\Users\MLP\Desktop\factorbook.html
 ```
 
 Then hard-reload (Ctrl+F5). If live `write_combined` does not already call `chart_marks.ensure_embedded`, **re-run the sync helper after Refresh**.
@@ -447,7 +450,7 @@ html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
 # _ensure_options_refresh_ui(html)  # keep Options Refresh on Refresh rewrites
 ```
 
-Do **not** wholesale replace live `desk_dash.py`. Overlay JS wraps **`paintPxChart(wrap)`** (reads `[data-px-json]`, paints `[data-px-svg]`). The solid white `#e6edf3` price path is hidden and replaced with segmented green/red using `S.s50` / `S.s200` (Positive: close > SMA50 AND close > SMA200). Native SMA20/50/200 + 52w high stay; the wrap does not pile on duplicate MAs. `padR` 8 → 36 (and CSS height ~300px / max-width) so the last print + marker are not clipped and the ribbon aspect eases. 1W/1M/YTD/Trend chips get compact padding/contrast. Generator `svg.fd-chart` is already painted in Python (`data-fd-trend=1`).
+Do **not** wholesale replace live `desk_dash.py`. Overlay JS wraps **`paintPxChart(wrap)`** (reads `[data-px-json]`, paints `[data-px-svg]`). Green/red segments use `S.px` vs `S.s50` / `S.s200` (Positive: close > SMA50 AND close > SMA200; compute SMA50 from `px` if `s50` is missing). The solid white `#e6edf3` price path is hidden **only after** at least one segment is appended; if wrap cannot segment, restore the original path. Native SMA20/50/200 + 52w high stay; the wrap does not pile on duplicate MAs. `padR` 8 → 36 (and CSS height ~300px / max-width) so the last print + marker are not clipped and the ribbon aspect eases. 1W/1M/YTD/Trend chips get compact padding/contrast. Generator `svg.fd-chart` is already painted in Python (`data-fd-trend=1`).
 
 Also copy `mom_streak.py` if streak begin/end marks are missing (`streak_span` / `mom_streak_start` / `mom_streak_end`).
 
@@ -617,14 +620,15 @@ paper_trade.attach_mark(card, _rec)
 
 `ensure_embedded` wraps live `window.cardHTML` so home / Momentum Up / Down / Breakout / Breakdown / search cards that go through `cardHTML` get generic **Buy** / **Sell**, an open-position line (`LONG`/`SHORT` + entry + live P&L %), and a collapsed **Previous trades** `<details>`. It injects a **Paper** nav button (after Experimental if present, else after Options) plus `#view-paper`, and patches live `setView` / `hideAllPanes` / `paintView` with `|paper` (capture-phase click bridge, same pattern as Experimental / Breakout). Leftover `#fd-paper-home` is removed. Missing mark disables both buttons (`title` = need card price / `PX_LAST` / last Refresh print). Persistence is **localStorage** (`fd-paper-book`); the module also exports `sidecar_schema()` if a later `paper_book.json` sidecar is wanted. Do not add a brokerage hook.
 
-Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping live `desk_dash.py`, paste the tail. Recopy `paper_trade.py` after this drop-in.
+Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping live `desk_dash.py`, paste the tail. Recopy `paper_trade.py` **and** `s_score.py` after this drop-in (Experimental capture must not treat Paper as `other` and unhide Home).
 
 ### Desktop checklist
 
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
-| `paper_trade.py` | **recopy** — Buy/Sell on dense `cardHTML` cards **and** Paper tab (inline open + Close); strips `#fd-paper-home`; localStorage `fd-paper-book` only |
-| `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
+| `paper_trade.py` | **recopy** — Buy/Sell on dense `cardHTML` cards **and** Paper tab; `stopImmediatePropagation` after `showPaper(true)` so Experimental cannot bounce Paper → Home |
+| `s_score.py` | **recopy** — `kindOf` returns `""` for paper/breakout/breakdown; `show(false)` does not unhide `#home` while Paper or Breakout is on |
+| `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; Paper/Experimental are not `other` nav; dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/PAPER-TRADE.md` | optional, for the desk |
 

@@ -216,6 +216,35 @@ class SyncLivePaintPxTests(unittest.TestCase):
             self.assertIn("copied:", buf.getvalue())
             self.assertNotIn("factorbook.html", sync.COS_PY_FILES)
 
+    def test_default_live_html_is_desktop_sibling_not_pack_nested(self) -> None:
+        html = str(sync.DESKTOP_HTML_DEFAULT).replace("\\", "/")
+        pack = str(sync.DESKTOP_PACK_DEFAULT).replace("\\", "/")
+        self.assertTrue(html.endswith("Desktop/factorbook.html"), html)
+        self.assertFalse(html.endswith("factorbook/factorbook.html"), html)
+        self.assertTrue(pack.endswith("Desktop/factorbook"), pack)
+        self.assertEqual(sync.desktop_html_path(None), sync.DESKTOP_HTML_DEFAULT)
+
+    def test_deploy_desktop_prefers_sibling_html_over_nested_pack_copy(self) -> None:
+        live_body = _pad(LIVE_BODY, 1_100_000)
+        nested_body = _pad(LIVE_BODY.replace("CNH", "NESTED"), 1_100_000)
+        with tempfile.TemporaryDirectory() as tmp:
+            desk = Path(tmp)
+            pack = desk / "factorbook"
+            pack.mkdir()
+            sibling = desk / "factorbook.html"
+            nested = pack / "factorbook.html"
+            sibling.write_text(live_body, encoding="utf-8")
+            nested.write_text(nested_body, encoding="utf-8")
+            buf, err = StringIO(), StringIO()
+            with redirect_stdout(buf), redirect_stderr(err):
+                rc = sync.main(["--deploy-desktop", "--desktop-root", str(pack)])
+            self.assertEqual(rc, 0, err.getvalue())
+            self.assertIn("wrapPaintPxChart", sibling.read_text(encoding="utf-8"))
+            self.assertIn('{"CNH":13.63,"PWR":629.65}', sibling.read_text(encoding="utf-8"))
+            self.assertIn("NESTED", nested.read_text(encoding="utf-8"))
+            self.assertNotIn("wrapPaintPxChart", nested.read_text(encoding="utf-8"))
+            self.assertTrue((pack / "chart_marks.py").is_file())
+
     def test_deploy_desktop_refuses_skinny_and_does_not_copy(self) -> None:
         small = _pad(LIVE_BODY, 80_000)
         with tempfile.TemporaryDirectory() as tmp:

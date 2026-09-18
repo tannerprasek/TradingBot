@@ -281,6 +281,9 @@ function syncNav() {}
         self.assertIn("card.d = card.d || display", js)
         self.assertIn("if (!display) return null", js)
         self.assertNotIn("fd-bb-card", js)
+        self.assertIn('view === "paper"', js)
+        self.assertIn('view === "experimental"', js)
+        self.assertIn('kind === "paper"', js)
         self.assertIn('class="btn nav-btn"', out)
 
     def test_panes_html_emits_view_shells_not_stubs(self) -> None:

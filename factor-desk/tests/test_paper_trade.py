@@ -275,6 +275,13 @@ function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</art
         js = pt.strip_js()
         self.assertIn("paintTab", js)
         self.assertIn("__FD_PAPER_SHOW__", js)
+        nav = js.split("function kindOf")[1].split("function installSetViewBridge")[0]
+        self.assertIn("showPaper(true)", nav)
+        self.assertGreater(
+            nav.find("stopImmediatePropagation"),
+            nav.find("showPaper(true)"),
+        )
+        self.assertIn('kind === "paper"', js)
         self.assertIn("selectTicker", js)
         self.assertIn("data-fd-paper-close", js)
         self.assertIn("data-fd-paper-open", js)

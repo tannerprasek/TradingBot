@@ -1,6 +1,6 @@
 # Factor Desk — expected modules
 
-Until a dedicated repo exists, this folder is the cloud source of truth. Desktop live tree: `C:\Users\MLP\Desktop\factorbook`. Drop in `dapi_enrich.py` plus the thin Refresh/card hooks; do not rewrite FLAGS/WATCH/MOM.
+Until a dedicated repo exists, this folder is the cloud source of truth. Desktop live tree: Python pack `C:\Users\MLP\Desktop\factorbook`, live HTML `C:\Users\MLP\Desktop\factorbook.html`. Drop in `dapi_enrich.py` plus the thin Refresh/card hooks; do not rewrite FLAGS/WATCH/MOM.
 
 ## Python (repo root of this folder)
 

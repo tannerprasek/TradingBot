@@ -792,9 +792,11 @@ def strip_js() -> str:
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
     if (view === "breakout" || btn.getAttribute("data-fd-breakout") === "1" || btn.id === "fd-nav-breakout") return "breakout";
     if (view === "breakdown" || btn.getAttribute("data-fd-breakdown") === "1" || btn.id === "fd-nav-breakdown") return "breakdown";
+    if (view === "paper" || view === "experimental") return "";
     var label = (btn.textContent || "").replace(/\s+/g, " ").trim();
     if (label === "Breakout") return "breakout";
     if (label === "Breakdown") return "breakdown";
+    if (label === "Paper" || label === "Experimental" || label === "Exp") return "";
     if (btn.id === "refresh" || btn.id === "options-refresh") return "";
     if (btn.closest && btn.closest("#topnav, nav, .topnav") && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || view)) return "other";
     if (btn.classList && (btn.classList.contains("nav-btn") || view)) return "other";
@@ -822,6 +824,15 @@ def strip_js() -> str:
         show(kind);
         syncNav(kind);
         return;
+      }}
+      if (kind === "paper" || kind === "experimental") {{
+        hideLegacy();
+        var bo = $(VIEW_BO), bd = $(VIEW_BD);
+        if (bo) bo.classList.add("hide");
+        if (bd) bd.classList.add("hide");
+        document.body.removeAttribute("data-fd-bb");
+        syncNav("");
+        return orig.apply(this, arguments);
       }}
       show("");
       return orig.apply(this, arguments);

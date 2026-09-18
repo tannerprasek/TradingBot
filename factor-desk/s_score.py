@@ -1673,6 +1673,15 @@ def strip_js() -> str:
       else if (oursOf(b)) setOn(b, false);
     }}
   }}
+  function paperOrBbActive() {{
+    var body = document.body;
+    if (!body) return false;
+    if (body.getAttribute("data-fd-paper") || body.getAttribute("data-view") === "paper") return true;
+    if (body.getAttribute("data-fd-bb")) return true;
+    var pane = $("view-paper");
+    if (pane && pane.classList && pane.classList.contains("fd-paper-on")) return true;
+    return false;
+  }}
   function show(on) {{
     var pane = $(VIEW);
     if (on) {{
@@ -1696,7 +1705,7 @@ def strip_js() -> str:
       pane.setAttribute("hidden", "hidden");
     }}
     var home = $("home");
-    if (home) home.classList.remove("hide");
+    if (home && !paperOrBbActive()) home.classList.remove("hide");
     document.body.removeAttribute("data-fd-ss");
     if (document.body.getAttribute("data-view") === "experimental") {{
       document.body.removeAttribute("data-view");
@@ -1709,8 +1718,10 @@ def strip_js() -> str:
     if (!btn || !btn.getAttribute) return "";
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
     if (view === "experimental" || btn.getAttribute("data-fd-sscore") === "1" || btn.id === "{NAV_ID}") return "experimental";
+    if (view === "paper" || view === "breakout" || view === "breakdown") return "";
     var label = (btn.textContent || "").replace(/\s+/g, " ").trim();
     if (label === "Experimental" || label === "Exp") return "experimental";
+    if (label === "Paper" || label === "Breakout" || label === "Breakdown") return "";
     if (btn.id === "refresh" || btn.id === "options-refresh") return "";
     if (btn.closest && btn.closest("#topnav, nav, .topnav") && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || view)) return "other";
     if (btn.classList && (btn.classList.contains("nav-btn") || view)) return "other";
@@ -1737,6 +1748,10 @@ def strip_js() -> str:
       if (kind === "experimental" || kind === "exp") {{
         show(true);
         return;
+      }}
+      if (kind === "paper" || kind === "breakout" || kind === "breakdown") {{
+        show(false);
+        return orig.apply(this, arguments);
       }}
       show(false);
       return orig.apply(this, arguments);

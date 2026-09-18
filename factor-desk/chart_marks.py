@@ -943,13 +943,15 @@ def overlay_js() -> str:
 
     Live Desktop name-drill charts are ``paintPxChart(wrap)`` writing into
     ``[data-px-svg]`` from ``[data-px-json]`` (Price path ``#e6edf3`` + SMA20/50/200).
-    Overlay JS wraps that function so the white path is replaced with segmented
-    green/red, ``padR`` is enlarged, and 1W/1M/YTD/Trend chips are cleaned up.
+    Overlay JS wraps that function so the white ``#e6edf3`` path is replaced
+    with segmented green/red **only after** at least one segment is appended.
+    If wrap/parse fails, the original white path is restored. ``padR`` is
+    enlarged, and 1W/1M/YTD/Trend chips are cleaned up.
     Generator ``svg.fd-chart`` is already painted in Python (``data-fd-trend=1``).
     """
     return r"""
 (function () {
-  if (window.__FD_CHART_MARKS__) return;
+  var alreadyMarks = !!window.__FD_CHART_MARKS__;
   window.__FD_CHART_MARKS__ = true;
   var TAG_SEL = "[data-tag-trigger], .tag-trigger, .tag-mark, .chart-anno, .anno-label, .tag-label, text.tag-label";
   var CHART_SEL = "svg.fd-chart, canvas, svg.chart, svg.spark, .px-chart, [data-chart], .price-chart, #detail-chart, #name-chart, #px-chart, .name-chart, .detail-chart, [data-px-svg], [data-px-chart]";
@@ -1221,11 +1223,18 @@ def overlay_js() -> str:
     return false;
   }
   function resolvePxWrap(node) {
-    if (!node) return document;
-    if (node.querySelector && node.querySelector("[data-px-svg], [data-px-json]")) return node;
+    if (!node || node === document) {
+      return document.querySelector("[data-px-chart], [data-px-wrap], #detail-chart, #name-chart, .name-chart, .detail-chart, #fd-name-drill") || document;
+    }
+    if (node.querySelector && node.querySelector("[data-px-svg]") && node.querySelector("[data-px-json]")) return node;
     if (node.closest) {
       var host = node.closest("[data-px-chart], [data-px-wrap], #detail-chart, #name-chart, .name-chart, .detail-chart, #fd-name-drill");
       if (host) return host;
+    }
+    var n = node;
+    while (n && n !== document.body && n !== document.documentElement) {
+      if (n.querySelector && n.querySelector("[data-px-json]") && (n.querySelector("[data-px-svg]") || n === node)) return n;
+      n = n.parentElement;
     }
     var svg = resolvePxSvg(node);
     return (svg && svg.parentElement) || node;
@@ -1243,19 +1252,63 @@ def overlay_js() -> str:
     }
     return (node.tagName === "svg" || node.tagName === "SVG") ? node : null;
   }
+  function findPxJsonEl(node) {
+    if (!node) return null;
+    if (node.getAttribute && node.getAttribute("data-px-json") != null && node.tagName !== "svg" && node.tagName !== "SVG") {
+      var rawAttr = node.getAttribute("data-px-json");
+      if (rawAttr && rawAttr.charAt(0) === "{") return node;
+      if ((node.textContent || "").trim().charAt(0) === "{") return node;
+    }
+    if (node.querySelector) {
+      var el = node.querySelector("[data-px-json]");
+      if (el) return el;
+    }
+    var n = node.parentElement;
+    while (n && n !== document.body && n !== document.documentElement) {
+      if (n.querySelector) {
+        var found = n.querySelector("[data-px-json]");
+        if (found) return found;
+      }
+      n = n.parentElement;
+    }
+    var detail = document.querySelector("#detail-chart, #name-chart, [data-px-chart], #fd-name-drill, .name-chart, .detail-chart");
+    if (detail && detail.querySelector) return detail.querySelector("[data-px-json]");
+    return document.querySelector("[data-px-json]");
+  }
   function parsePxJson(wrap) {
     var host = resolvePxWrap(wrap);
-    var el = host && host.querySelector ? host.querySelector("[data-px-json]") : null;
-    if (!el && wrap && wrap.hasAttribute && wrap.hasAttribute("data-px-json")) el = wrap;
+    var el = findPxJsonEl(host) || findPxJsonEl(wrap);
     if (!el) return null;
-    var raw = el.textContent || el.getAttribute("data-px-json") || "";
+    var raw = "";
+    if (el.tagName === "SCRIPT" || el.tagName === "script") raw = el.textContent || "";
+    else raw = el.textContent || el.getAttribute("data-px-json") || "";
+    raw = String(raw || "").trim();
+    if (!raw) return null;
     try { return JSON.parse(raw) || null; } catch (e) { return null; }
+  }
+  function numOrNull(v) {
+    if (v == null || v === "") return null;
+    if (typeof v === "object") {
+      var inner = v.px != null ? v.px : (v.close != null ? v.close : (v.c != null ? v.c : (v.p != null ? v.p : v.price)));
+      return numOrNull(inner);
+    }
+    var n = +v;
+    return isFinite(n) ? n : null;
   }
   function arrOf(S, keys) {
     if (!S) return [];
-    for (var i = 0; i < keys.length; i++) {
-      var a = S[keys[i]];
-      if (Array.isArray(a)) return a.map(function (v) { return (v == null || v === "") ? null : +v; });
+    var i, a;
+    for (i = 0; i < keys.length; i++) {
+      a = S[keys[i]];
+      if (Array.isArray(a) && a.length) return a.map(numOrNull);
+    }
+    var nested = [S.data, S.series, S.chart, S.pxjson, S.values];
+    for (i = 0; i < nested.length; i++) {
+      if (!nested[i] || typeof nested[i] !== "object") continue;
+      for (var j = 0; j < keys.length; j++) {
+        a = nested[i][keys[j]];
+        if (Array.isArray(a) && a.length) return a.map(numOrNull);
+      }
     }
     return [];
   }
@@ -1294,10 +1347,18 @@ def overlay_js() -> str:
     }
     return white || best;
   }
+  function maUsable(arr) {
+    if (!arr || !arr.length) return false;
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i] != null && isFinite(arr[i])) return true;
+    }
+    return false;
+  }
   function flagsFromSeries(px, s50, s200) {
     var flags = [];
-    var computed50 = (!s50 || !s50.length) ? smaArr(px.map(function (v) { return v == null ? 0 : v; }), SMA_FAST) : s50;
-    var computed200 = (s200 && s200.length) ? s200 : (px.length >= SMA_SLOW ? smaArr(px.map(function (v) { return v == null ? 0 : v; }), SMA_SLOW) : []);
+    var pxN = px.map(function (v) { return v == null ? 0 : v; });
+    var computed50 = maUsable(s50) ? s50 : smaArr(pxN, SMA_FAST);
+    var computed200 = maUsable(s200) ? s200 : (px.length >= SMA_SLOW ? smaArr(pxN, SMA_SLOW) : []);
     for (var i = 0; i < px.length; i++) {
       if (px[i] == null || !isFinite(px[i])) { flags.push(null); continue; }
       var a = computed50[i] != null && isFinite(computed50[i]) ? computed50[i] : null;
@@ -1326,6 +1387,9 @@ def overlay_js() -> str:
   }
   function hidePricePath(el) {
     if (!el) return;
+    if (!el.getAttribute("data-fd-trend-stroke")) {
+      el.setAttribute("data-fd-trend-stroke", el.getAttribute("stroke") || LIVE_PX_PRICE);
+    }
     el.setAttribute("data-fd-trend-src", "1");
     el.setAttribute("stroke", "none");
     el.setAttribute("opacity", "0");
@@ -1334,6 +1398,18 @@ def overlay_js() -> str:
     el.style.opacity = "0";
     el.style.display = "none";
     el.style.visibility = "hidden";
+  }
+  function restorePricePath(el) {
+    if (!el) return;
+    var prev = el.getAttribute("data-fd-trend-stroke") || LIVE_PX_PRICE;
+    el.removeAttribute("data-fd-trend-src");
+    el.removeAttribute("display");
+    el.removeAttribute("opacity");
+    el.setAttribute("stroke", prev);
+    el.style.stroke = "";
+    el.style.opacity = "";
+    el.style.display = "";
+    el.style.visibility = "";
   }
   function remapAttrX(el, names, padL, oldInner, newInner) {
     names.forEach(function (name) {
@@ -1466,9 +1542,10 @@ def overlay_js() -> str:
         ensureHtmlLegend(host, svg);
         return;
       }
+      if (src.getAttribute("data-fd-trend-src") === "1") restorePricePath(src);
       Array.prototype.forEach.call(svg.querySelectorAll("[data-fd-trend-seg]"), function (n) { n.remove(); });
       var pts = parsePoints(src);
-      if (pts.length < 2) { ensureHtmlLegend(host, svg); return; }
+      if (pts.length < 2) { restorePricePath(src); ensureHtmlLegend(host, svg); return; }
       pts = expandPadR(svg, pts);
       src = findPricePath(svg) || src;
       pts = parsePoints(src);
@@ -1476,6 +1553,9 @@ def overlay_js() -> str:
       var px = arrOf(S, ["px", "PX", "close", "closes", "price", "prices"]);
       var s50 = arrOf(S, ["s50", "S50", "sma50", "SMA50", "ma50"]);
       var s200 = arrOf(S, ["s200", "S200", "sma200", "SMA200", "ma200"]);
+      if (px.length && !maUsable(s50)) {
+        s50 = smaArr(px.map(function (v) { return v == null ? 0 : v; }), SMA_FAST);
+      }
       var flags;
       if (px.length) {
         flags = drawnFlags(px, s50, s200);
@@ -1487,14 +1567,15 @@ def overlay_js() -> str:
         var ys2 = pts.map(function (p) { return -p.y; });
         flags = flagsFromSeries(ys2, smaArr(ys2, SMA_FAST), ys2.length >= SMA_SLOW ? smaArr(ys2, SMA_SLOW) : []);
       }
-      hidePricePath(src);
       if (!flags.some(function (f) { return f === "pos" || f === "neg"; })) {
+        restorePricePath(src);
         ensureHtmlLegend(host, svg);
         return;
       }
       var parent = src.parentNode || svg;
       var start = 0;
       var cur = flags[0] || "na";
+      var emitted = 0;
       function emit(kind, a, b) {
         if (kind === "na") return;
         var chunk = slicePts(pts, a, b);
@@ -1510,12 +1591,16 @@ def overlay_js() -> str:
         el.setAttribute("data-fd-trend-seg", kind);
         el.setAttribute("d", pathFromPts(chunk));
         parent.appendChild(el);
+        emitted++;
       }
       for (var j = 1; j < flags.length; j++) {
         var kind = flags[j] || "na";
         if (kind !== cur) { emit(cur, start, j - 1); start = j; cur = kind; }
       }
       emit(cur, start, flags.length - 1);
+      // Never hide #e6edf3 until at least one green/red segment is in the SVG.
+      if (emitted > 0) hidePricePath(src);
+      else restorePricePath(src);
       ensureHtmlLegend(host, svg);
     } finally {
       restylingPx = false;
@@ -1541,8 +1626,12 @@ def overlay_js() -> str:
     if (typeof orig !== "function" || orig.__fdPxTrend) return orig;
     var body = patchPaintSource(orig) || orig;
     var wrapped = function (wrap) {
+      var host = wrap;
+      if (!host || (host.nodeType !== 1 && host.nodeType !== 9)) {
+        host = (this && this.nodeType === 1) ? this : null;
+      }
       var ret = body.apply(this, arguments);
-      try { restylePxChart(wrap); } catch (e) {}
+      try { restylePxChart(host || wrap || this); } catch (e) {}
       return ret;
     };
     wrapped.__fdPxTrend = true;
@@ -1804,17 +1893,20 @@ def overlay_js() -> str:
       if (rec) drawStreak(chart, rec);
     }
   }
-  document.addEventListener("click", function (ev) {
-    var t = ev.target && ev.target.closest ? ev.target.closest("article.card, article[data-t], [data-range], .chart-range") : null;
-    if (!t) return;
-    if (ev.target.closest && ev.target.closest(".fd-paper, [data-fd-paper-act], button.nav-btn, #refresh, #options-refresh")) return;
-    var card = ev.target.closest && ev.target.closest("article.card, article[data-t]");
-    setTimeout(function () {
-      apply();
-      if (card) showSkinnyDrill(card);
-    }, 40);
-  }, true);
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", apply);
+  if (!window.__FD_CHART_CLICK__) {
+    window.__FD_CHART_CLICK__ = true;
+    document.addEventListener("click", function (ev) {
+      var t = ev.target && ev.target.closest ? ev.target.closest("article.card, article[data-t], [data-range], .chart-range") : null;
+      if (!t) return;
+      if (ev.target.closest && ev.target.closest(".fd-paper, [data-fd-paper-act], button.nav-btn, #refresh, #options-refresh")) return;
+      var card = ev.target.closest && ev.target.closest("article.card, article[data-t]");
+      setTimeout(function () {
+        apply();
+        if (card) showSkinnyDrill(card);
+      }, 40);
+    }, true);
+  }
+  if (document.readyState === "loading" && !alreadyMarks) document.addEventListener("DOMContentLoaded", apply);
   else apply();
 })();
 """.strip()
