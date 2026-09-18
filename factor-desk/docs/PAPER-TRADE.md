@@ -25,7 +25,9 @@ Closed history on the card uses the same sign. Dates are the close stamp (`YYYY-
 
 ## Mark price
 
-First finite `> 0` among: `paper_mark`, `px_last` / `PX_LAST` / `LAST_PRICE`, `price` / `px` / `last` / `close`, last Refresh print, last point of `px_series`, then `#fd-paper-marks`, then `window.MOM.cards`. If none: both buttons **disabled**, `title` = `No mark price — need card price / PX_LAST / last Refresh print`. Tab Buy/Sell / Close reuse this resolver.
+First finite `> 0` among: `paper_mark`, `px_last` / `PX_LAST` / `LAST_PRICE`, `price` / `px` / `last` / `close`, last Refresh print, last point of `px_series`, then `#fd-paper-marks`, then `window.MOM.cards` **and** `MOM.up` / `down` / `flags` / `watch` (not only `MOM.cards` when that array exists). If none: both buttons **disabled**, `title` = `No mark price — need card price / PX_LAST / last Refresh print`. Tab Buy/Sell / Close reuse this resolver.
+
+Missing or non-positive mark is **never** treated as 0 in P&L (that would paint every long −100% and every short +100%). Open rows show `—` for Mark and Return %; Close is disabled until a real mark exists. On Refresh, `marks_db` is rebuilt from live card prices and merged with `#fd-paper-marks` / `data-px` already on the HTML so a write cannot wipe prints.
 
 ## Persistence
 
@@ -37,9 +39,9 @@ First finite `> 0` among: `paper_mark`, `px_last` / `PX_LAST` / `LAST_PRICE`, `p
 - Open line: `LONG @ 12.50  +4.00%` (live % when a mark exists).
 - `<details>` **Previous trades** — collapsed by default; each row is date · side · signed %.
 - Paper tab (`#view-paper`, after Options / near Experimental — not replacing Mom Up/Down):
-  - **Open** — ticker field + Buy / Sell at the current mark (same mark path as card buttons).
-  - **open** — every open long/short with live P&L % and inline **Close**. Click ticker → `selectTicker` if present. Empty: `no open paper`.
+  - **Open** — ticker field + Buy / Sell at the current mark (same mark path as card buttons). Capture-phase Paper/Experimental/Breakout nav listeners ignore these controls.
+  - **open** — table: Opened / Ticker / Side / Entry / Mark / Return % / Close. Click ticker → `selectTicker` if present. Empty: `no open paper`. Missing mark → `—` and Close disabled.
   - **week** — scorecard of closes **since Monday 00:00 America/Edmonton**: closed count, hit rate (% with positive signed return), avg win %, avg loss %. Empty: `no closed yet this week`.
-  - Collapsible **Closed trades** for the full local book.
+  - **closed** — table: Opened / Closed / Ticker / Side / Entry / Exit / Return %. Empty: `no closed paper`.
 
 Leftover `#fd-paper-home` in top chrome is stripped and CSS-hidden. Mom Up/Down chrome is otherwise unchanged. `desk_dash.write_combined` always re-embeds `#fd-paper-marks` + `#view-paper` + wrap JS (`paper_trade.ensure_embedded`) so a Refresh rewrite cannot drop the tab.

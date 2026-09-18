@@ -529,13 +529,13 @@ Same-side click while a position is open is a **no-op + brief toast** (`Already 
 
 The book lives on a top-nav **Paper** tab (`#fd-nav-paper`, `data-view="paper"`, `#view-paper`) — **not** a home chrome strip next to BOOK / baseline:
 
-- **Open from the tab** — ticker field + Buy / Sell at the current mark (same `#fd-paper-marks` / MOM / last-print resolver as card buttons).
-- **Open book** — every open paper long/short from `localStorage` key `fd-paper-book` (same store as the card Buy/Sell). Each row is ticker, `LONG`/`SHORT`, entry, live P&L %, plus inline **Close** (opposite click: long → sell, short → buy). Click ticker → live `selectTicker` when that function exists.
+- **Open from the tab** — ticker field + Buy / Sell at the current mark (same `#fd-paper-marks` / MOM / last-print resolver as card buttons). Nav capture listeners must not swallow these clicks.
+- **Open book** — table of every open paper long/short from `localStorage` key `fd-paper-book` (same store as the card Buy/Sell): Opened, Ticker, Side, Entry, Mark, Return %, Close (opposite click: long → sell, short → buy). Click ticker → live `selectTicker` when that function exists. Missing mark → `—` / Close disabled — never fake ±100%.
 - **Week scorecard** — closed trades **since Monday 00:00 `America/Edmonton`**: closed count, hit rate (% of those closes with **positive signed** return), avg win % and avg loss % (shorts profit when price falls; losses stay negative).
-- **Closed trades** — collapsible list of the full local book.
+- **Closed trades** — table of the full local book (opened / closed / ticker / side / entry / exit / return). Empty: `no closed paper`.
 - Empty copy: no opens → `no open paper`; no closes this week → `no closed yet this week`.
 - Persistence is unchanged: **only** `fd-paper-book`. Do not add a sidecar write on Refresh.
-- `ensure_embedded` **strips** leftover `#fd-paper-home` from top chrome so a previous Home-strip recopy cannot jam chips next to BOOK delta.
+- `ensure_embedded` **strips** leftover `#fd-paper-home` from top chrome so a previous Home-strip recopy cannot jam chips next to BOOK delta. It also **merges** `marks_db(cards)` with existing `#fd-paper-marks` / `data-px` so Refresh cannot wipe live prints.
 
 ### End of live `write_combined` / `write_dash.write`
 
@@ -572,7 +572,7 @@ Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping
 
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
-| `paper_trade.py` | **recopy** — Buy/Sell on dense `cardHTML` cards **and** Paper tab (inline open + Close); strips `#fd-paper-home`; localStorage `fd-paper-book` only |
+| `paper_trade.py` | **recopy** — Paper tab **table** + live marks; Buy/Sell/Close click handlers; strips `#fd-paper-home`; localStorage `fd-paper-book` only |
 | `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/PAPER-TRADE.md` | optional, for the desk |
@@ -580,7 +580,7 @@ Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping
 Do **not** copy generated `factorbook.html` or a later `paper_book.json`. After drop-in, Refresh once (or hard-reload) and confirm:
 
 1. Home chrome next to BOOK / baseline has **no** paper LONG/SHORT chips. Paper is a top-nav tab after Options / near Experimental.
-2. **Paper** shows opens + live %, inline **Close**, ticker + Buy/Sell, week scorecard, and collapsible closed trades.
+2. **Paper** shows a table of opens (Opened / Ticker / Side / Entry / Mark / Return % / Close), ticker + Buy/Sell, week scorecard, and a closed-trades table. Missing marks show `—`, never ±100%.
 3. Dense cards still show Buy/Sell (disabled with a title if no mark), a long/short line + live % when a position is open, and collapsed previous trades with the correct short sign (short profits when price falls).
 4. Buy/Sell on a card and Close / Buy / Sell on the tab share `fd-paper-book`.
 5. Week scorecard counts closes since Monday 00:00 America/Edmonton; empty copy is `no closed yet this week`.

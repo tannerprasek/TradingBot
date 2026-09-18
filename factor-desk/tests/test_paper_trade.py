@@ -30,8 +30,13 @@ class PnlSignTests(unittest.TestCase):
     def test_long_down_is_minus(self) -> None:
         self.assertAlmostEqual(pt.pnl_pct("long", 50.0, 45.0), -10.0)
 
-    def test_short_up_is_minus(self) -> None:
-        self.assertAlmostEqual(pt.pnl_pct("short", 50.0, 55.0), -10.0)
+    def test_missing_or_zero_mark_is_none_not_100(self) -> None:
+        self.assertIsNone(pt.pnl_pct("long", 13.63, None))
+        self.assertIsNone(pt.pnl_pct("long", 13.63, 0))
+        self.assertIsNone(pt.pnl_pct("short", 617.64, None))
+        self.assertIsNone(pt.pnl_pct("short", 617.64, 0))
+        self.assertNotEqual(pt.fmt_pct(pt.pnl_pct("long", 13.63, 0)), "-100.00%")
+        self.assertNotEqual(pt.fmt_pct(pt.pnl_pct("short", 617.64, 0)), "+100.00%")
 
     def test_closed_short_keeps_sign(self) -> None:
         row = pt.close_position(
@@ -116,6 +121,31 @@ class MarkTests(unittest.TestCase):
         )
         self.assertEqual(db["AAPL"], 12.0)
         self.assertEqual(db["MSFT"], 400.0)
+
+    def test_harvest_html_keeps_data_px_and_existing_db(self) -> None:
+        html = """<html><body>
+        <article class="card" data-t="CNH" data-px="13.63">CNH</article>
+        <script type="application/json" id="fd-paper-marks">{"PWR":617.64}</script>
+        </body></html>"""
+        harvested = pt.harvest_html_marks(html)
+        self.assertEqual(harvested["CNH"], 13.63)
+        self.assertEqual(harvested["PWR"], 617.64)
+        merged = pt.merge_marks(harvested, {"PWR": 0, "AAPL": 12.0})
+        self.assertEqual(merged["PWR"], 617.64)  # 0 must not wipe a real mark
+        self.assertEqual(merged["AAPL"], 12.0)
+
+    def test_ensure_embedded_none_does_not_wipe_marks(self) -> None:
+        html = """<!DOCTYPE html><html><head></head><body>
+        <article class="card" data-t="IQV" data-px="269.02">IQV</article>
+        </body></html>"""
+        out = pt.ensure_embedded(html, None)
+        blob = re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(blob)
+        self.assertEqual(json.loads(blob.group(1))["IQV"], 269.02)
 
 
 class WeekScorecardTests(unittest.TestCase):
@@ -212,11 +242,12 @@ class PaperTabTests(unittest.TestCase):
         html = pt.panes_html(pt.empty_book(), {})
         self.assertIn("no open paper", html)
         self.assertIn("no closed yet this week", html)
+        self.assertIn("no closed paper", html)
         self.assertIn('id="view-paper"', html)
         self.assertIn('data-view="paper"', html)
         self.assertIn("America/Edmonton", html)
         self.assertIn("data-fd-paper-open", html)
-        self.assertIn("Closed trades", html)
+        self.assertIn("closed", html.lower())
         self.assertEqual(pt.home_host_html(pt.empty_book(), {}), "")
 
     def test_open_rows_list_every_position(self) -> None:
@@ -227,9 +258,33 @@ class PaperTabTests(unittest.TestCase):
         self.assertEqual(len(opens), 15)
         html = pt.panes_html(book, {f"T{i:02d}": 11.0 for i in range(15)})
         self.assertNotIn("more 3", html)
-        self.assertEqual(html.count("data-fd-paper-ticker="), 45)  # row + chip + Close per open
+        self.assertIn("fd-paper-table", html)
+        self.assertIn(">Opened</th>", html)
+        self.assertIn(">Mark</th>", html)
+        self.assertIn(">Return %</th>", html)
+        self.assertEqual(html.count("data-fd-paper-ticker="), 45)  # row + ticker + Close per open
         self.assertEqual(html.count("data-fd-paper-close="), 15)
         self.assertIn(">Close</button>", html)
+
+    def test_missing_mark_shows_dash_not_fake_100(self) -> None:
+        book = pt.empty_book()
+        pt.apply_click(book, "CNH", "buy", 13.63, when="2026-09-17T00:00:00Z")
+        pt.apply_click(book, "PWR", "sell", 617.64, when="2026-09-17T01:00:00Z")
+        rows = {r["ticker"]: r for r in pt.open_rows(book, {})}
+        self.assertIsNone(rows["CNH"]["mark"])
+        self.assertIsNone(rows["CNH"]["pnl_pct"])
+        self.assertIsNone(rows["PWR"]["pnl_pct"])
+        html = pt.panes_html(book, {})
+        self.assertNotIn("100.00%", html)
+        self.assertNotIn("-100.00%", html)
+        self.assertIn("—", html)
+        self.assertIn("disabled", html)
+        self.assertIn(pt.NO_MARK_REASON, html)
+        live = pt.panes_html(book, {"CNH": 14.993, "PWR": 555.876})
+        self.assertIn("+10.00%", live)
+        self.assertIn("+10.00%", live)  # short also profits when mark < entry
+        self.assertIn("14.99", live)
+        self.assertNotIn("disabled", live.split("CNH", 1)[-1].split("</tr>", 1)[0])
 
     def test_ensure_embedded_injects_paper_tab_not_chrome_strip(self) -> None:
         html = """<!DOCTYPE html><html><head></head><body>
@@ -279,6 +334,15 @@ function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</art
         self.assertIn("data-fd-paper-close", js)
         self.assertIn("data-fd-paper-open", js)
         self.assertIn("Already long — sell to close", js)
+        self.assertIn("fd-paper-table", js)
+        self.assertIn("harvestAllMarks", js)
+        self.assertIn("isTradeEl", js)
+        self.assertIn("__FD_PAPER_ON_DOC_CLICK__", js)
+        self.assertIn("entry = num(entry); mark = num(mark);", js)
+        self.assertNotIn("entry = Number(entry); mark = Number(mark);", js)
+        self.assertIn("addCards(out, mom.cards);", js)
+        self.assertIn('["up", "down", "flags", "watch"', js)
+        self.assertIn("no closed paper", out)
         self.assertIn("Previous trades", out)
         self.assertIn(">Buy</button>", pt.chrome_html("AAPL", mark=12.0))
         again = pt.ensure_embedded(out, None)
@@ -332,8 +396,10 @@ window.MOM = { cards: [{ t: "AAPL", px_last: 12 }] };
         self.assertIn("No mark price", js)
         self.assertIn("var painting = false", js)
         self.assertIn("if (painting) return", js)
-        self.assertIn("__FD_PAPER_CLICK__", js)
+        self.assertIn("__FD_PAPER_DOC_CLICK__", js)
         self.assertIn("onPaperClick", js)
+        self.assertIn("onDocumentClick", js)
+        self.assertIn("harvestAllMarks", js)
         chrome = pt.chrome_html("AAPL", mark=None)
         self.assertIn("disabled", chrome)
         self.assertIn("No mark price", chrome)
@@ -390,7 +456,8 @@ window.MOM = { cards: [{ t: "AAPL", ticker: "AAPL US Equity", px_last: 12.5, sco
             self.assertIn('id="fd-nav-paper"', text)
             self.assertNotIn('id="fd-paper-home"', text)
             self.assertIn("no open paper", text)
-            self.assertIn("no closed yet this week", text)
+            self.assertIn("no closed paper", text)
+            self.assertIn("fd-paper-table", text)
             self.assertIn("fd-paper-book", text)
             self.assertIn("data-fd-paper-act", text)
             self.assertIn("data-fd-paper-open", text)

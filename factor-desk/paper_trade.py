@@ -27,11 +27,14 @@ Missing mark → buttons disabled, ``title`` explains why.
 Paper tab (not a home chrome strip)
 -----------------------------------
 Top-nav **Paper** (``data-view="paper"``, ``#fd-nav-paper``) opens
-``#view-paper``: open positions with live P&L % and inline **Close**,
-ticker + Buy/Sell to open at the current mark, week scorecard since
-Monday 00:00 ``America/Edmonton``, and collapsible closed trades.
-Same ``fd-paper-book`` store as card Buy/Sell. Never inject
+``#view-paper``: ticker + Buy/Sell to open at the current mark, an
+open-positions **table** (Opened / Ticker / Side / Entry / Mark /
+Return % / Close), week scorecard since Monday 00:00
+``America/Edmonton``, and a closed-trades table. Same
+``fd-paper-book`` store as card Buy/Sell. Never inject
 ``#fd-paper-home`` into top chrome / BOOK delta.
+Missing mark → Mark / Return show ``—`` (never fake ±100%); Close
+is disabled. Marks refresh from live card prices on Refresh.
 
 Live FLAGS/WATCH/MOM chrome is left alone except the card Buy/Sell
 strip. Recopy ``paper_trade.py`` to Desktop; do **not** wholesale
@@ -154,6 +157,7 @@ WEEK_TZ_NAME = "America/Edmonton"
 OPEN_SHOW_MAX = 12  # legacy chip-strip cap; the Paper tab lists every open
 EMPTY_OPENS = "no open paper"
 EMPTY_WEEK = "no closed yet this week"
+EMPTY_CLOSED = "no closed paper"
 
 # First finite > 0 wins. Live Refresh often writes px / PX_LAST / last.
 MARK_KEYS: tuple[str, ...] = (
@@ -313,40 +317,94 @@ def attach_mark(
     return card
 
 
+def _put_mark(out: dict[str, float], ticker: str, px: float | None) -> None:
+    if not ticker or px is None or px <= 0:
+        return
+    out[ticker] = px
+    short = _short(ticker)
+    if short:
+        out.setdefault(short, px)
+
+
 def marks_db(
     cards: Iterable[Mapping[str, Any]] | None = None,
     book: Mapping[str, Any] | None = None,
 ) -> dict[str, float]:
     """ticker / short → mark, for ``#fd-paper-marks`` after Refresh."""
     out: dict[str, float] = {}
-
-    def put(ticker: str, px: float | None) -> None:
-        if not ticker or px is None or px <= 0:
-            return
-        out[ticker] = px
-        short = _short(ticker)
-        if short:
-            out.setdefault(short, px)
-
     for card in cards or []:
         if not isinstance(card, Mapping):
             continue
-        put(card_ticker(card), mark_of(card))
-        put(str(card.get("t") or ""), mark_of(card))
+        px = mark_of(card)
+        put_ticker = card_ticker(card)
+        _put_mark(out, put_ticker, px)
+        _put_mark(out, str(card.get("t") or ""), px)
+        _put_mark(out, str(card.get("ticker") or ""), px)
+        _put_mark(out, str(card.get("symbol") or ""), px)
     names = (book or {}).get("names") if isinstance(book, Mapping) else None
     if isinstance(names, dict):
         for ticker, rec in names.items():
-            put(str(ticker), mark_of(rec if isinstance(rec, Mapping) else None))
+            rec_map = rec if isinstance(rec, Mapping) else None
+            _put_mark(out, str(ticker), mark_of(rec_map))
+    return out
+
+
+_ARTICLE_OPEN_RE = re.compile(r"<article\b([^>]*)>", re.I)
+_ATTR_RE = re.compile(r"""\b([:\w.-]+)\s*=\s*["']([^"']*)["']""", re.I)
+_MARKS_SCRIPT_RE = re.compile(
+    rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>(.*?)</script>',
+    re.I | re.S,
+)
+
+
+def harvest_html_marks(html_text: str | None) -> dict[str, float]:
+    """Pull marks already on the live desk HTML so Refresh cannot wipe them.
+
+    Sources: existing ``#fd-paper-marks`` JSON, then ``data-px`` / ``data-t``
+    on ``<article>`` cards (last Refresh print). Never treats 0 as a mark.
+    """
+    out: dict[str, float] = {}
+    text = html_text or ""
+    blob_m = _MARKS_SCRIPT_RE.search(text)
+    if blob_m:
+        raw = (blob_m.group(1) or "").replace("<\\/", "</").strip()
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, Mapping):
+            for key, val in parsed.items():
+                _put_mark(out, str(key), dapi_enrich.as_float(val))
+    for tag in _ARTICLE_OPEN_RE.finditer(text):
+        attrs = {name.lower(): val for name, val in _ATTR_RE.findall(tag.group(1) or "")}
+        ticker = attrs.get("data-t") or attrs.get("data-ticker") or attrs.get("data-name") or ""
+        px = attrs.get("data-px") or attrs.get("data-px-last") or attrs.get("data-mark")
+        _put_mark(out, ticker, dapi_enrich.as_float(px))
+    return out
+
+
+def merge_marks(*maps: Mapping[str, Any] | None) -> dict[str, float]:
+    """Later maps win when their values are finite ``> 0``."""
+    out: dict[str, float] = {}
+    for mapping in maps:
+        if not isinstance(mapping, Mapping):
+            continue
+        for key, val in mapping.items():
+            _put_mark(out, str(key), dapi_enrich.as_float(val))
     return out
 
 
 def pnl_pct(side: str | None, entry: float | None, mark: float | None) -> float | None:
-    """Signed percent. Long up = +, short down = +."""
+    """Signed percent. Long up = +, short down = +.
+
+    Missing / non-positive mark or entry → ``None`` (never treat as 0,
+    which would paint every long −100% and every short +100%).
+    """
     if side not in {"long", "short"}:
         return None
     entry_px = dapi_enrich.as_float(entry)
     mark_px = dapi_enrich.as_float(mark)
-    if entry_px is None or mark_px is None or entry_px == 0:
+    if entry_px is None or mark_px is None or entry_px <= 0 or mark_px <= 0:
         return None
     if side == "long":
         return (mark_px - entry_px) / entry_px * 100.0
@@ -357,6 +415,13 @@ def fmt_pct(value: float | None) -> str:
     if value is None:
         return "—"
     return f"{value:+.2f}%"
+
+
+def fmt_px(value: float | None) -> str:
+    px = dapi_enrich.as_float(value)
+    if px is None or px <= 0:
+        return "—"
+    return f"{px:.2f}"
 
 
 def position_of(book: Mapping[str, Any] | None, ticker: str) -> dict[str, Any] | None:
@@ -708,6 +773,141 @@ def _date_label(value: Any) -> str:
     return text[:10]
 
 
+def _side_cell(side: str | None) -> str:
+    raw = str(side or "").strip().lower()
+    label = html.escape(raw.upper() or "—")
+    cls = "fd-paper-side"
+    if raw == "long":
+        cls += " fd-paper-up"
+    elif raw == "short":
+        cls += " fd-paper-down"
+    return f'<span class="{cls}">{label}</span>'
+
+
+def _ret_cell(ret: float | None) -> str:
+    cls = "fd-paper-num"
+    if ret is not None:
+        cls += " fd-paper-up" if ret >= 0 else " fd-paper-down"
+    return f'<span class="{cls}">{html.escape(fmt_pct(ret))}</span>'
+
+
+def _open_row_html(row: Mapping[str, Any]) -> str:
+    ticker_raw = str(row.get("ticker") or "")
+    ticker = html.escape(ticker_raw, quote=True)
+    ticker_txt = html.escape(ticker_raw)
+    mark = dapi_enrich.as_float(row.get("mark"))
+    has_mark = mark is not None and mark > 0
+    ret = row.get("pnl_pct") if has_mark else None
+    disabled = "" if has_mark else " disabled"
+    title = "" if has_mark else html.escape(NO_MARK_REASON, quote=True)
+    return (
+        f'<tr class="fd-paper-open-row" data-fd-paper-ticker="{ticker}">'
+        f'<td class="fd-paper-num">{html.escape(_date_label(row.get("opened_at")))}</td>'
+        f'<td><button type="button" class="fd-paper-ticker" data-fd-paper-ticker="{ticker}">'
+        f"{ticker_txt}</button></td>"
+        f"<td>{_side_cell(str(row.get('side') or ''))}</td>"
+        f'<td class="fd-paper-num">{html.escape(fmt_px(row.get("entry")))}</td>'
+        f'<td class="fd-paper-num">{html.escape(fmt_px(mark if has_mark else None))}</td>'
+        f"<td>{_ret_cell(ret if isinstance(ret, (int, float)) else None)}</td>"
+        f'<td><button type="button" class="fd-paper-btn fd-paper-close" data-fd-paper-close="1" '
+        f'data-fd-paper-ticker="{ticker}"{disabled} title="{title}">Close</button></td>'
+        f"</tr>"
+    )
+
+
+def _closed_row_html(row: Mapping[str, Any]) -> str:
+    ticker_raw = str(row.get("ticker") or "")
+    ticker = html.escape(ticker_raw, quote=True)
+    return (
+        f'<tr data-fd-paper-ticker="{ticker}">'
+        f'<td class="fd-paper-num">{html.escape(_date_label(row.get("opened_at")))}</td>'
+        f'<td class="fd-paper-num">{html.escape(_date_label(row.get("closed_at")))}</td>'
+        f"<td>{html.escape(ticker_raw)}</td>"
+        f"<td>{_side_cell(str(row.get('side') or ''))}</td>"
+        f'<td class="fd-paper-num">{html.escape(fmt_px(row.get("entry")))}</td>'
+        f'<td class="fd-paper-num">{html.escape(fmt_px(row.get("exit")))}</td>'
+        f"<td>{_ret_cell(_row_ret(row))}</td>"
+        f"</tr>"
+    )
+
+
+def _open_table_html(opens: Sequence[Mapping[str, Any]]) -> str:
+    if not opens:
+        return f'<p class="fd-paper-home-empty">{html.escape(EMPTY_OPENS)}</p>'
+    body = "".join(_open_row_html(row) for row in opens)
+    return (
+        '<table class="fd-paper-table" aria-label="Open paper">'
+        "<thead><tr>"
+        "<th>Opened</th><th>Ticker</th><th>Side</th>"
+        "<th>Entry</th><th>Mark</th><th>Return %</th><th></th>"
+        "</tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+    )
+
+
+def _closed_table_html(closed: Sequence[Mapping[str, Any]]) -> str:
+    if not closed:
+        return f'<p class="fd-paper-home-empty">{html.escape(EMPTY_CLOSED)}</p>'
+    body = "".join(_closed_row_html(row) for row in closed)
+    return (
+        '<table class="fd-paper-table" aria-label="Closed paper">'
+        "<thead><tr>"
+        "<th>Opened</th><th>Closed</th><th>Ticker</th><th>Side</th>"
+        "<th>Entry</th><th>Exit</th><th>Return %</th>"
+        "</tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+    )
+
+
+def panes_html(
+    book: Mapping[str, Any] | None = None,
+    marks: Mapping[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Paper tab pane. JS re-paints opens / scorecard / closed from localStorage."""
+    opens = open_rows(book, marks) if book else []
+    score = week_scorecard(book, now=now) if book else {
+        "count": 0,
+        "empty": True,
+        "tz": WEEK_TZ_NAME,
+    }
+    closed = closed_rows(book) if book else []
+    open_inner = _open_table_html(opens)
+    closed_inner = _closed_table_html(closed)
+    empty_cls = " fd-paper-home-empty" if score.get("empty") else ""
+    tz = html.escape(WEEK_TZ_NAME, quote=True)
+    return "\n".join(
+        [
+            f'<div id="{VIEW_ID}" class="view-pane hide" data-view="paper" hidden>',
+            '  <div class="ph">Paper</div>',
+            f'  <div class="fd-paper-tab" id="{TAB_ID}" role="region" '
+            f'aria-label="Paper book" data-week-tz="{tz}">',
+            '    <form class="fd-paper-open-form" id="fd-paper-open-form" action="javascript:void(0)">',
+            f'      <input id="{TICKER_INPUT_ID}" type="text" placeholder="TICKER" '
+            'autocomplete="off" spellcheck="false" aria-label="Ticker" />',
+            '      <button type="button" class="fd-paper-btn fd-paper-buy" data-fd-paper-open="buy">Buy</button>',
+            '      <button type="button" class="fd-paper-btn fd-paper-sell" data-fd-paper-open="sell">Sell</button>',
+            "    </form>",
+            '    <section class="fd-paper-opens-sec">',
+            '      <span class="fd-paper-home-kicker">open</span>',
+            f'      <div id="{OPENS_ID}" class="fd-paper-opens">{open_inner}</div>',
+            "    </section>",
+            '    <section class="fd-paper-week-sec">',
+            '      <span class="fd-paper-home-kicker">week</span>',
+            f'      <span id="{WEEK_ID}" class="fd-paper-home-score{empty_cls}">'
+            f"{html.escape(scorecard_line(score))}</span>",
+            "    </section>",
+            '    <section class="fd-paper-closed-sec">',
+            '      <span class="fd-paper-home-kicker">closed</span>',
+            f'      <div id="{CLOSED_ID}" class="fd-paper-closed-wrap">{closed_inner}</div>',
+            "    </section>",
+            "  </div>",
+            "</div>",
+        ]
+    )
+
+
 def position_line(pos: Mapping[str, Any] | None, mark: float | None) -> str:
     if not pos:
         return ""
@@ -812,85 +1012,6 @@ def closed_rows(book: Mapping[str, Any] | None) -> list[dict[str, Any]]:
         reverse=True,
     )
     return rows
-
-
-def _open_row_html(row: Mapping[str, Any]) -> str:
-    ret = row.get("pnl_pct")
-    cls = "fd-paper-chip"
-    if ret is not None:
-        cls += " fd-paper-up" if ret >= 0 else " fd-paper-down"
-    ticker = html.escape(str(row.get("ticker") or ""), quote=True)
-    label = html.escape(str(row.get("label") or ticker))
-    return (
-        f'<div class="fd-paper-open-row" data-fd-paper-ticker="{ticker}">'
-        f'<button type="button" class="{cls}" data-fd-paper-ticker="{ticker}">{label}</button>'
-        f'<button type="button" class="fd-paper-btn fd-paper-close" data-fd-paper-close="1" '
-        f'data-fd-paper-ticker="{ticker}">Close</button>'
-        f"</div>"
-    )
-
-
-def panes_html(
-    book: Mapping[str, Any] | None = None,
-    marks: Mapping[str, Any] | None = None,
-    *,
-    now: datetime | None = None,
-) -> str:
-    """Paper tab pane. JS re-paints opens / scorecard / closed from localStorage."""
-    opens = open_rows(book, marks) if book else []
-    score = week_scorecard(book, now=now) if book else {
-        "count": 0,
-        "empty": True,
-        "tz": WEEK_TZ_NAME,
-    }
-    closed = closed_rows(book) if book else []
-    if opens:
-        open_inner = "".join(_open_row_html(row) for row in opens)
-    else:
-        open_inner = f'<p class="fd-paper-home-empty">{html.escape(EMPTY_OPENS)}</p>'
-    closed_bits: list[str] = []
-    for row in closed:
-        line = (
-            f"{_date_label(row.get('closed_at'))} · {str(row.get('ticker') or '')} · "
-            f"{str(row.get('side') or '').upper()} · {fmt_pct(_row_ret(row))}"
-        )
-        closed_bits.append(f"<li>{html.escape(line)}</li>")
-    closed_items = "".join(closed_bits)
-    n_closed = len(closed)
-    summary = f"Closed trades ({n_closed})" if n_closed else "Closed trades"
-    empty_cls = " fd-paper-home-empty" if score.get("empty") else ""
-    tz = html.escape(WEEK_TZ_NAME, quote=True)
-    return "\n".join(
-        [
-            f'<div id="{VIEW_ID}" class="view-pane hide" data-view="paper" hidden>',
-            '  <div class="ph">Paper</div>',
-            f'  <div class="fd-paper-tab" id="{TAB_ID}" role="region" '
-            f'aria-label="Paper book" data-week-tz="{tz}">',
-            '    <form class="fd-paper-open-form" id="fd-paper-open-form" action="javascript:void(0)">',
-            '      <label class="fd-paper-open-label">Open',
-            f'        <input id="{TICKER_INPUT_ID}" type="text" placeholder="ticker" '
-            'autocomplete="off" spellcheck="false" />',
-            "      </label>",
-            '      <button type="button" class="fd-paper-btn fd-paper-buy" data-fd-paper-open="buy">Buy</button>',
-            '      <button type="button" class="fd-paper-btn fd-paper-sell" data-fd-paper-open="sell">Sell</button>',
-            "    </form>",
-            '    <section class="fd-paper-opens-sec">',
-            '      <span class="fd-paper-home-kicker">open</span>',
-            f'      <div id="{OPENS_ID}" class="fd-paper-opens">{open_inner}</div>',
-            "    </section>",
-            '    <section class="fd-paper-week-sec">',
-            '      <span class="fd-paper-home-kicker">week</span>',
-            f'      <span id="{WEEK_ID}" class="fd-paper-home-score{empty_cls}">'
-            f"{html.escape(scorecard_line(score))}</span>",
-            "    </section>",
-            f'    <details class="fd-paper-hist fd-paper-closed">',
-            f"      <summary>{html.escape(summary)}</summary>",
-            f'      <ul id="{CLOSED_ID}">{closed_items}</ul>',
-            "    </details>",
-            "  </div>",
-            "</div>",
-        ]
-    )
 
 
 def home_host_html(*_args: Any, **_kwargs: Any) -> str:
@@ -1003,7 +1124,7 @@ body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
   display: flex;
   flex-direction: column;
   gap: 14px;
-  max-width: 720px;
+  max-width: 960px;
   font: 650 10px/1.15 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
 }}
 .fd-paper-open-form {{
@@ -1030,21 +1151,57 @@ body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
   width: 8.5em;
   text-transform: uppercase;
 }}
-.fd-paper-opens-sec, .fd-paper-week-sec {{
+.fd-paper-opens-sec, .fd-paper-week-sec, .fd-paper-closed-sec {{
   display: flex;
   flex-direction: column;
   gap: 6px;
 }}
-.fd-paper-opens {{
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.fd-paper-opens, .fd-paper-closed-wrap {{
+  display: block;
+  overflow-x: auto;
 }}
+.fd-paper-table {{
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}}
+.fd-paper-table th {{
+  text-align: left;
+  color: #6b7280;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 10px 6px 0;
+  border-bottom: 1px solid #1f2937;
+  white-space: nowrap;
+}}
+.fd-paper-table td {{
+  padding: 6px 10px 6px 0;
+  border-bottom: 1px solid #1f2937;
+  color: #d1d5db;
+  vertical-align: middle;
+  white-space: nowrap;
+}}
+.fd-paper-table th:last-child,
+.fd-paper-table td:last-child {{
+  padding-right: 0;
+}}
+.fd-paper-num {{
+  font-variant-numeric: tabular-nums;
+}}
+.fd-paper-ticker {{
+  background: none;
+  border: 0;
+  color: #e5e7eb;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: 0.04em;
+  padding: 0;
+}}
+.fd-paper-ticker:hover {{ color: #fff; text-decoration: underline; }}
+.fd-paper-side {{ letter-spacing: 0.04em; }}
 .fd-paper-open-row {{
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+  /* table row; keep class for JS observers */
 }}
 .fd-paper-close {{
   color: #fde68a;
@@ -1088,6 +1245,9 @@ body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.03em;
 }}
+.fd-paper-closed-sec {{
+  margin-top: 2px;
+}}
 .fd-paper-closed {{
   margin-top: 4px;
 }}
@@ -1104,11 +1264,10 @@ def strip_js() -> str:
     week_tz = json.dumps(WEEK_TZ_NAME, ensure_ascii=False)
     empty_opens = json.dumps(EMPTY_OPENS, ensure_ascii=False)
     empty_week = json.dumps(EMPTY_WEEK, ensure_ascii=False)
+    empty_closed = json.dumps(EMPTY_CLOSED, ensure_ascii=False)
     open_limit = str(int(OPEN_SHOW_MAX))
     return r"""
 (function () {
-  if (window.__FD_PAPER_BOUND__) return;
-  window.__FD_PAPER_BOUND__ = true;
   var STORAGE = """ + storage + r""";
   var DB_ID = "fd-paper-marks";
   var KIND = """ + kind + r""";
@@ -1119,6 +1278,7 @@ def strip_js() -> str:
   var OPEN_LIMIT = """ + open_limit + r""";
   var EMPTY_OPENS = """ + empty_opens + r""";
   var EMPTY_WEEK = """ + empty_week + r""";
+  var EMPTY_CLOSED = """ + empty_closed + r""";
   var HOME_ID = "fd-paper-home";
   var VIEW = "view-paper";
   var NAV_ID = "fd-nav-paper";
@@ -1128,13 +1288,15 @@ def strip_js() -> str:
   var TICKER_ID = "fd-paper-ticker";
   var NATIVE_VIEWS = """ + json.dumps(list(NATIVE_VIEW_IDS)) + r""";
   var toastTimer = null;
+  var liveMarks = window.__FD_PAPER_LIVE_MARKS__ || {};
+  window.__FD_PAPER_LIVE_MARKS__ = liveMarks;
 
   function $(id) { return document.getElementById(id); }
   function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
   function num(v) {
     if (v == null || v === "") return null;
     if (typeof v === "number") return isFinite(v) && v > 0 ? v : null;
-    var n = parseFloat(String(v).replace(/[, ]/g, ""));
+    var n = parseFloat(String(v).replace(/[$, ]/g, ""));
     return isFinite(n) && n > 0 ? n : null;
   }
   function emptyBook() { return { version: 1, kind: KIND, positions: {}, closed: {} }; }
@@ -1155,20 +1317,59 @@ def strip_js() -> str:
     try { window.localStorage.setItem(STORAGE, JSON.stringify(book || emptyBook())); }
     catch (e) {}
   }
+  function rememberMark(ticker, px) {
+    var n = num(px);
+    var key = shortOf(ticker);
+    if (!n || !key) return n;
+    liveMarks[key] = n;
+    if (ticker && ticker !== key) liveMarks[ticker] = n;
+    return n;
+  }
+  function persistMarks() {
+    var el = $(DB_ID);
+    if (!el) return;
+    var db = {};
+    try { db = JSON.parse(el.textContent || "{}") || {}; } catch (e) { db = {}; }
+    Object.keys(liveMarks).forEach(function (k) {
+      if (liveMarks[k]) db[k] = liveMarks[k];
+    });
+    try { el.textContent = JSON.stringify(db); } catch (e2) {}
+  }
   function marksDb() {
     var el = $(DB_ID);
-    if (!el) return {};
-    try { return JSON.parse(el.textContent || "{}") || {}; }
-    catch (e) { return {}; }
+    var db = {};
+    if (el) {
+      try { db = JSON.parse(el.textContent || "{}") || {}; }
+      catch (e) { db = {}; }
+    }
+    Object.keys(liveMarks).forEach(function (k) {
+      if (liveMarks[k]) db[k] = liveMarks[k];
+    });
+    return db;
+  }
+  function addCards(out, arr) {
+    if (!Array.isArray(arr)) return;
+    for (var i = 0; i < arr.length; i++) out.push(arr[i]);
   }
   function momCards() {
     var mom = window.MOM || {};
-    if (Array.isArray(mom.cards)) return mom.cards;
     var out = [];
-    ["up", "down", "flags", "watch", "outliers", "search"].forEach(function (k) {
-      if (Array.isArray(mom[k])) out = out.concat(mom[k]);
+    addCards(out, mom.cards);
+    ["up", "down", "flags", "watch", "outliers", "search", "mom", "home", "all"].forEach(function (k) {
+      addCards(out, mom[k]);
     });
-    if (Array.isArray(window.MOM_CARDS)) out = out.concat(window.MOM_CARDS);
+    addCards(out, window.MOM_CARDS);
+    addCards(out, window.CARDS);
+    var book = window.BOOK || window.NAMES || {};
+    var names = book.names || (book && !Array.isArray(book) ? book : null);
+    if (names && typeof names === "object" && !Array.isArray(names)) {
+      Object.keys(names).forEach(function (k) {
+        var rec = names[k];
+        if (rec && typeof rec === "object") {
+          out.push(Object.assign({ t: k, ticker: k }, rec));
+        }
+      });
+    }
     return out;
   }
   function findMomCard(ticker) {
@@ -1176,7 +1377,7 @@ def strip_js() -> str:
     var cards = momCards();
     for (var i = 0; i < cards.length; i++) {
       var c = cards[i] || {};
-      if (shortOf(c.t || c.ticker || c.name || c.symbol || "") === want) return c;
+      if (shortOf(c.t || c.ticker || c.d || c.name || c.symbol || "") === want) return c;
     }
     return null;
   }
@@ -1198,14 +1399,20 @@ def strip_js() -> str:
   }
   function markFromCard(card) {
     if (!card) return null;
-    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","mark","mark_px","price","px","last","close","px_close","adj_close","PX_CLOSE"];
+    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","lastPx","pxLast","PxLast","LAST_PX","mark","mark_px","price","px","last","close","px_close","adj_close","PX_CLOSE","last_print","print","trd_px"];
     for (var i = 0; i < keys.length; i++) {
       var v = num(card[keys[i]]);
       if (v) return v;
     }
-    var seriesKeys = ["px_series","prices","closes","last_refresh","refresh_px"];
+    if (card.ohlc && typeof card.ohlc === "object") {
+      var oc = num(card.ohlc.c || card.ohlc.close || card.ohlc.last);
+      if (oc) return oc;
+    }
+    var seriesKeys = ["px_series","prices","closes","px","last_refresh","refresh_px","series","hist"];
     for (var j = 0; j < seriesKeys.length; j++) {
-      var s = seriesLast(card[seriesKeys[j]]);
+      var raw = card[seriesKeys[j]];
+      if (typeof raw !== "object") continue;
+      var s = seriesLast(raw);
       if (s) return s;
     }
     return null;
@@ -1230,20 +1437,45 @@ def strip_js() -> str:
     }
     return null;
   }
+  function harvestAllMarks() {
+    var cards = momCards();
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i] || {};
+      var t = shortOf(c.t || c.ticker || c.d || c.name || c.symbol || "");
+      var m = markFromCard(c);
+      if (t && m) rememberMark(t, m);
+    }
+    var nodes = document.querySelectorAll("article.card, article[data-t], article[data-ticker], .grid .card, [data-px], [data-px-last]");
+    for (var j = 0; j < nodes.length; j++) {
+      var node = nodes[j];
+      var nt = shortOf(node.getAttribute && (node.getAttribute("data-t") || node.getAttribute("data-ticker") || node.getAttribute("data-name") || ""));
+      var nm = markFromNode(node);
+      if (nt && nm) {
+        rememberMark(nt, nm);
+        if (!node.getAttribute("data-px")) node.setAttribute("data-px", String(nm));
+      }
+    }
+    persistMarks();
+    return liveMarks;
+  }
   function markOf(ticker, node, card) {
-    var m = markFromCard(card);
-    if (m) return m;
-    m = markFromNode(node);
-    if (m) return m;
-    var db = marksDb();
     var key = shortOf(ticker);
-    if (db[ticker]) return num(db[ticker]);
-    if (db[key]) return num(db[key]);
-    return markFromCard(findMomCard(ticker || key));
+    var m = markFromCard(card);
+    if (m) return rememberMark(key || ticker, m);
+    m = markFromNode(node);
+    if (m) return rememberMark(key || ticker, m);
+    if (liveMarks[ticker]) return num(liveMarks[ticker]);
+    if (liveMarks[key]) return num(liveMarks[key]);
+    var db = marksDb();
+    if (db[ticker]) return rememberMark(key, db[ticker]);
+    if (db[key]) return rememberMark(key, db[key]);
+    m = markFromCard(findMomCard(ticker || key));
+    if (m) return rememberMark(key || ticker, m);
+    return null;
   }
   function pnlPct(side, entry, mark) {
-    entry = Number(entry); mark = Number(mark);
-    if (!isFinite(entry) || !isFinite(mark) || entry === 0) return null;
+    entry = num(entry); mark = num(mark);
+    if (!entry || !mark) return null;
     if (side === "long") return (mark - entry) / entry * 100;
     if (side === "short") return (entry - mark) / entry * 100;
     return null;
@@ -1251,6 +1483,11 @@ def strip_js() -> str:
   function fmtPct(v) {
     if (v == null || !isFinite(v)) return "—";
     return (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+  }
+  function fmtPx(v) {
+    var n = num(v);
+    if (!n) return "—";
+    return n.toFixed(2);
   }
   function isoNow() { return new Date().toISOString().replace(/\.\d{3}Z$/, "Z"); }
   function dateLabel(v) { return String(v || "").slice(0, 10) || "—"; }
@@ -1417,29 +1654,112 @@ def strip_js() -> str:
     try { if (typeof selectTicker === "function") return selectTicker; } catch (e) {}
     return null;
   }
-  function chipEl(row, bookMark) {
+  function td(text, cls) {
+    var cell = document.createElement("td");
+    if (cls) cell.className = cls;
+    cell.textContent = text;
+    return cell;
+  }
+  function sideEl(side) {
+    var span = document.createElement("span");
+    var s = String(side || "").toLowerCase();
+    span.className = "fd-paper-side";
+    if (s === "long") span.classList.add("fd-paper-up");
+    if (s === "short") span.classList.add("fd-paper-down");
+    span.textContent = s ? s.toUpperCase() : "—";
+    return span;
+  }
+  function retEl(ret) {
+    var span = document.createElement("span");
+    span.className = "fd-paper-num";
+    if (ret != null && isFinite(ret)) span.classList.add(ret >= 0 ? "fd-paper-up" : "fd-paper-down");
+    span.textContent = fmtPct(ret);
+    return span;
+  }
+  function tickerBtn(ticker) {
     var btn = document.createElement("button");
     btn.type = "button";
-    var ticker = shortOf(row.ticker || "");
-    var mark = bookMark;
-    if (mark == null) mark = markOf(ticker, null, findMomCard(ticker));
-    var ret = pnlPct(row.side, row.entry, mark);
-    var entry = Number(row.entry);
-    btn.className = "fd-paper-chip";
-    if (ret != null) btn.classList.add(ret >= 0 ? "fd-paper-up" : "fd-paper-down");
+    btn.className = "fd-paper-ticker";
     btn.setAttribute("data-fd-paper-ticker", ticker);
-    btn.textContent = ticker + " " + String(row.side || "").toUpperCase() + " @ " +
-      (isFinite(entry) ? entry.toFixed(2) : "—") + "  " + fmtPct(ret);
+    btn.textContent = ticker;
     return btn;
   }
-  function closeBtn(ticker) {
+  function closeBtn(ticker, hasMark) {
     var btn = document.createElement("button");
     btn.type = "button";
     btn.className = "fd-paper-btn fd-paper-close";
     btn.setAttribute("data-fd-paper-close", "1");
     btn.setAttribute("data-fd-paper-ticker", ticker);
     btn.textContent = "Close";
+    btn.disabled = !hasMark;
+    btn.title = hasMark ? "Close at mark" : NO_MARK;
     return btn;
+  }
+  function openTableHead() {
+    var thead = document.createElement("thead");
+    var tr = document.createElement("tr");
+    ["Opened", "Ticker", "Side", "Entry", "Mark", "Return %", ""].forEach(function (h) {
+      var th = document.createElement("th");
+      th.textContent = h;
+      tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+    return thead;
+  }
+  function closedTableHead() {
+    var thead = document.createElement("thead");
+    var tr = document.createElement("tr");
+    ["Opened", "Closed", "Ticker", "Side", "Entry", "Exit", "Return %"].forEach(function (h) {
+      var th = document.createElement("th");
+      th.textContent = h;
+      tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+    return thead;
+  }
+  function openRowEl(row) {
+    var ticker = shortOf(row.ticker || "");
+    var mark = markOf(ticker, null, findMomCard(ticker));
+    var hasMark = !!num(mark);
+    var ret = hasMark ? pnlPct(row.side, row.entry, mark) : null;
+    var tr = document.createElement("tr");
+    tr.className = "fd-paper-open-row";
+    tr.setAttribute("data-fd-paper-ticker", ticker);
+    tr.appendChild(td(dateLabel(row.opened_at), "fd-paper-num"));
+    var tcell = document.createElement("td");
+    tcell.appendChild(tickerBtn(ticker));
+    tr.appendChild(tcell);
+    var scell = document.createElement("td");
+    scell.appendChild(sideEl(row.side));
+    tr.appendChild(scell);
+    tr.appendChild(td(fmtPx(row.entry), "fd-paper-num"));
+    tr.appendChild(td(hasMark ? fmtPx(mark) : "—", "fd-paper-num"));
+    var rcell = document.createElement("td");
+    rcell.appendChild(retEl(ret));
+    tr.appendChild(rcell);
+    var ccell = document.createElement("td");
+    ccell.appendChild(closeBtn(ticker, hasMark));
+    tr.appendChild(ccell);
+    return tr;
+  }
+  function closedRowEl(row) {
+    var ticker = shortOf(row.ticker || "");
+    var r = (row.ret_pct != null) ? Number(row.ret_pct) : pnlPct(row.side, row.entry, row.exit);
+    if (r != null && !isFinite(r)) r = null;
+    var tr = document.createElement("tr");
+    tr.setAttribute("data-fd-paper-ticker", ticker);
+    tr.appendChild(td(dateLabel(row.opened_at), "fd-paper-num"));
+    tr.appendChild(td(dateLabel(row.closed_at), "fd-paper-num"));
+    tr.appendChild(td(ticker));
+    var scell = document.createElement("td");
+    scell.appendChild(sideEl(row.side));
+    tr.appendChild(scell);
+    tr.appendChild(td(fmtPx(row.entry), "fd-paper-num"));
+    tr.appendChild(td(fmtPx(row.exit), "fd-paper-num"));
+    var rcell = document.createElement("td");
+    rcell.appendChild(retEl(r));
+    tr.appendChild(rcell);
+    return tr;
   }
   function stripLegacyHome() {
     var host = $(HOME_ID);
@@ -1447,6 +1767,7 @@ def strip_js() -> str:
   }
   function paintTab() {
     stripLegacyHome();
+    harvestAllMarks();
     var opensEl = $(OPENS_ID);
     var weekEl = $(WEEK_ID);
     var closedEl = $(CLOSED_ID);
@@ -1464,15 +1785,14 @@ def strip_js() -> str:
         empty.textContent = EMPTY_OPENS;
         opensEl.appendChild(empty);
       } else {
-        opens.forEach(function (row) {
-          var ticker = shortOf(row.ticker || "");
-          var wrap = document.createElement("div");
-          wrap.className = "fd-paper-open-row";
-          wrap.setAttribute("data-fd-paper-ticker", ticker);
-          wrap.appendChild(chipEl(row));
-          wrap.appendChild(closeBtn(ticker));
-          opensEl.appendChild(wrap);
-        });
+        var table = document.createElement("table");
+        table.className = "fd-paper-table";
+        table.setAttribute("aria-label", "Open paper");
+        table.appendChild(openTableHead());
+        var tbody = document.createElement("tbody");
+        opens.forEach(function (row) { tbody.appendChild(openRowEl(row)); });
+        table.appendChild(tbody);
+        opensEl.appendChild(table);
       }
     }
     if (weekEl) {
@@ -1480,17 +1800,12 @@ def strip_js() -> str:
       weekEl.textContent = scoreLine(sc);
     }
     if (closedEl) {
-      var details = closedEl.closest ? closedEl.closest("details") : null;
-      var wasOpen = details ? details.open : false;
       closedEl.innerHTML = "";
       var closedMap = (book && book.closed) || {};
       var rows = [];
       Object.keys(closedMap).forEach(function (key) {
         var items = closedMap[key] || [];
-        for (var i = 0; i < items.length; i++) {
-          var row = items[i] || {};
-          rows.push(row);
-        }
+        for (var i = 0; i < items.length; i++) rows.push(items[i] || {});
       });
       rows.sort(function (a, b) {
         var ac = String(a.closed_at || ""), bc = String(b.closed_at || "");
@@ -1498,20 +1813,23 @@ def strip_js() -> str:
         var at = String(a.ticker || ""), bt = String(b.ticker || "");
         return at < bt ? -1 : (at > bt ? 1 : 0);
       });
-      for (var j = 0; j < rows.length; j++) {
-        var c = rows[j] || {};
-        var li = document.createElement("li");
-        var r = (c.ret_pct != null) ? Number(c.ret_pct) : pnlPct(c.side, c.entry, c.exit);
-        li.textContent = dateLabel(c.closed_at) + " · " + shortOf(c.ticker || "") + " · " +
-          String(c.side || "").toUpperCase() + " · " + fmtPct(r);
-        closedEl.appendChild(li);
-      }
-      if (details) {
-        var sum = details.querySelector("summary");
-        if (sum) sum.textContent = rows.length ? ("Closed trades (" + rows.length + ")") : "Closed trades";
-        details.open = wasOpen;
+      if (!rows.length) {
+        var emptyC = document.createElement("p");
+        emptyC.className = "fd-paper-home-empty";
+        emptyC.textContent = EMPTY_CLOSED;
+        closedEl.appendChild(emptyC);
+      } else {
+        var ctable = document.createElement("table");
+        ctable.className = "fd-paper-table";
+        ctable.setAttribute("aria-label", "Closed paper");
+        ctable.appendChild(closedTableHead());
+        var cbody = document.createElement("tbody");
+        for (var j = 0; j < rows.length; j++) cbody.appendChild(closedRowEl(rows[j] || {}));
+        ctable.appendChild(cbody);
+        closedEl.appendChild(ctable);
       }
     }
+    syncOpenForm();
   }
   function paintHome() { paintTab(); }
   function hideNativeViews() {
@@ -1576,28 +1894,45 @@ def strip_js() -> str:
   window.__FD_PAPER_HIDE__ = function () { showPaper(false); };
   function kindOf(btn) {
     if (!btn || !btn.getAttribute) return "";
+    if (btn.closest && btn.closest("[data-fd-paper-act], [data-fd-paper-open], [data-fd-paper-close], #" + TICKER_ID + ", #fd-paper-open-form, .fd-paper-ticker, .fd-paper")) return "";
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
-    if (view === "paper" || btn.getAttribute("data-fd-paper-nav") === "1" || btn.id === NAV_ID) return "paper";
+    if (btn.id === NAV_ID || btn.getAttribute("data-fd-paper-nav") === "1") return "paper";
+    if (view === "paper" && btn.tagName === "BUTTON") return "paper";
+    var inNav = !!(btn.closest && btn.closest("#topnav, nav, .topnav"));
     var label = (btn.textContent || "").replace(/\s+/g, " ").trim();
-    if (label === "Paper") return "paper";
+    if (inNav && label === "Paper") return "paper";
     if (btn.id === "refresh" || btn.id === "options-refresh") return "";
-    if (btn.closest && btn.closest("#topnav, nav, .topnav") && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || view)) return "other";
-    if (btn.classList && (btn.classList.contains("nav-btn") || view)) return "other";
+    if (inNav && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || (view && view !== "paper"))) return "other";
     return "";
   }
-  document.addEventListener("click", function (ev) {
-    var t = ev.target && ev.target.closest ? ev.target.closest("button, [data-view], [data-fd-paper-nav]") : ev.target;
+  function isTradeEl(el) {
+    if (!el || !el.closest) return false;
+    return !!(el.closest("[data-fd-paper-act], [data-fd-paper-open], [data-fd-paper-close], #fd-paper-open-form, .fd-paper-ticker, .fd-paper"));
+  }
+  function onNavClick(ev) {
+    if (isTradeEl(ev.target)) return;
+    var t = ev.target && ev.target.closest
+      ? ev.target.closest("#" + NAV_ID + ", [data-fd-paper-nav], #topnav button, nav button, .topnav button, button[data-view]")
+      : ev.target;
+    if (!t || (t.closest && t.closest("#" + VIEW) && !oursOf(t))) return;
     var kind = kindOf(t);
     if (!kind) return;
     if (kind === "paper") {
       ev.preventDefault();
       ev.stopPropagation();
-      if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
       showPaper(true);
       return;
     }
     if (kind === "other") showPaper(false);
-  }, true);
+  }
+  function onDocumentClick(ev) {
+    if (isTradeEl(ev.target)) {
+      onPaperClick(ev);
+      return;
+    }
+    onNavClick(ev);
+  }
+  window.__FD_PAPER_ON_DOC_CLICK__ = onDocumentClick;
   function installSetViewBridge() {
     var orig = window.setView;
     if (typeof orig !== "function" || orig.__fdPaper) return;
@@ -1615,6 +1950,23 @@ def strip_js() -> str:
   function tabTicker() {
     var input = $(TICKER_ID);
     return shortOf(input && input.value);
+  }
+  function syncOpenForm() {
+    var buy = document.querySelector("[data-fd-paper-open='buy']");
+    var sell = document.querySelector("[data-fd-paper-open='sell']");
+    var key = tabTicker();
+    var mark = key ? markOf(key, null, findMomCard(key)) : null;
+    var hasMark = !!num(mark);
+    [buy, sell].forEach(function (btn) {
+      if (!btn) return;
+      if (!key) {
+        btn.disabled = false;
+        btn.title = "Enter a ticker";
+        return;
+      }
+      btn.disabled = !hasMark;
+      btn.title = hasMark ? ((btn.getAttribute("data-fd-paper-open") === "buy" ? "Open long @ " : "Open short @ ") + mark) : NO_MARK;
+    });
   }
   function applyTabTrade(ticker, act) {
     var key = shortOf(ticker);
@@ -1680,8 +2032,7 @@ def strip_js() -> str:
         posEl.classList.remove("fd-paper-up", "fd-paper-down");
       } else {
         var ret = pnlPct(pos.side, pos.entry, mark);
-        var entry = Number(pos.entry);
-        posEl.textContent = String(pos.side || "").toUpperCase() + " @ " + (isFinite(entry) ? entry.toFixed(2) : "—") + "  " + fmtPct(ret);
+        posEl.textContent = String(pos.side || "").toUpperCase() + " @ " + fmtPx(pos.entry) + "  " + fmtPct(ret);
         posEl.classList.toggle("fd-paper-up", ret != null && ret >= 0);
         posEl.classList.toggle("fd-paper-down", ret != null && ret < 0);
       }
@@ -1732,20 +2083,25 @@ def strip_js() -> str:
       applyTabTrade(tabTicker(), openBtn.getAttribute("data-fd-paper-open"));
       return;
     }
-    var closeBtn = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-close]") : null;
-    if (closeBtn) {
+    var closeBtnEl = ev.target && ev.target.closest ? ev.target.closest("[data-fd-paper-close]") : null;
+    if (closeBtnEl) {
       ev.preventDefault();
       ev.stopPropagation();
       if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-      var ct = closeBtn.getAttribute("data-fd-paper-ticker") || "";
+      if (closeBtnEl.disabled) {
+        showToast(closeBtnEl.title || NO_MARK);
+        return;
+      }
+      var ct = closeBtnEl.getAttribute("data-fd-paper-ticker") || "";
       var bookC = loadBook();
       var posC = (bookC.positions || {})[shortOf(ct)];
       var actC = posC && posC.side === "short" ? "buy" : "sell";
       applyTabTrade(ct, actC);
       return;
     }
-    var chip = ev.target && ev.target.closest ? ev.target.closest("#" + VIEW + " [data-fd-paper-ticker]") : null;
-    if (chip && !chip.getAttribute("data-fd-paper-close") && !chip.getAttribute("data-fd-paper-act")) {
+    var chip = ev.target && ev.target.closest ? ev.target.closest("#" + VIEW + " .fd-paper-ticker, #" + VIEW + " [data-fd-paper-ticker]") : null;
+    if (chip && !chip.getAttribute("data-fd-paper-close") && !chip.getAttribute("data-fd-paper-act") && !chip.getAttribute("data-fd-paper-open")) {
+      if (chip.tagName === "TR" || chip.tagName === "TABLE") return;
       ev.preventDefault();
       ev.stopPropagation();
       if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
@@ -1803,6 +2159,7 @@ def strip_js() -> str:
     if (painting) return;
     painting = true;
     try {
+      harvestAllMarks();
       var nodes = document.querySelectorAll("article.card, article[data-t], article[data-ticker], .grid .card, .grid.dense .card");
       for (var i = 0; i < nodes.length; i++) hydrateCard(nodes[i], null);
       paintTab();
@@ -1864,12 +2221,12 @@ def strip_js() -> str:
     wrapCardHTML();
     installSetViewBridge();
     stripLegacyHome();
+    harvestAllMarks();
     paintAll();
     observe();
-    if (!window.__FD_PAPER_CLICK__) {
-      window.__FD_PAPER_CLICK__ = true;
-      document.addEventListener("click", onPaperClick, true);
-    }
+    bindOpenForm();
+  }
+  function bindOpenForm() {
     var form = $("fd-paper-open-form");
     if (form && !form.__fdPaperBound) {
       form.__fdPaperBound = true;
@@ -1878,6 +2235,13 @@ def strip_js() -> str:
         applyTabTrade(tabTicker(), "buy");
       });
     }
+    var input = $(TICKER_ID);
+    if (input && !input.__fdPaperBound) {
+      input.__fdPaperBound = true;
+      input.addEventListener("input", syncOpenForm);
+      input.addEventListener("change", syncOpenForm);
+    }
+    syncOpenForm();
   }
   window.__FD_PAPER_APPLY__ = applyClick;
   window.__FD_PAPER_PNL__ = pnlPct;
@@ -1888,6 +2252,15 @@ def strip_js() -> str:
   window.__FD_PAPER_PAINT_TAB__ = paintTab;
   window.__FD_PAPER_SCORECARD__ = weekScorecard;
   window.__FD_PAPER_WEEK_START__ = weekStartMs;
+  window.__FD_PAPER_HARVEST__ = harvestAllMarks;
+  window.__FD_PAPER_ON_DOC_CLICK__ = onDocumentClick;
+  if (!window.__FD_PAPER_DOC_CLICK__) {
+    window.__FD_PAPER_DOC_CLICK__ = true;
+    document.addEventListener("click", function (ev) {
+      if (typeof window.__FD_PAPER_ON_DOC_CLICK__ === "function") window.__FD_PAPER_ON_DOC_CLICK__(ev);
+    }, true);
+  }
+  window.__FD_PAPER_BOUND__ = true;
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", install);
   else install();
   setTimeout(install, 0);
@@ -2138,16 +2511,19 @@ def ensure_embedded(html_text: str, marks: Mapping[str, Any] | None = None) -> s
 
     ``marks=None`` still injects JS/CSS so Buy/Sell hydrate from ``MOM.cards`` /
     localStorage after Refresh. Pass ``marks_db(cards, book=book)`` on a write.
-    ``#view-paper`` is a top-nav tab (not a home chrome strip) and reads
-    ``fd-paper-book``. Leftover ``#fd-paper-home`` is stripped.
+    Harvests existing ``#fd-paper-marks`` / ``data-px`` so a Refresh cannot
+    wipe live card prints with an empty enrich map. ``#view-paper`` is a
+    top-nav tab (not a home chrome strip) and reads ``fd-paper-book``.
+    Leftover ``#fd-paper-home`` is stripped.
     """
     text = html_text or ""
+    harvested = harvest_html_marks(text)
+    merged = merge_marks(harvested, marks)
     text = _strip_home_host(text)
     text = _ensure_nav(text)
     text = _ensure_css(text)
     text = _patch_setview(text)
     text = _ensure_panes(text, replace=True)
-    if marks is not None or not re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', text, re.I):
-        text = _ensure_db(text, marks if marks is not None else {})
+    text = _ensure_db(text, merged)
     text = _ensure_js(text)
     return text
