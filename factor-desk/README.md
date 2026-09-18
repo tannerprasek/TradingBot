@@ -33,6 +33,7 @@ factor-desk/
   book_delta.py          # since-last-Refresh chip strip
   desk_hitch.py          # Desk Analyst hitch pills
   paper_trade.py         # paper Buy/Sell on dense cardHTML cards + Home strip
+  s_score.py             # Experimental residual S-score (Avellaneda–Lee on SparsePCA residuals)
   chart_marks.py         # chart tag-trigger polish + streak begin/end
   add_server.py          # sidecar HTTP on :8765 — Refresh + intraday=1
   desk_dash.py           # dashboard assembly + write_combined
@@ -56,5 +57,6 @@ GICS sector chips read `gics_sector_name` already on the enrich file; optional o
 Home cards: momentum streak vs score 5 (`↑12d>5` / `↓8d<5`). See [docs/MOM-STREAK.md](docs/MOM-STREAK.md).
 Breakout / Breakdown tabs (mid-score climbers / crackers), a since-last-Refresh delta strip, and optional Desk Analyst hitch pills: [docs/BREAKOUT-BREAKDOWN.md](docs/BREAKOUT-BREAKDOWN.md).
 Paper Buy/Sell on dense MOM cards plus a Home open-book / week-scorecard strip (localStorage, 1 unit, no brokerage): [docs/PAPER-TRADE.md](docs/PAPER-TRADE.md).
+Experimental residual S-score (Avellaneda–Lee layer on existing SparsePCA residuals; pointers only, own top-nav tab): [docs/S-SCORE.md](docs/S-SCORE.md).
 
 Desktop copies `dapi_enrich.py` into `C:\Users\MLP\Desktop\factorbook` and merges the thin hooks. Remaining ingest/troughing modules stay Desktop-owned until synced.

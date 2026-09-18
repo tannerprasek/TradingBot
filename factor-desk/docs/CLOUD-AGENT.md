@@ -44,6 +44,10 @@ Mid-score climbers / crackers as home tabs (not maxed MOM). `breakout.ensure_emb
 
 Generic Buy/Sell on dense `cardHTML` cards plus a Home paper-book strip (`#fd-paper-home` next to BOOK / baseline). Paper only, 1 unit, localStorage `fd-paper-book` only. Same-side click is a no-op + toast (does not flip). Week scorecard is closed trades since Monday 00:00 America/Edmonton. `paper_trade.ensure_embedded` on every HTML write. Recopy `paper_trade.py`; do not wholesale replace live `desk_dash.py`. See [PAPER-TRADE.md](PAPER-TRADE.md).
 
+## Experimental residual S-score
+
+Avellaneda–Lee S-score + κ on the **existing** SparsePCA residual panel (not a new PCA engine). Own top-nav **Experimental** tab. Pointers only — no auto-enter, no paper auto-open, no paper Sharpes as KPIs. PIT is **not** claimed. `s_score.ensure_embedded` on every HTML write. Recopy `s_score.py`; do not wholesale replace live `desk_dash.py`. See [S-SCORE.md](S-SCORE.md).
+
 ## Momentum streak tag
 
 Home UP/DOWN cards: consecutive trading-day streak of the card momentum rank vs **5**. Fields `mom_score` / `momentum_score` first; else on-disk hist / prices 13-window count (0–13). Exactly 5 → streak 0, tag `=5`. Chart overlay marks streak start and open end without burying the price series; existing tag-trigger labels are clustered. See [MOM-STREAK.md](MOM-STREAK.md).

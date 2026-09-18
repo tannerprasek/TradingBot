@@ -582,4 +582,83 @@ Do **not** copy generated `factorbook.html` or a later `paper_book.json`. After 
 4. Week scorecard counts closes since Monday 00:00 America/Edmonton; empty copy is `no closed yet this week`.
 5. Reload / Refresh keeps the book (localStorage). Mom Up/Down chrome is otherwise unchanged.
 
+---
+
+## 11) Experimental residual S-score (Avellaneda–Lee on SparsePCA residuals)
+
+Copy `s_score.py` next to live `desk_dash.py`. **Do not wholesale replace** live `desk_dash.py` (FLAGS / WATCH / MOM chrome stays; home still opens FLAGS→WATCH→MOM). **Not** a new PCA engine. **Not** a FLAGS rebrand. Pointers only — no auto-enter, no paper auto-open. Do **not** show A–L paper Sharpes as desk KPIs.
+
+Optional `s_score` pill on live MOM cards is **off** (`SHOW_S_SCORE_PILL_ON_MOM = False`). Pills live on **Experimental cards only**.
+
+Also recopy `breakout.py` (hides `#view-experimental` when Breakout/Breakdown is selected so the Experimental pane cannot leak onto those tabs).
+
+### Residual panel (confirm on Desktop)
+
+Refresh / `write_combined` discovers, in order:
+
+1. Residual **history**: `v0_residuals.csv`, `residuals.csv`, `residual_panel.json` / `.csv`, `sparse_pca_residuals.csv`, `clean/…`
+2. Else reconstruct ε from `prices_long.csv` (or `returns*.csv`) **plus** existing SparsePCA loadings (`sparse_pca_loadings.csv`, `pca_loadings.csv`, `loadings.csv`, `v0_loadings.csv`, …) and optional membership
+3. `residual_last.csv` / `.json` is appended as **one day** so a panel can accumulate — it is **not** enough to fit κ / S-score by itself
+
+Writes gitignored `residual_panel.json`. `residual_20d` (beta vs SPY) is a different engine and is **not** used.
+
+**PIT is not claimed.** Full-sample SparsePCA membership/loadings are look-ahead. The Experimental banner says `PIT not claimed` plus `full_sample_loadings` / `unknown_sparsepca_fit` / `residual_last_only`. Prefer a rolling window on Desktop; do not silently stamp PIT.
+
+Literature defaults (labeled experimental, not a proven edge): open `|s|~1.25`, close `~0.75`, reject slow κ (half-life > 30 trading days).
+
+### End of live `write_combined` / `write_dash.write`
+
+After the existing GICS / streak / chart / breakout / hitch / paper `ensure_embedded` tail:
+
+```python
+import s_score
+
+# Experimental-only. Materializes residual_panel.json when history is thin.
+ss_ranked = s_score.rank_book(cards, root=PATHS["fb_root"], write_panel_file=True)
+
+html = gics_filter.ensure_embedded(html, db)
+html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
+html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
+html = breakout.ensure_embedded(html, ranked)
+html = book_delta.ensure_embedded(html, delta)
+html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
+html = paper_trade.ensure_embedded(html, paper_marks)
+html = s_score.ensure_embedded(html, ss_ranked)  # Experimental tab; does not wrap cardHTML
+# dest.write_text(html)
+```
+
+`ensure_embedded` injects a top-nav **Experimental** button (after Options, else after Breakdown), `#view-experimental` + `#sscore-grid` dense cards (ticker, S-score, κ/half-life, fade-high / buy-low, entry/exit bands), `#fd-sscore-db`, and JS that patches live `setView` / `hideAllPanes` with `|experimental`. It does **not** wrap `cardHTML`, so production paper Buy/Sell chrome is unchanged.
+
+Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping live `desk_dash.py`, paste the tail. Recopy `s_score.py` after this drop-in.
+
+Optional sidecar paste in live `run_rebuild_stage` (non-fatal, not a DAPI stage) — `write_combined` already materializes the panel, so this is only a progress label:
+
+```python
+# after run_v0, before write_dash
+try:
+    import s_score
+    s_score.materialize_panel(root=PATHS["fb_root"], write=True)
+except Exception:
+    logging.getLogger("add_server").exception("s_score panel non-fatal")
+```
+
+### Desktop checklist
+
+| Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
+| --- | --- |
+| `s_score.py` | **new** — Experimental S-score tab + residual panel writer |
+| `breakout.py` | **recopy** — hide `#view-experimental` from Breakout/Breakdown |
+| `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
+| `docs/S-SCORE.md` | optional, for the desk |
+
+Do **not** copy generated `factorbook.html` or `residual_panel.json`. After drop-in, Refresh once and confirm:
+
+1. Home still opens FLAGS / WATCH / MOM (Experimental is a separate tab after Options).
+2. **Experimental** shows residual S-score ranks (or an honest empty reason if the panel is thin / missing).
+3. Production FLAGS / WATCH / MOM / Breakout / paper Buy/Sell chrome is unchanged; no `s_score` pill on live MOM cards.
+4. Banner states **experimental**, panel depth × names, source, and **PIT not claimed**.
+5. No Sharpe numbers anywhere on the desk.
+
+Suggested Desktop sync path: `factor-desk/*.py` → `C:\Users\MLP\Desktop\factorbook\`.
+
 

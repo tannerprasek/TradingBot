@@ -105,6 +105,7 @@ NATIVE_VIEW_IDS: tuple[str, ...] = (
     "search-pane",
     VIEW_BREAKOUT_ID,
     VIEW_BREAKDOWN_ID,
+    "view-experimental",
 )
 _ALLOWLIST_RE = re.compile(
     r"home\|mom-up\|mom-down\|outliers\|options(?:\|sectors)?(?!\|breakout)",
@@ -135,6 +136,8 @@ _VIEW_SEL_RE = re.compile(
     r"(?![^\"';)]*(?:#view-breakout|#view-breakdown))",
     re.I,
 )
+# Experimental pane is a sibling tab (s_score.py). Hiding it from Breakout
+# is a no-op until that pane exists.
 _DIV_TOKEN_RE = re.compile(r"<\s*(/)?\s*div\b([^>]*)>", re.I)
 
 _HOP_LEADER_RE = re.compile(r"\b(hop|leader)\b", re.I)
@@ -961,7 +964,7 @@ def _patch_hideall_panes(html_text: str) -> str:
         return text
     snippet = (
         f"{HIDEALL_MARKER}"
-        '["view-breakout","view-breakdown"].forEach(function(id){'
+        '["view-breakout","view-breakdown","view-experimental"].forEach(function(id){'
         'var el=document.getElementById(id);if(el)el.classList.add("hide");});'
     )
     return _HIDEALL_FN_RE.sub(lambda m: m.group(1) + snippet, text, count=1)
@@ -971,11 +974,11 @@ def _patch_view_id_lists(html_text: str) -> str:
     """Append our view ids to live hideAllPanes arrays / querySelectorAll lists."""
     text = html_text or ""
     text = _VIEW_ID_ARRAY_RE.sub(
-        r'\1,"view-breakout","view-breakdown"\2',
+        r'\1,"view-breakout","view-breakdown","view-experimental"\2',
         text,
     )
     text = _VIEW_SEL_RE.sub(
-        r"\1, #view-breakout, #view-breakdown",
+        r"\1, #view-breakout, #view-breakdown, #view-experimental",
         text,
     )
     return text

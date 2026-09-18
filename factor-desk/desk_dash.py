@@ -27,6 +27,7 @@ import breakout  # noqa: E402
 import book_delta  # noqa: E402
 import desk_hitch  # noqa: E402
 import paper_trade  # noqa: E402
+import s_score  # noqa: E402
 
 LOG = logging.getLogger("desk_dash")
 HTML_NAME = "factorbook.html"
@@ -67,6 +68,7 @@ NAV_HTML = f"""
   <button type="button" class="btn nav-btn" id="fd-nav-breakdown" data-view="breakdown" data-fd-breakdown="1">Breakdown</button>
   <button type="button" class="nav-btn" data-view="outliers">Outliers</button>
   <button type="button" class="nav-btn" data-view="options">Options</button>
+  <button type="button" class="btn nav-btn" id="fd-nav-experimental" data-view="experimental" data-fd-sscore="1">Experimental</button>
 </nav>
 """.strip()
 
@@ -683,6 +685,7 @@ def render_html(
     chart_map = chart_marks.chart_db(cards)
     hitch_map = desk_hitch.hitch_db(cards, hitch_index)
     paper_marks = paper_trade.marks_db(cards, book=book)
+    ss_ranked = s_score.rank_book(cards, root=root, write_panel_file=True)
     gics_note = ""
     if rows and not sectors:
         gics_note = (
@@ -734,6 +737,7 @@ def render_html(
     {book_delta.strip_css()}
     {desk_hitch.strip_css()}
     {paper_trade.strip_css()}
+    {s_score.strip_css()}
   </style>
 </head>
 <body>
@@ -746,6 +750,7 @@ def render_html(
   {gics_note}
   {empty}
   {breakout.panes_html(ranked)}
+  {s_score.panes_html(ss_ranked)}
   <div class="grid">
     {"".join(rows)}
   </div>
@@ -756,6 +761,7 @@ def render_html(
   {book_delta.embed_db(delta)}
   {desk_hitch.embed_db(hitch_map)}
   {paper_trade.embed_db(paper_marks)}
+  {s_score.embed_db(ss_ranked)}
   <script>
   {gics_filter.strip_js()}
   </script>
@@ -775,6 +781,7 @@ def render_html(
     html_text = book_delta.ensure_embedded(html_text, delta)
     html_text = desk_hitch.ensure_embedded(html_text, hitch_map)
     html_text = paper_trade.ensure_embedded(html_text, paper_marks)
+    html_text = s_score.ensure_embedded(html_text, ss_ranked)
     return _ensure_options_refresh_ui(html_text)
 
 
@@ -810,6 +817,7 @@ def write_combined(
     delta = book_delta.diff_snapshots(book_delta.load_snapshot(root=base), snap)
     hitch_map = desk_hitch.hitch_db(cards, hitch_index)
     paper_marks = paper_trade.marks_db(cards, book=book)
+    ss_ranked = s_score.rank_book(cards, root=base, write_panel_file=True)
 
     existing = ""
     if html is not None:
@@ -845,6 +853,7 @@ def write_combined(
     text = book_delta.ensure_embedded(text, delta)
     text = desk_hitch.ensure_embedded(text, hitch_map)
     text = paper_trade.ensure_embedded(text, paper_marks)
+    text = s_score.ensure_embedded(text, ss_ranked)
     dest.write_text(text, encoding="utf-8")
     try:
         book_delta.write_snapshot(snap, root=base)
