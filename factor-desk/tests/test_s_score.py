@@ -349,6 +349,7 @@ function setView(v) {
         self.assertIn("/*fd-ss-setview*/", out)
         self.assertIn("fd-ss-on", out)
         self.assertIn('removeAttribute("data-fd-ss")', out)
+        self.assertIn('home.classList.remove("hide")', ss.strip_js())
 
     def test_write_combined_patches_live_html(self) -> None:
         body = """<!DOCTYPE html>

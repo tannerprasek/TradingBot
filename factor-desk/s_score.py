@@ -1694,6 +1694,8 @@ def strip_js() -> str:
       pane.classList.remove("fd-ss-on");
       pane.setAttribute("hidden", "hidden");
     }}
+    var home = $("home");
+    if (home) home.classList.remove("hide");
     document.body.removeAttribute("data-fd-ss");
     if (document.body.getAttribute("data-view") === "experimental") {{
       document.body.removeAttribute("data-view");
