@@ -513,7 +513,7 @@ Pills (`DA·A` / `DA·B` / `DA·C` / `DA`) appear when a recent `YYYY-MM-DD-*.md
 
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
-| `card_render.py` | **new / recopy** — wrap live `cardHTML`; portable chip CSS on `article.card`; `__FD_RENDER_CARD__` / `__FD_RENDER_ROW__` |
+| `card_render.py` | **recopy** — wrap live `cardHTML`; portable chip CSS; ATR% uses `fmtNum(m.atr_pct,1)+"%"` (`atr_pct` is already percent points — do not `fmtPct` it) |
 | `breakout.py` | **recopy** — tabs only rank; grids call `__FD_RENDER_ROW__` (no stub `fd-bb-card`, no why dump box) |
 | `book_delta.py` | new — since-last-Refresh strip |
 | `desk_hitch.py` | new — DA hitch pills |
@@ -522,6 +522,8 @@ Pills (`DA·A` / `DA·B` / `DA·C` / `DA`) appear when a recent `YYYY-MM-DD-*.md
 | gitignore `desk_snapshot.json` | local, like `mom_score_hist.json` |
 
 Do **not** copy generated `factorbook.html`, `desk_snapshot.json`, `mom_score_hist.json`, or the ideas markdown. After drop-in, Refresh once and confirm Breakout / Breakdown sit beside Momentum Down, clicking Breakout shows the same dense card grid as Momentum Up (full card chrome, **chip tags** not a cramped gray matrix, **band / Δ chips** not a brown why dump, few names), `#fd-card-js` + `#fd-breakout-db` are filled, `#fd-book-delta` shows `baseline set` on the first write, hitch pills appear only when `FACTOR_DESK_IDEAS_DIR` (or `ideas/`) has dated notes, and no skinny `#fd-bb-*` list bleeds onto other tabs.
+
+**CoS / live HTML:** `C:\Users\MLP\Desktop\factorbook.html` (next to live `desk_dash.py`). `card_render.ensure_embedded` patches the live `cardHTML` metrics row in that file: `fmtPct(m.atr_pct,1)` → `(fmtNum(m.atr_pct,1)+"%")` because `metrics.atr_pct` is already percent points (~1.5–4.8). `r20_pct` stays `fmtPct` (fraction ×100). RS63 stays `fmtNum`. Mom and Breakout share that `cardHTML`, so both should show ATR% ~2–5, not ~200+. Recopy `card_render.py`; **do not wholesale replace** live `desk_dash.py`.
 
 Suggested Desktop sync paths:
 

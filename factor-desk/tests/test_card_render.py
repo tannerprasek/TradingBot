@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -148,6 +150,103 @@ class EmbedTests(unittest.TestCase):
                 self.assertGreater(paper_at, card_at)
             ast_ok = compile(Path(desk_dash.__file__).read_text(encoding="utf-8"), desk_dash.__file__, "exec")
             self.assertIsNotNone(ast_ok)
+
+
+LIVE_CARDHTML = """
+<script>
+function fmtNum(x,d){d=d==null?1:d;return (+x).toFixed(d);}
+function fmtPct(x,d){d=d==null?1:d;return ((+x)*100).toFixed(d)+"%";}
+function cardHTML(c){
+  var m=c.metrics||{};
+  return '<article class="card" data-t="'+(c.t||'')+'">'
+    +'<div class="stats">'
+    +'<span>R20 '+fmtPct(m.r20_pct,1)+'</span>'
+    +'<span>RS63 '+fmtNum(m.rs63,1)+'</span>'
+    +'<span>ATR% '+fmtPct(m.atr_pct,1)+'</span>'
+    +'</div></article>';
+}
+</script>
+"""
+
+
+class AtrPctFmtTests(unittest.TestCase):
+    def test_percent_points_not_multiplied(self) -> None:
+        self.assertEqual(cr.fmt_atr_pct(2.5, 1), "2.5%")
+        self.assertEqual(cr.fmt_atr_pct(4.8, 1), "4.8%")
+        self.assertEqual(cr.fmt_atr_pct(1.5, 1), "1.5%")
+
+    def test_fraction_still_times_100(self) -> None:
+        self.assertEqual(cr.fmt_atr_pct(0.025, 1), "2.5%")
+        self.assertEqual(cr.fmt_atr_pct(-0.02, 1), "-2.0%")
+
+    def test_patch_rewrites_atr_keeps_r20_and_rs63(self) -> None:
+        src = LIVE_CARDHTML
+        out = cr.patch_live_atr_fmt(src)
+        self.assertIn("fmtPct(m.r20_pct,1)", out)
+        self.assertIn("fmtNum(m.rs63,1)", out)
+        self.assertNotIn("fmtPct(m.atr_pct", out)
+        self.assertIn('(fmtNum(m.atr_pct,1)+"%")', out)
+        again = cr.patch_live_atr_fmt(out)
+        self.assertEqual(again.count('(fmtNum(m.atr_pct,1)+"%")'), 1)
+        self.assertEqual(again.count("fmtPct(m.r20_pct,1)"), 1)
+
+    def test_ensure_embedded_patches_live_cardhtml(self) -> None:
+        html = "<!DOCTYPE html><html><head></head><body>" + LIVE_CARDHTML + "</body></html>"
+        out = cr.ensure_embedded(html)
+        self.assertIn("fmtPct(m.r20_pct,1)", out)
+        self.assertIn("fmtNum(m.rs63,1)", out)
+        self.assertNotIn("fmtPct(m.atr_pct", out)
+        self.assertIn('(fmtNum(m.atr_pct,1)+"%")', out)
+        self.assertIn("function fmtAtrPct", out)
+        self.assertIn("window.fmtAtrPct", out)
+        self.assertIn("Math.abs(x) < 1", out)
+        self.assertIn("ATR%", out)
+
+    def test_live_eval_mom_and_breakout_same_name(self) -> None:
+        """Mom + Breakout share cardHTML: ATR% ~2–5, not ~200+."""
+        patched = cr.patch_live_atr_fmt(LIVE_CARDHTML)
+        self.assertNotIn("fmtPct(m.atr_pct", patched)
+        card = {
+            "t": "SPCX",
+            "metrics": {"r20_pct": 0.12, "rs63": 1.4, "atr_pct": 2.5},
+        }
+        js = (
+            patched.replace("<script>", "").replace("</script>", "")
+            + "\nvar c="
+            + json.dumps(card)
+            + ";\nvar h=cardHTML(c);\nprocess.stdout.write(h);\n"
+        )
+        try:
+            proc = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=10)
+        except FileNotFoundError:
+            self.skipTest("node not installed")
+        if proc.returncode != 0 and "not found" in (proc.stderr or "").lower():
+            self.skipTest("node not installed")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        html = proc.stdout
+        self.assertIn("R20 12.0%", html)
+        self.assertIn("RS63 1.4", html)
+        self.assertIn("ATR% 2.5%", html)
+        self.assertNotRegex(html, r"ATR%\s*250")
+        self.assertNotIn("250.0%", html)
+        self.assertNotIn("480", html)
+        card2 = {
+            "t": "SPCX",
+            "metrics": {"r20_pct": -0.03, "rs63": 0.4, "atr_pct": 4.8},
+        }
+        js2 = (
+            patched.replace("<script>", "").replace("</script>", "")
+            + "\nvar c="
+            + json.dumps(card2)
+            + ";\nvar h=cardHTML(c);\nprocess.stdout.write(h);\n"
+        )
+        proc2 = subprocess.run(["node", "-e", js2], capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        html2 = proc2.stdout
+        self.assertIn("R20 -3.0%", html2)
+        self.assertIn("RS63 0.4", html2)
+        self.assertIn("ATR% 4.8%", html2)
+        self.assertNotIn("480.0%", html2)
 
 
 if __name__ == "__main__":
