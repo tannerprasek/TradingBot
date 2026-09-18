@@ -38,7 +38,7 @@ Home filter-strip chips (G1–G12 language). Read `gics_sector_name` from enrich
 
 ## Breakout / Breakdown + book delta + hitch
 
-Mid-score climbers / crackers as home tabs (not maxed MOM). `breakout.ensure_embedded` + `book_delta.ensure_embedded` + `desk_hitch.ensure_embedded` on every HTML write. See [BREAKOUT-BREAKDOWN.md](BREAKOUT-BREAKDOWN.md). Do **not** reintroduce a Sectors tab.
+Mid-score climbers / crackers as home tabs (not maxed MOM). `card_render.ensure_embedded` (shared MOM `cardHTML` wrap) then `breakout.ensure_embedded` + `book_delta.ensure_embedded` + `desk_hitch.ensure_embedded` on every HTML write. Breakout/Breakdown/Outliers must mount the same portable card — tabs only filter/rank. See [BREAKOUT-BREAKDOWN.md](BREAKOUT-BREAKDOWN.md). Do **not** reintroduce a Sectors tab. Recopy `card_render.py` and `breakout.py`; do not wholesale replace live `desk_dash.py`.
 
 ## Paper trading
 
