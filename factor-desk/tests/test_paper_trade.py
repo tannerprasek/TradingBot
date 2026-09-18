@@ -181,9 +181,10 @@ MOM.cards = window.MOM.cards;
         self.assertEqual(db["PWR"], 555.88)
         js = pt.strip_js()
         self.assertIn("fd-paper-table", js)
-        self.assertIn("Opened", js)
+        self.assertIn("Date", js)
         self.assertIn("harvestAllMarks", js)
         self.assertIn("harvestPxBy", js)
+        self.assertIn("markFromPxWorld", js)
         self.assertIn("MARK_KEY_NORM", js)
         self.assertIn("markFromPxPayload", js)
         self.assertIn("ensureHostById", js)
@@ -236,7 +237,7 @@ MOM.cards = window.MOM.cards;
         self.assertIn("harvestPxBy", js)
         self.assertIn("markFromPxByRec", js)
         self.assertIn("fd-paper-table", js)
-        self.assertIn('"Opened"', js)
+        self.assertIn('"Date"', js)
 
     def test_marks_db_harvests_html_when_cards_empty(self) -> None:
         html = (
@@ -249,6 +250,73 @@ MOM.cards = window.MOM.cards;
         self.assertEqual(db["PWR"], 555.88)
         self.assertNotIn("LAST", db)
         self.assertNotIn("CARDS", db)
+
+    def test_refresh_rebuilds_marks_from_px_or_equals(self) -> None:
+        """Live desk uses window.px = window.px || {by:...}; empty #fd-paper-marks."""
+        html = """<!DOCTYPE html><html><head></head><body>
+<nav><button data-view="options">Options</button></nav>
+<div id="view-breakout" class="view-pane">BB-KEEP</div>
+<div id="view-experimental" class="view-pane">EX-KEEP</div>
+<div id="view-paper" data-view="paper">
+  <div class="fd-paper-open-row"><button class="fd-paper-chip">CNH LONG @ 13.63 -100.00%</button></div>
+</div>
+<script>
+window.px = window.px || { by: {
+  CNH: { b: 13.5, o: 13.4, p: [13.1, 13.63], r: 0.012, h: 13.7, hi: 13.8, last: 0.012 },
+  PWR: { b: 600, o: 610, p: [600, 629.65], r: -0.02, last: -0.02 }
+} };
+window.MOM = { cards: [{ t: "CNH", last: 0.012 }, { t: "PWR", last: -0.02 }] };
+</script>
+<script type="application/json" id="fd-paper-marks">{}</script>
+</body></html>"""
+        db = pt.marks_db([], book=None, html=html)
+        self.assertEqual(db["CNH"], 13.63)
+        self.assertEqual(db["PWR"], 629.65)
+        self.assertNotEqual(db.get("CNH"), 0.012)
+        out = pt.ensure_embedded(html, {})
+        blob = re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(blob)
+        filled = json.loads(blob.group(1))
+        self.assertEqual(filled["CNH"], 13.63)
+        self.assertEqual(filled["PWR"], 629.65)
+        self.assertIn("fd-paper-table", out)
+        self.assertIn('"Date"', out)
+        self.assertIn('"Ticker"', out)
+        self.assertIn('"Side"', out)
+        self.assertIn('"Entry"', out)
+        self.assertIn('"Mark"', out)
+        self.assertIn('"Return %"', out)
+        self.assertIn("no open paper", out)
+        self.assertNotIn("CNH LONG @ 13.63 -100.00%", out)
+        self.assertIn("BB-KEEP", out)
+        self.assertIn("EX-KEEP", out)
+        self.assertIn('id="view-breakout"', out)
+        self.assertIn('id="view-experimental"', out)
+        self.assertIn("markFromPxWorld", out)
+        again = pt.ensure_embedded(out, {})
+        again_db = json.loads(re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            again,
+            re.I | re.S,
+        ).group(1))
+        self.assertEqual(again_db["CNH"], 13.63)
+        self.assertEqual(again.count('id="view-breakout"'), 1)
+        self.assertEqual(again.count('id="view-experimental"'), 1)
+        self.assertEqual(again.count('id="view-paper"'), 1)
+
+    def test_nested_brace_px_rec_still_uses_p_last(self) -> None:
+        html = (
+            "<script>window.px.by = { "
+            "CNH: { meta: { src: 'dapi' }, p: [12, 13.63], last: 0.012 } "
+            "};</script>"
+            '<script type="application/json" id="fd-paper-marks">{}</script>'
+        )
+        db = pt.marks_db([], book=None, html=html)
+        self.assertEqual(db["CNH"], 13.63)
 
     def test_ensure_embedded_strips_stale_chip_script(self) -> None:
         html = """<!DOCTYPE html><html><head></head><body>
@@ -292,7 +360,7 @@ function chipEl(row){ var b=document.createElement("button"); b.className="fd-pa
         out = pt.ensure_embedded(html, {})
         self.assertIn('id="fd-paper-opens"', out)
         self.assertIn("fd-paper-table", out)
-        self.assertIn('"Opened"', pt.strip_js())
+        self.assertIn('"Date"', pt.strip_js())
         self.assertNotIn("CNH LONG @ 13.63 -100.00%", out)
         self.assertEqual(json.loads(re.search(
             r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
@@ -412,7 +480,9 @@ class PaperTabTests(unittest.TestCase):
         html = pt.panes_html(book, {f"T{i:02d}": 11.0 for i in range(15)})
         self.assertNotIn("more 3", html)
         self.assertIn("fd-paper-table", html)
-        self.assertIn(">Opened</th>", html)
+        self.assertIn(">Date</th>", html)
+        self.assertIn(">Ticker</th>", html)
+        self.assertIn(">Side</th>", html)
         self.assertIn(">Mark</th>", html)
         self.assertIn(">Return %</th>", html)
         self.assertEqual(html.count("data-fd-paper-ticker="), 45)  # row + ticker + Close per open
@@ -438,6 +508,23 @@ class PaperTabTests(unittest.TestCase):
         self.assertIn("+10.00%", live)  # short also profits when mark < entry
         self.assertIn("14.99", live)
         self.assertNotIn("disabled", live.split("CNH", 1)[-1].split("</tr>", 1)[0])
+
+    def test_closed_table_is_html_table(self) -> None:
+        book = pt.empty_book()
+        pt.apply_click(book, "CNH", "buy", 13.63, when="2026-09-17T00:00:00Z")
+        pt.apply_click(book, "CNH", "sell", 14.99, when="2026-09-18T00:00:00Z")
+        html = pt.panes_html(book, {})
+        self.assertIn('aria-label="Closed paper"', html)
+        self.assertIn(">Date</th>", html)
+        self.assertIn(">Closed</th>", html)
+        self.assertIn(">Ticker</th>", html)
+        self.assertIn(">Side</th>", html)
+        self.assertIn(">Entry</th>", html)
+        self.assertIn(">Exit</th>", html)
+        self.assertIn(">Return %</th>", html)
+        self.assertIn("fd-paper-table", html)
+        self.assertIn("CNH", html)
+        self.assertNotIn("-100.00%", html)
 
     def test_ensure_embedded_injects_paper_tab_not_chrome_strip(self) -> None:
         html = """<!DOCTYPE html><html><head></head><body>

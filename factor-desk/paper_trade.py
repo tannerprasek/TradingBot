@@ -29,7 +29,7 @@ Paper tab (not a home chrome strip)
 -----------------------------------
 Top-nav **Paper** (``data-view="paper"``, ``#fd-nav-paper``) opens
 ``#view-paper``: ticker + Buy/Sell to open at the current mark, an
-open-positions **table** (Opened / Ticker / Side / Entry / Mark /
+open-positions **table** (Date / Ticker / Side / Entry / Mark /
 Return % / Close), week scorecard since Monday 00:00
 ``America/Edmonton``, and a closed-trades table. Same
 ``fd-paper-book`` store as card Buy/Sell. Never inject
@@ -293,6 +293,8 @@ def empty_book(*, asof: str | None = None) -> dict[str, Any]:
 def _series_last(value: Any) -> float | None:
     if isinstance(value, Mapping):
         for key in MARK_KEYS:
+            if str(key).lower() == "last":
+                continue
             px = dapi_enrich.as_float(value.get(key))
             if px is not None and px > 0:
                 return px
@@ -419,11 +421,13 @@ def marks_db(
 ) -> dict[str, float]:
     """ticker / short → mark, for ``#fd-paper-marks`` after Refresh.
 
-    Walks live HTML ``window.px.by[ticker].p[-1]`` (the dense-desk print),
-    then card / enrichment ``PX_LAST`` / ``raw``. Card ``last`` is a return
-    and is never stored. Short aliases (``CNH US Equity`` → ``CNH``) are
-    filled alongside the long name so Refresh cannot wipe a hot-filled
-    ``#fd-paper-marks``.
+    Rebuilds from live HTML ``window.px.by[ticker].p[-1]`` (or
+    ``window.px = window.px || {by:…}``) on every Refresh, then card /
+    enrichment ``PX_LAST`` / ``raw``. Card ``last`` is a return and is
+    never stored. Short aliases (``CNH US Equity`` → ``CNH``) are filled
+    alongside the long name so a write cannot wipe prints. A one-shot
+    ``#fd-paper-marks`` hot-fill is not required — ``ensure_embedded``
+    re-harvests ``px.by`` even when the JSON db is ``{}``.
     """
     out: dict[str, float] = {}
     if html:
@@ -458,8 +462,15 @@ _JSON_SCRIPT_RE = re.compile(
     re.I | re.S,
 )
 _MOM_ASSIGN_RE = re.compile(
-    r"(?:window\.)?(?:MOM(?:_CARDS)?(?:\s*\.\s*(?:cards|up|down|flags|watch|all|px))?|BOOK|NAMES|px|PX)\s*=\s*",
+    r"(?:(?:window|self|globalThis)\s*\.\s*)?(?:MOM(?:_CARDS)?(?:\s*\.\s*"
+    r"(?:cards|up|down|flags|watch|all|px|PX|payload))?|"
+    r"BOOK|NAMES|(?:px|PX)(?:\s*\.\s*by)?)\s*=\s*",
     re.I,
+)
+_PX_BY_START_RE = re.compile(
+    r"(?:(?:window|self|globalThis)\s*\.\s*)?(?:px|PX)\s*\.\s*by\s*=\s*\{"
+    r"|(?:^|[{\,;=\s])\s*[\"']?by[\"']?\s*:\s*\{",
+    re.I | re.M,
 )
 _TICKER_TOKEN_RE = re.compile(r"^[A-Z][A-Z0-9./-]{0,11}$")
 _STRUCT_KEYS = frozenset(
@@ -544,6 +555,11 @@ _PX_BY_P_RE = re.compile(
     r"""\{[^{}]{0,500}?\bp\s*:\s*\[([^\[\]]{1,12000})\]""",
     re.I | re.S,
 )
+_PX_REC_START_RE = re.compile(
+    r"""(?:["']([A-Z][A-Z0-9./-]{0,11})(?:\s+US\s+Equity)?["']|"""
+    r"""(?:^|[{\,])\s*([A-Z][A-Z0-9./]{1,11}))\s*:\s*\{""",
+    re.I | re.S,
+)
 
 
 def _looks_like_ticker(value: str) -> bool:
@@ -588,12 +604,30 @@ def _last_number(blob: str) -> float | None:
 
 def harvest_px_by_text(text: str, out: dict[str, float]) -> None:
     """Regex fallback when ``window.px = {by:{...}}`` is too JS-y to JSON.load."""
-    for m in _PX_BY_P_RE.finditer(text or ""):
+    blob = text or ""
+    for m in _PX_BY_P_RE.finditer(blob):
         ticker = m.group(1) or m.group(2) or ""
         if not _looks_like_ticker(ticker):
             continue
         px = _last_number(m.group(3) or "")
         if px is not None and px > 0:
+            _put_mark(out, ticker, px)
+    for m in _PX_REC_START_RE.finditer(blob):
+        ticker = m.group(1) or m.group(2) or ""
+        if not _looks_like_ticker(ticker):
+            continue
+        short = _short(ticker)
+        if short and short in out:
+            continue
+        rec = _extract_balanced(blob, m.end() - 1, max_len=250_000)
+        if not rec:
+            continue
+        parsed = _js_like_load(rec)
+        if isinstance(parsed, Mapping):
+            raw_p = parsed.get("p")
+            px = _series_last(raw_p) if isinstance(raw_p, (list, tuple)) else None
+            if px is None:
+                px = _payload_last(parsed)
             _put_mark(out, ticker, px)
 
 
@@ -641,6 +675,68 @@ def _collect_mark(
             _put_mark(out, str(obj[0]), dapi_enrich.as_float(obj[1]))
         for item in obj:
             _collect_mark(out, item, ticker_hint=ticker_hint, _depth=_depth + 1)
+
+
+def _skip_to_value_start(text: str, start: int) -> int:
+    """Skip ``window.px ||`` / comments so extract starts at ``{`` / ``[``."""
+    i = start
+    n = len(text)
+    guard = 0
+    while i < n and guard < 64:
+        guard += 1
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i >= n:
+            return i
+        if text.startswith("//", i):
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if text[i] in "{[":
+            return i
+        if text[i] == "(":
+            i += 1
+            continue
+        if text[i].isalpha() or text[i] in "_$":
+            j = i
+            while j < n and (text[j].isalnum() or text[j] in "_.$"):
+                j += 1
+            k = j
+            while k < n and text[k] in " \t\r\n":
+                k += 1
+            if text.startswith("||", k) or text.startswith("??", k):
+                i = k + 2
+                continue
+            if k < n and text[k] == "=" and not text.startswith("==", k) and not text.startswith("=>", k):
+                i = k + 1
+                continue
+            return i
+        return i
+    return i
+
+
+def _ingest_px_blob(blob: str | None, out: dict[str, float]) -> None:
+    if not blob:
+        return
+    parsed = _js_like_load(blob)
+    if parsed is not None:
+        put_px_by(out, parsed)
+        if isinstance(parsed, Mapping) and not isinstance(parsed.get("by"), Mapping):
+            put_px_by(out, {"by": parsed})
+        _collect_mark(out, parsed)
+        return
+    harvest_px_by_text(blob, out)
+
+
+def _harvest_px_by_objects(text: str, out: dict[str, float]) -> None:
+    """Pull ``px.by`` / ``by:{...}`` maps even when the assignment is ``px || {``."""
+    for m in _PX_BY_START_RE.finditer(text or ""):
+        blob = _extract_balanced(text, m.end() - 1)
+        _ingest_px_blob(blob, out)
 
 
 def _extract_balanced(text: str, start: int, max_len: int = 6_000_000) -> str | None:
@@ -739,18 +835,12 @@ def harvest_html_marks(html_text: str | None) -> dict[str, float]:
         px = attrs.get("data-px") or attrs.get("data-px-last") or attrs.get("data-mark")
         _put_mark(out, ticker, dapi_enrich.as_float(px))
     for assign in _MOM_ASSIGN_RE.finditer(text):
-        idx = assign.end()
-        while idx < len(text) and text[idx] in " \t\r\n":
-            idx += 1
+        idx = _skip_to_value_start(text, assign.end())
         blob = _extract_balanced(text, idx)
         if not blob:
             continue
-        parsed = _js_like_load(blob)
-        if parsed is not None:
-            put_px_by(out, parsed)
-            _collect_mark(out, parsed)
-        else:
-            harvest_px_by_text(blob, out)
+        _ingest_px_blob(blob, out)
+    _harvest_px_by_objects(text, out)
     for script in _JSON_SCRIPT_RE.finditer(text):
         raw = (script.group(1) or "").replace("<\\/", "</").strip()
         if not raw or raw in {"{}", "[]"}:
@@ -1222,7 +1312,7 @@ def _open_table_html(opens: Sequence[Mapping[str, Any]]) -> str:
     return (
         '<table class="fd-paper-table" aria-label="Open paper">'
         "<thead><tr>"
-        "<th>Opened</th><th>Ticker</th><th>Side</th>"
+        "<th>Date</th><th>Ticker</th><th>Side</th>"
         "<th>Entry</th><th>Mark</th><th>Return %</th><th></th>"
         "</tr></thead>"
         f"<tbody>{body}</tbody></table>"
@@ -1236,7 +1326,7 @@ def _closed_table_html(closed: Sequence[Mapping[str, Any]]) -> str:
     return (
         '<table class="fd-paper-table" aria-label="Closed paper">'
         "<thead><tr>"
-        "<th>Opened</th><th>Closed</th><th>Ticker</th><th>Side</th>"
+        "<th>Date</th><th>Closed</th><th>Ticker</th><th>Side</th>"
         "<th>Entry</th><th>Exit</th><th>Return %</th>"
         "</tr></thead>"
         f"<tbody>{body}</tbody></table>"
@@ -1544,11 +1634,19 @@ body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
   display: block;
   overflow-x: auto;
 }}
+#{VIEW_ID} table.fd-paper-table,
 .fd-paper-table {{
+  display: table !important;
   width: 100%;
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
+  table-layout: auto;
 }}
+#{VIEW_ID} table.fd-paper-table thead {{ display: table-header-group !important; }}
+#{VIEW_ID} table.fd-paper-table tbody {{ display: table-row-group !important; }}
+#{VIEW_ID} table.fd-paper-table tr {{ display: table-row !important; }}
+#{VIEW_ID} table.fd-paper-table th,
+#{VIEW_ID} table.fd-paper-table td {{ display: table-cell !important; }}
 .fd-paper-table th {{
   text-align: left;
   color: #6b7280;
@@ -1789,12 +1887,12 @@ def strip_js() -> str:
       var last = raw[raw.length - 1];
       if (Array.isArray(last)) return num(last[last.length - 1]);
       if (last && typeof last === "object") {
-        return num(last.px_last || last.PX_LAST || last.px || last.price || last.close || last.last || last.value || last.y);
+        return num(last.px_last || last.PX_LAST || last.px || last.price || last.close || last.value || last.y);
       }
       return num(last);
     }
     if (typeof raw === "object") {
-      return num(raw.px_last || raw.PX_LAST || raw.px || raw.price || raw.close || raw.last || raw.value);
+      return num(raw.px_last || raw.PX_LAST || raw.px || raw.price || raw.close || raw.value);
     }
     return num(raw);
   }
@@ -1840,7 +1938,7 @@ def strip_js() -> str:
     }
     var payload = markFromPxPayload(card.px || card.PX || card.payload);
     if (payload) return payload;
-    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","lastPx","pxLast","PxLast","LAST_PX","LAST","mark","mark_px","price","px","close","px_close","adj_close","PX_CLOSE","last_print","print","trd_px"];
+    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","lastPx","pxLast","PxLast","LAST_PX","mark","mark_px","price","px","close","px_close","adj_close","PX_CLOSE","last_print","print","trd_px"];
     for (var i = 0; i < keys.length; i++) {
       var v = num(card[keys[i]]);
       if (v) return v;
@@ -1912,7 +2010,9 @@ def strip_js() -> str:
     try {
       var mom = window.MOM || {};
       harvestPxBy(window.px);
+      harvestPxBy(window.px && window.px.by);
       harvestPxBy(window.PX);
+      harvestPxBy(window.PX && window.PX.by);
       harvestPxBy(mom);
       harvestPxBy(mom.px);
       harvestPxBy(mom.payload);
@@ -1946,9 +2046,26 @@ def strip_js() -> str:
     } catch (harvestErr) {}
     return liveMarks;
   }
+  function markFromPxWorld(ticker) {
+    var key = shortOf(ticker);
+    var roots = [window.px, window.PX, (window.MOM || {}).px, (window.MOM || {}).PX, (window.MOM || {}).payload, window.MOM];
+    for (var i = 0; i < roots.length; i++) {
+      var root = roots[i];
+      if (!root || typeof root !== "object") continue;
+      var by = root.by;
+      var rec = null;
+      if (by && typeof by === "object") rec = by[ticker] || by[key] || by[key + " US Equity"];
+      if (rec == null && Array.isArray(root.p)) rec = root;
+      var m = markFromPxByRec(rec);
+      if (m) return rememberMark(key, m);
+    }
+    return null;
+  }
   function markOf(ticker, node, card) {
     var key = shortOf(ticker);
-    var m = markFromCard(card);
+    var m = markFromPxWorld(key);
+    if (m) return m;
+    m = markFromCard(card);
     if (m) return rememberMark(key || ticker, m);
     m = markFromNode(node);
     if (m) return rememberMark(key || ticker, m);
@@ -1959,7 +2076,7 @@ def strip_js() -> str:
     if (db[key]) return rememberMark(key, db[key]);
     m = markFromCard(findMomCard(ticker || key));
     if (m) return rememberMark(key || ticker, m);
-    return null;
+    return markFromPxWorld(key);
   }
   function pnlPct(side, entry, mark) {
     entry = num(entry); mark = num(mark);
@@ -2186,7 +2303,7 @@ def strip_js() -> str:
   function openTableHead() {
     var thead = document.createElement("thead");
     var tr = document.createElement("tr");
-    ["Opened", "Ticker", "Side", "Entry", "Mark", "Return %", ""].forEach(function (h) {
+    ["Date", "Ticker", "Side", "Entry", "Mark", "Return %", ""].forEach(function (h) {
       var th = document.createElement("th");
       th.textContent = h;
       tr.appendChild(th);
@@ -2197,7 +2314,7 @@ def strip_js() -> str:
   function closedTableHead() {
     var thead = document.createElement("thead");
     var tr = document.createElement("tr");
-    ["Opened", "Closed", "Ticker", "Side", "Entry", "Exit", "Return %"].forEach(function (h) {
+    ["Date", "Closed", "Ticker", "Side", "Entry", "Exit", "Return %"].forEach(function (h) {
       var th = document.createElement("th");
       th.textContent = h;
       tr.appendChild(th);
@@ -3059,13 +3176,14 @@ def _ensure_js(html_text: str) -> str:
 
 
 def ensure_embedded(html_text: str, marks: Mapping[str, Any] | None = None) -> str:
-    """CSS + marks db + Paper tab + cardHTML wrap JS. Safe on live ~2.7MB HTML.
+    """CSS + marks db + Paper tab + cardHTML wrap JS. Patches live HTML in place.
 
-    ``marks=None`` or ``{}`` still injects JS/CSS and **fills** ``#fd-paper-marks``
-    from live ``window.MOM`` / ``MOM.cards`` last/PX_LAST/px (the ~4.8MB desk
-    keeps prints there, not in enrich cards). Client harvest from MOM.cards
-    is the fallback when the JSON db is empty. Pass ``marks_db(cards, book=book)``
-    on a write so Refresh prints win when present.
+    Never replaces the dense desk with skinny ``render_html``. ``marks=None``
+    or ``{}`` still injects JS/CSS and **rebuilds** ``#fd-paper-marks`` from
+    live ``window.px.by[ticker].p[-1]`` (including ``window.px = window.px ||
+    {by:…}``), then ``PX_LAST`` / ``px.LAST``. Card ``last`` is a return and
+    is ignored. Breakout / Experimental hosts are left in place. Pass
+    ``marks_db(cards, book=book, html=html)`` on Refresh so prints win.
     """
     text = html_text or ""
     harvested = harvest_html_marks(text)

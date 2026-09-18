@@ -530,12 +530,12 @@ Same-side click while a position is open is a **no-op + brief toast** (`Already 
 The book lives on a top-nav **Paper** tab (`#fd-nav-paper`, `data-view="paper"`, `#view-paper`) — **not** a home chrome strip next to BOOK / baseline:
 
 - **Open from the tab** — ticker field + Buy / Sell at the current mark (same `#fd-paper-marks` / MOM / last-print resolver as card buttons). Nav capture listeners must not swallow these clicks.
-- **Open book** — table of every open paper long/short from `localStorage` key `fd-paper-book` (same store as the card Buy/Sell): Opened, Ticker, Side, Entry, Mark, Return %, Close (opposite click: long → sell, short → buy). Click ticker → live `selectTicker` when that function exists. Missing mark → `—` / Close disabled — never fake ±100%.
+- **Open book** — HTML **table** of every open paper long/short from `localStorage` key `fd-paper-book` (same store as the card Buy/Sell): Date, Ticker, Side, Entry, Mark, Return %, Close (opposite click: long → sell, short → buy). Click ticker → live `selectTicker` when that function exists. Missing mark → `—` / Close disabled — never fake ±100%. Not a chip/pill list.
 - **Week scorecard** — closed trades **since Monday 00:00 `America/Edmonton`**: closed count, hit rate (% of those closes with **positive signed** return), avg win % and avg loss % (shorts profit when price falls; losses stay negative).
-- **Closed trades** — table of the full local book (opened / closed / ticker / side / entry / exit / return). Empty: `no closed paper`.
+- **Closed trades** — HTML table of the full local book (Date / Closed / Ticker / Side / Entry / Exit / Return %). Empty: `no closed paper`.
 - Empty copy: no opens → `no open paper`; no closes this week → `no closed yet this week`.
 - Persistence is unchanged: **only** `fd-paper-book`. Do not add a sidecar write on Refresh.
-- `ensure_embedded` **strips** leftover `#fd-paper-home` from top chrome so a previous Home-strip recopy cannot jam chips next to BOOK delta. It also **merges** `marks_db(cards)` with existing `#fd-paper-marks` / `data-px` so Refresh cannot wipe live prints.
+- `ensure_embedded` **strips** leftover `#fd-paper-home` from top chrome so a previous Home-strip recopy cannot jam chips next to BOOK delta. On every Refresh it **rebuilds** `#fd-paper-marks` from live `window.px.by[ticker].p[-1]` (including `window.px = window.px || {by:…}`) even when the previous JSON was `{}`. Card `last` is a return — never a dollar mark. Breakout / Experimental panes are left in place. Never replace live HTML with skinny `render_html`.
 
 ### End of live `write_combined` / `write_dash.write`
 
@@ -544,9 +544,9 @@ After the existing GICS / streak / chart / breakout / hitch `ensure_embedded` ta
 ```python
 import paper_trade
 
-# cards already attached (enrich + mom_streak). Marks come from card px / PX_LAST /
-# last Refresh print, then live HTML window.MOM / MOM.cards / px.LAST (enrich often
-# has no px_last — empty #fd-paper-marks is why Buy/Sell no-ops and P&L paints —).
+# cards already attached (enrich + mom_streak). Rebuild dollar marks from
+# live HTML window.px.by[ticker].p[-1] on every Refresh (card last is a return).
+# Empty #fd-paper-marks is not durable — harvest px.by into the JSON db.
 paper_marks = paper_trade.marks_db(cards, book=book, html=html)
 
 html = gics_filter.ensure_embedded(html, db)
@@ -574,7 +574,7 @@ Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping
 
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
-| `paper_trade.py` | **recopy** — Paper tab **table** (not chips); harvest `MOM.cards` / `px.LAST` into `#fd-paper-marks`; missing mark → `—` never ±100%; Buy/Sell/Close; strips leftover chip JS |
+| `paper_trade.py` | **recopy** — Paper tab **HTML table** (Date / Ticker / Side / Entry / Mark / Return % / Close, not chips); Refresh rebuilds `#fd-paper-marks` from `px.by[ticker].p[-1]`; missing mark → `—` never ±100%; Buy/Sell/Close use dollar marks; strips leftover chip JS |
 | `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/PAPER-TRADE.md` | optional, for the desk |
@@ -582,7 +582,7 @@ Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping
 Do **not** copy generated `factorbook.html` or a later `paper_book.json`. After drop-in, Refresh once (or hard-reload) and confirm:
 
 1. Home chrome next to BOOK / baseline has **no** paper LONG/SHORT chips. Paper is a top-nav tab after Options / near Experimental.
-2. **Paper** shows a table of opens (Opened / Ticker / Side / Entry / Mark / Return % / Close), ticker + Buy/Sell, week scorecard, and a closed-trades table. Missing marks show `—`, never ±100%. After Refresh, `#fd-paper-marks` is a filled ticker→print map (not `{}`).
+2. **Paper** shows HTML tables: opens (Date / Ticker / Side / Entry / Mark / Return % / Close) and closed (Date / Closed / Ticker / Side / Entry / Exit / Return %), ticker + Buy/Sell, week scorecard. Missing marks show `—`, never ±100%. After Refresh, `#fd-paper-marks` is a filled ticker→dollar-print map from `px.by[ticker].p[-1]` (not `{}` and not card `last` returns). Breakout / Experimental tabs still present.
 3. Dense cards still show Buy/Sell (disabled with a title if no mark), a long/short line + live % when a position is open, and collapsed previous trades with the correct short sign (short profits when price falls).
 4. Buy/Sell on a card and Close / Buy / Sell on the tab share `fd-paper-book`.
 5. Week scorecard counts closes since Monday 00:00 America/Edmonton; empty copy is `no closed yet this week`.
