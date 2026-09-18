@@ -503,7 +503,7 @@ def strip_js() -> str:
     var nodes = document.querySelectorAll("[data-t], [data-ticker], article.card, .card");
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i];
-      if (node.closest && node.closest("nav, .topnav, #gics-filter-strip, #fd-book-delta, #fd-paper-home, #refresh")) continue;
+      if (node.closest && node.closest("nav, .topnav, #gics-filter-strip, #fd-book-delta, #fd-paper-home, #view-paper, #refresh")) continue;
       var rec = recOf(tickerOf(node));
       if (!rec || !rec.label) continue;
       if (node.querySelector('[data-key="desk-hitch"]')) continue;

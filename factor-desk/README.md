@@ -32,7 +32,7 @@ factor-desk/
   breakout.py            # Breakout / Breakdown tab ranking
   book_delta.py          # since-last-Refresh chip strip
   desk_hitch.py          # Desk Analyst hitch pills
-  paper_trade.py         # paper Buy/Sell on dense cardHTML cards + Home strip
+  paper_trade.py         # paper Buy/Sell on dense cardHTML cards + Paper tab
   s_score.py             # Experimental residual S-score (Avellaneda–Lee on SparsePCA residuals)
   chart_marks.py         # chart tag-trigger polish + streak begin/end
   add_server.py          # sidecar HTTP on :8765 — Refresh + intraday=1

@@ -42,7 +42,7 @@ Mid-score climbers / crackers as home tabs (not maxed MOM). `breakout.ensure_emb
 
 ## Paper trading
 
-Generic Buy/Sell on dense `cardHTML` cards plus a Home paper-book strip (`#fd-paper-home` next to BOOK / baseline). Paper only, 1 unit, localStorage `fd-paper-book` only. Same-side click is a no-op + toast (does not flip). Week scorecard is closed trades since Monday 00:00 America/Edmonton. `paper_trade.ensure_embedded` on every HTML write. Recopy `paper_trade.py`; do not wholesale replace live `desk_dash.py`. See [PAPER-TRADE.md](PAPER-TRADE.md).
+Generic Buy/Sell on dense `cardHTML` cards, plus a top-nav **Paper** tab (`#view-paper`) for the open book, inline Close, ticker+Buy/Sell, week scorecard, and closed trades. Paper only, 1 unit, localStorage `fd-paper-book` only. Same-side click is a no-op + toast (does not flip). Week scorecard is closed trades since Monday 00:00 America/Edmonton. Do **not** inject `#fd-paper-home` into top chrome. `paper_trade.ensure_embedded` on every HTML write. Recopy `paper_trade.py`; do not wholesale replace live `desk_dash.py`. See [PAPER-TRADE.md](PAPER-TRADE.md).
 
 ## Experimental residual S-score
 

@@ -12,7 +12,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `breakout.py` | Breakout / Breakdown tab ranking (mid-score climbers / crackers) |
 | `book_delta.py` | Since-last-Refresh chip strip (`desk_snapshot.json`) |
 | `desk_hitch.py` | Desk Analyst hitch pills from `ideas/` notes |
-| `paper_trade.py` | Paper Buy/Sell on dense `cardHTML` cards + Home paper-book strip (localStorage) |
+| `paper_trade.py` | Paper Buy/Sell on dense `cardHTML` cards + Paper tab (localStorage; not a home chrome strip) |
 | `s_score.py` | Experimental residual S-score tab only (Avellaneda–Lee; not on MOM/FLAGS/home) |
 | `chart_marks.py` | Chart tag-trigger polish + streak begin/end overlay |
 | `add_server.py` | Sidecar HTTP server on `:8765` (Refresh + `intraday=1`) |

@@ -68,6 +68,7 @@ NAV_HTML = f"""
   <button type="button" class="btn nav-btn" id="fd-nav-breakdown" data-view="breakdown" data-fd-breakdown="1">Breakdown</button>
   <button type="button" class="nav-btn" data-view="outliers">Outliers</button>
   <button type="button" class="nav-btn" data-view="options">Options</button>
+  <button type="button" class="btn nav-btn" id="fd-nav-paper" data-view="paper" data-fd-paper-nav="1">Paper</button>
   <button type="button" class="btn nav-btn" id="fd-nav-experimental" data-view="experimental" data-fd-sscore="1">Experimental</button>
 </nav>
 """.strip()
@@ -746,11 +747,11 @@ def render_html(
   <p class="meta">asof {asof or "—"} · Refresh / Momentum Up / Down / Breakout / Breakdown · GICS chips + mom streak vs 5 · intraday={"on" if intra else "off"}</p>
   {gics_filter.render_strip(sectors)}
     {book_delta.host_html(delta)}
-    {paper_trade.home_host_html()}
   {gics_note}
   {empty}
   {breakout.panes_html(ranked)}
   {s_score.panes_html(ss_ranked)}
+  {paper_trade.panes_html()}
   <div id="home">
   <div class="grid">
     {"".join(rows)}

@@ -521,19 +521,21 @@ Suggested Desktop sync paths:
 
 ---
 
-## 10) Paper trading (Buy / Sell on dense MOM cards + Home paper-book strip)
+## 10) Paper trading (Buy / Sell on dense MOM cards + Paper tab)
 
 Copy `paper_trade.py` next to live `desk_dash.py`. **Do not wholesale replace** live `desk_dash.py` (FLAGS / WATCH / MOM chrome stays). Paper only — no brokerage. 1 unit notional; no size UI. No new DAPI stage and no extra data feed.
 
 Same-side click while a position is open is a **no-op + brief toast** (`Already long — sell to close` / `Already short — buy to close`). It does not add size and does not flip. Opposite click **closes** (flat + Buy = long, flat + Sell = short).
 
-Home gets a **tiny paper-book strip** (`#fd-paper-home`) next to BOOK / baseline (`#fd-book-delta`) — not a new tab:
+The book lives on a top-nav **Paper** tab (`#fd-nav-paper`, `data-view="paper"`, `#view-paper`) — **not** a home chrome strip next to BOOK / baseline:
 
-- **Open book** — open paper longs/shorts from `localStorage` key `fd-paper-book` (same store as the card Buy/Sell). Each chip is ticker, `LONG`/`SHORT`, entry, live P&L % from existing marks (`#fd-paper-marks` / card `px` / last Refresh print). Click ticker → live `selectTicker` when that function exists.
+- **Open from the tab** — ticker field + Buy / Sell at the current mark (same `#fd-paper-marks` / MOM / last-print resolver as card buttons).
+- **Open book** — every open paper long/short from `localStorage` key `fd-paper-book` (same store as the card Buy/Sell). Each row is ticker, `LONG`/`SHORT`, entry, live P&L %, plus inline **Close** (opposite click: long → sell, short → buy). Click ticker → live `selectTicker` when that function exists.
 - **Week scorecard** — closed trades **since Monday 00:00 `America/Edmonton`**: closed count, hit rate (% of those closes with **positive signed** return), avg win % and avg loss % (shorts profit when price falls; losses stay negative).
+- **Closed trades** — collapsible list of the full local book.
 - Empty copy: no opens → `no open paper`; no closes this week → `no closed yet this week`.
-- Show all opens if ≤12; otherwise the rest sit behind `more N` / `less`.
 - Persistence is unchanged: **only** `fd-paper-book`. Do not add a sidecar write on Refresh.
+- `ensure_embedded` **strips** leftover `#fd-paper-home` from top chrome so a previous Home-strip recopy cannot jam chips next to BOOK delta.
 
 ### End of live `write_combined` / `write_dash.write`
 
@@ -551,7 +553,7 @@ html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
 html = breakout.ensure_embedded(html, ranked)
 html = book_delta.ensure_embedded(html, delta)
 html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
-html = paper_trade.ensure_embedded(html, paper_marks)  # wraps cardHTML + #fd-paper-home; localStorage fd-paper-book
+html = paper_trade.ensure_embedded(html, paper_marks)  # wraps cardHTML + Paper tab; localStorage fd-paper-book
 # dest.write_text(html)
 ```
 
@@ -562,7 +564,7 @@ paper_trade.attach_mark(card, _rec)
 # card.paper_mark / px_last when a print exists
 ```
 
-`ensure_embedded` wraps live `window.cardHTML` so home / Momentum Up / Down / Breakout / Breakdown / search cards that go through `cardHTML` get generic **Buy** / **Sell**, an open-position line (`LONG`/`SHORT` + entry + live P&L %), and a collapsed **Previous trades** `<details>`. It also injects `#fd-paper-home` immediately after `#fd-book-delta` (else after GICS / nav). Missing mark disables both buttons (`title` = need card price / `PX_LAST` / last Refresh print). Persistence is **localStorage** (`fd-paper-book`); the module also exports `sidecar_schema()` if a later `paper_book.json` sidecar is wanted. Do not add a brokerage hook.
+`ensure_embedded` wraps live `window.cardHTML` so home / Momentum Up / Down / Breakout / Breakdown / search cards that go through `cardHTML` get generic **Buy** / **Sell**, an open-position line (`LONG`/`SHORT` + entry + live P&L %), and a collapsed **Previous trades** `<details>`. It injects a **Paper** nav button (after Experimental if present, else after Options) plus `#view-paper`, and patches live `setView` / `hideAllPanes` / `paintView` with `|paper` (capture-phase click bridge, same pattern as Experimental / Breakout). Leftover `#fd-paper-home` is removed. Missing mark disables both buttons (`title` = need card price / `PX_LAST` / last Refresh print). Persistence is **localStorage** (`fd-paper-book`); the module also exports `sidecar_schema()` if a later `paper_book.json` sidecar is wanted. Do not add a brokerage hook.
 
 Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping live `desk_dash.py`, paste the tail. Recopy `paper_trade.py` after this drop-in.
 
@@ -570,17 +572,20 @@ Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping
 
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
-| `paper_trade.py` | **recopy** — Buy/Sell + history on dense `cardHTML` cards **and** Home `#fd-paper-home` strip; localStorage `fd-paper-book` only |
+| `paper_trade.py` | **recopy** — Buy/Sell on dense `cardHTML` cards **and** Paper tab (inline open + Close); strips `#fd-paper-home`; localStorage `fd-paper-book` only |
+| `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/PAPER-TRADE.md` | optional, for the desk |
 
 Do **not** copy generated `factorbook.html` or a later `paper_book.json`. After drop-in, Refresh once (or hard-reload) and confirm:
 
-1. Home shows the paper strip under BOOK / baseline (`paper` / `week` kickers).
-2. Dense cards still show Buy/Sell (disabled with a title if no mark), a long/short line + live % when a position is open, and collapsed previous trades with the correct short sign (short profits when price falls).
-3. Buy/Sell on a card updates the Home open list without a new store.
-4. Week scorecard counts closes since Monday 00:00 America/Edmonton; empty copy is `no closed yet this week`.
-5. Reload / Refresh keeps the book (localStorage). Mom Up/Down chrome is otherwise unchanged.
+1. Home chrome next to BOOK / baseline has **no** paper LONG/SHORT chips. Paper is a top-nav tab after Options / near Experimental.
+2. **Paper** shows opens + live %, inline **Close**, ticker + Buy/Sell, week scorecard, and collapsible closed trades.
+3. Dense cards still show Buy/Sell (disabled with a title if no mark), a long/short line + live % when a position is open, and collapsed previous trades with the correct short sign (short profits when price falls).
+4. Buy/Sell on a card and Close / Buy / Sell on the tab share `fd-paper-book`.
+5. Week scorecard counts closes since Monday 00:00 America/Edmonton; empty copy is `no closed yet this week`.
+6. Reload / Refresh keeps the book (localStorage). Mom Up/Down chrome is otherwise unchanged.
+7. Breakout / Breakdown cards show real tickers (`AMGN`, …), not `"undefined"`.
 
 ---
 
@@ -648,7 +653,7 @@ except Exception:
 | --- | --- |
 | `s_score.py` | **new** — Experimental S-score tab + residual panel writer |
 | `breakout.py` | **recopy** — hide `#view-experimental` from Breakout/Breakdown |
-| `paper_trade.py` | **recopy** — skip Buy/Sell hydration on `.fd-ss-card` / `#view-experimental` |
+| `paper_trade.py` | **recopy** — skip Buy/Sell hydration on `.fd-ss-card` / `#view-experimental` / `#view-paper` |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/S-SCORE.md` | optional, for the desk |
 
