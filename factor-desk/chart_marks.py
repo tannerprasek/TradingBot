@@ -821,9 +821,9 @@ def strip_css() -> str:
 #fd-name-drill svg, .name-chart [data-px-svg], .detail-chart [data-px-svg] {
   display: block;
   width: 100% !important;
-  max-width: 980px;
-  height: 300px !important;
-  min-height: 280px;
+  max-width: 1100px;
+  height: 320px !important;
+  min-height: 300px;
   overflow: visible !important;
 }
 #detail-chart, #name-chart, #fd-name-drill, .name-chart, .detail-chart, [data-px-chart] {
@@ -1294,15 +1294,15 @@ def overlay_js() -> str:
   }
   function flagsFromSeries(px, s50, s200) {
     var flags = [];
-    var haveSlow = px.length >= SMA_SLOW;
     var computed50 = (!s50 || !s50.length) ? smaArr(px.map(function (v) { return v == null ? 0 : v; }), SMA_FAST) : s50;
-    var computed200 = haveSlow ? ((s200 && s200.length) ? s200 : smaArr(px.map(function (v) { return v == null ? 0 : v; }), SMA_SLOW)) : [];
+    var computed200 = (s200 && s200.length) ? s200 : (px.length >= SMA_SLOW ? smaArr(px.map(function (v) { return v == null ? 0 : v; }), SMA_SLOW) : []);
     for (var i = 0; i < px.length; i++) {
       if (px[i] == null || !isFinite(px[i])) { flags.push(null); continue; }
       var a = computed50[i] != null && isFinite(computed50[i]) ? computed50[i] : null;
-      var b = haveSlow && computed200[i] != null && isFinite(computed200[i]) ? computed200[i] : null;
-      if (haveSlow) flags.push((a == null || b == null) ? null : trendFlag(px[i], a, b));
-      else flags.push(trendFlag(px[i], a, null));
+      var b = computed200[i] != null && isFinite(computed200[i]) ? computed200[i] : null;
+      // Live path: if SMA200 is not ready for this bar, fall back to SMA50-only
+      // (same as a <200 series) so the visible drill is green/red, not a third color.
+      flags.push(trendFlag(px[i], a, b));
     }
     return flags;
   }
@@ -1392,8 +1392,8 @@ def overlay_js() -> str:
       svg.setAttribute("height", String(LIVE_PX_H_NEW));
     }
     svg.style.width = "100%";
-    svg.style.maxWidth = "980px";
-    svg.style.height = LIVE_PX_H_NEW + "px";
+    svg.style.maxWidth = "1100px";
+    svg.style.height = "320px";
     if (W) svg.setAttribute("viewBox", "0 0 " + W + " " + (vb && vb.height ? vb.height : LIVE_PX_H));
     svg.setAttribute("preserveAspectRatio", "none");
   }
@@ -1494,6 +1494,7 @@ def overlay_js() -> str:
       var start = 0;
       var cur = flags[0] || "na";
       function emit(kind, a, b) {
+        if (kind === "na") return;
         var chunk = slicePts(pts, a, b);
         if (chunk.length < 2) return;
         var el = svgEl("path");

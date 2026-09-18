@@ -405,7 +405,7 @@ class MaTrendTests(unittest.TestCase):
         self.assertIn("close > s50 && close > s200", js)
         self.assertIn("[data-px-svg]", css)
         self.assertIn("fd-px-chip", css)
-        self.assertIn("height: 300px", css)
+        self.assertIn("height: 320px", css)
         self.assertNotIn("function paintPxChart(wrap)", js)
 
 
