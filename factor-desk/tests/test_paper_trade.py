@@ -110,6 +110,8 @@ class MarkTests(unittest.TestCase):
         self.assertEqual(pt.mark_of({"prices": [{"px_last": 9.0}]}), 9.0)
         self.assertIsNone(pt.mark_of({"t": "AAPL"}))
         self.assertIsNone(pt.mark_of({"px_last": 0}))
+        self.assertEqual(pt.fmt_px(13.63), "13.63")
+        self.assertEqual(pt.fmt_px(None), "—")
 
     def test_marks_db_shorts(self) -> None:
         db = pt.marks_db(
@@ -214,11 +216,13 @@ class PaperTabTests(unittest.TestCase):
         html = pt.panes_html(pt.empty_book(), {})
         self.assertIn("no open paper", html)
         self.assertIn("no closed yet this week", html)
+        self.assertIn("no closed paper", html)
         self.assertIn('id="view-paper"', html)
         self.assertIn('data-view="paper"', html)
         self.assertIn("America/Edmonton", html)
         self.assertIn("data-fd-paper-open", html)
         self.assertIn("Closed trades", html)
+        self.assertNotIn("fd-paper-chip", html)
         self.assertEqual(pt.home_host_html(pt.empty_book(), {}), "")
 
     def test_open_rows_list_every_position(self) -> None:
@@ -229,9 +233,50 @@ class PaperTabTests(unittest.TestCase):
         self.assertEqual(len(opens), 15)
         html = pt.panes_html(book, {f"T{i:02d}": 11.0 for i in range(15)})
         self.assertNotIn("more 3", html)
-        self.assertEqual(html.count("data-fd-paper-ticker="), 45)  # row + chip + Close per open
+        self.assertIn("fd-paper-table", html)
+        self.assertIn(">Ticker</th>", html)
+        self.assertIn(">Side</th>", html)
+        self.assertIn(">Entry</th>", html)
+        self.assertIn(">P&amp;L %</th>", html)
+        self.assertNotIn("fd-paper-chip", html)
+        self.assertEqual(html.count("data-fd-paper-ticker="), 45)  # row + ticker + Close per open
         self.assertEqual(html.count("data-fd-paper-close="), 15)
         self.assertIn(">Close</button>", html)
+
+    def test_open_table_columns_and_pnl_color(self) -> None:
+        book = pt.empty_book()
+        pt.apply_click(book, "CNH", "buy", 13.63, when="2026-09-17T00:00:00Z")
+        pt.apply_click(book, "PWR", "sell", 617.64, when="2026-09-17T01:00:00Z")
+        html = pt.panes_html(book, {"CNH": 13.545, "PWR": 598.74})
+        self.assertIn('class="fd-paper-table"', html)
+        self.assertIn('aria-label="Open paper"', html)
+        self.assertIn(">CNH</button>", html)
+        self.assertIn("LONG", html)
+        self.assertIn("SHORT", html)
+        self.assertIn("13.63", html)
+        self.assertIn("617.64", html)
+        self.assertIn("fd-paper-down", html)
+        self.assertIn("fd-paper-up", html)
+        self.assertNotIn("CNH LONG @", html)
+        self.assertNotIn("fd-paper-chip", html)
+
+    def test_closed_table_is_html_table(self) -> None:
+        book = pt.empty_book()
+        pt.apply_click(book, "CNH", "buy", 13.63, when="2026-09-17T00:00:00Z")
+        pt.apply_click(book, "CNH", "sell", 14.99, when="2026-09-18T00:00:00Z")
+        html = pt.panes_html(book, {})
+        self.assertIn('aria-label="Closed paper"', html)
+        self.assertIn(">Date</th>", html)
+        self.assertIn(">Ticker</th>", html)
+        self.assertIn(">Side</th>", html)
+        self.assertIn(">Entry</th>", html)
+        self.assertIn(">Exit</th>", html)
+        self.assertIn(">P&amp;L %</th>", html)
+        self.assertIn("fd-paper-table", html)
+        self.assertIn("CNH", html)
+        self.assertIn("14.99", html)
+        self.assertNotIn("<ul id=\"fd-paper-closed\">", html)
+        self.assertNotIn("-100.00%", html)
 
     def test_ensure_embedded_injects_paper_tab_not_chrome_strip(self) -> None:
         html = """<!DOCTYPE html><html><head></head><body>
@@ -272,6 +317,7 @@ function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</art
         self.assertIn("data-fd-paper-open", out)
         self.assertIn("data-fd-paper-close", out)
         self.assertIn("|paper", out)
+        self.assertIn("fd-paper-table", out)
         self.assertIn(pt.SETVIEW_MARKER, out)
         self.assertIn(pt.HIDEALL_MARKER, out)
         js = pt.strip_js()
@@ -280,6 +326,9 @@ function cardHTML(c){return '<article class="card" data-t="'+c.t+'">'+c.t+'</art
         self.assertIn("selectTicker", js)
         self.assertIn("data-fd-paper-close", js)
         self.assertIn("data-fd-paper-open", js)
+        self.assertIn("fd-paper-table", js)
+        self.assertIn("openTableHead", js)
+        self.assertNotIn("function chipEl", js)
         self.assertIn("Already long — sell to close", js)
         self.assertIn("Previous trades", out)
         self.assertIn(">Buy</button>", pt.chrome_html("AAPL", mark=12.0))
@@ -348,6 +397,23 @@ window.MOM = { cards: [{ t: "AAPL", px_last: 12 }] };
         self.assertIsNotNone(blob)
         self.assertEqual(json.loads(blob.group(1))["AAPL"], 12.0)
 
+    def test_ensure_embedded_strips_stale_chip_script(self) -> None:
+        html = """<!DOCTYPE html><html><head></head><body>
+<nav><button data-view="options">Options</button></nav>
+<script>
+(function(){
+  window.__FD_PAPER_APPLY__ = function(){};
+  function chipEl(row){ var b=document.createElement("button"); b.className="fd-paper-chip"; return b; }
+  function paintTab(){ var wrap=document.createElement("div"); wrap.className="fd-paper-open-row"; wrap.appendChild(chipEl({})); }
+})();
+</script>
+</body></html>"""
+        out = pt.ensure_embedded(html, {"AAPL": 12.0})
+        self.assertIn('id="fd-paper-js"', out)
+        self.assertIn("fd-paper-table", out)
+        self.assertEqual(out.count("function chipEl"), 0)
+        self.assertIn("openTableHead", out)
+
     def test_sidecar_schema_qty_one(self) -> None:
         schema = pt.sidecar_schema()
         self.assertEqual(schema["properties"]["kind"]["const"], "factor-desk-paper")
@@ -397,6 +463,7 @@ window.MOM = { cards: [{ t: "AAPL", ticker: "AAPL US Equity", px_last: 12.5, sco
             self.assertIn("data-fd-paper-act", text)
             self.assertIn("data-fd-paper-open", text)
             self.assertIn("data-fd-paper-close", text)
+            self.assertIn("fd-paper-table", text)
             self.assertIn("Momentum Up", text)
             self.assertIn("Momentum Down", text)
             self.assertIn("AAPL", json.loads(
@@ -419,6 +486,9 @@ class PaperNavCaptureTests(unittest.TestCase):
         self.assertGreater(show, sip)
         src = Path(pt.__file__).read_text(encoding="utf-8")
         self.assertIn('if(window.__FD_PAPER_SHOW__)window.__FD_PAPER_SHOW__();', src)
+        self.assertIn("__FD_PAPER_SHOW__", js)
+        self.assertNotIn("__FD_BB_IGNORE_PAPER__ = false", js)
+        self.assertNotIn("__FD_SS_IGNORE_FOREIGN_NAV__ = false", js)
         bridge = js.split("function installSetViewBridge")[1]
         paper_sv = bridge.split('kind === "paper"')[1].split("showPaper(false)")[0]
         self.assertIn("showPaper(true)", paper_sv)
@@ -523,6 +593,161 @@ console.log(JSON.stringify(report));
         self.assertTrue(report.get("homeHide"), report)
         self.assertTrue(report.get("paperOn"), report)
         self.assertFalse(report.get("paperHide"), report)
+
+    def test_jsdom_open_renders_table_not_chips(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        jsdom_root = Path("/tmp/fd-jsdom")
+        jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+        if not jsdom_mod.is_dir():
+            jsdom_root.mkdir(parents=True, exist_ok=True)
+            npm = shutil.which("npm")
+            if not npm:
+                self.skipTest("npm not installed")
+            subprocess.run(
+                [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        import breakout as bo
+        import s_score as ss
+
+        live = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<nav id="topnav">
+  <button type="button" class="btn nav-btn" data-view="home">Home</button>
+  <button type="button" class="btn nav-btn" id="fd-nav-breakout" data-view="breakout" data-fd-breakout="1">Breakout</button>
+  <button type="button" class="btn nav-btn" id="fd-nav-experimental" data-view="experimental" data-fd-sscore="1">Experimental</button>
+</nav>
+<div id="home">FLAGS</div>
+<script>
+function hideAllPanes() {
+  ["home","view-mom-up","view-mom-down","view-outliers","view-options","view-sectors","search-pane"].forEach(function(id){
+    var el = document.getElementById(id);
+    if (el) el.classList.add("hide");
+  });
+}
+function paintView(v) {}
+function setView(v) {
+  if (!/^(home|mom-up|mom-down|outliers|options|sectors)$/.test(v)) v = "home";
+  hideAllPanes();
+  paintView(v);
+}
+function cardHTML(c) {
+  c = c || {};
+  return '<article class="card" data-t="'+(c.t||"")+'">'+(c.t||"")+'</article>';
+}
+</script>
+</body></html>"""
+        html = bo.ensure_embedded(live, {"breakout": [], "breakdown": []})
+        html = pt.ensure_embedded(html, {"CNH": 13.545, "PWR": 598.74})
+        html = ss.ensure_embedded(html, ss.rank_panel(ss.empty_panel()))
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            runner = Path(tmp) / "run.js"
+            page.write_text(html, encoding="utf-8")
+            runner.write_text(
+                f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+(async () => {{
+const html = fs.readFileSync({json.dumps(str(page))}, "utf8");
+const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1/factorbook.html" }});
+await new Promise(function (resolve) {{ setTimeout(resolve, 30); }});
+const document = dom.window.document;
+const book = {{
+  version: 1,
+  kind: "factor-desk-paper",
+  positions: {{
+    CNH: {{ ticker: "CNH", side: "long", entry: 13.63, qty: 1, opened_at: "2026-09-17T00:00:00Z" }},
+    PWR: {{ ticker: "PWR", side: "short", entry: 617.64, qty: 1, opened_at: "2026-09-17T01:00:00Z" }}
+  }},
+  closed: {{
+    AAPL: [{{ ticker: "AAPL", side: "long", entry: 100, exit: 97.74, qty: 1, ret_pct: -2.26, closed_at: "2026-09-17T12:00:00Z" }}]
+  }}
+}};
+dom.window.localStorage.setItem("fd-paper-book", JSON.stringify(book));
+const paperBtn = document.getElementById("fd-nav-paper");
+if (!paperBtn) {{ console.log(JSON.stringify({{error:"no paper btn"}})); process.exit(2); }}
+const src = document.getElementById("fd-paper-js") && document.getElementById("fd-paper-js").textContent || "";
+paperBtn.click();
+const pane = document.getElementById("view-paper");
+const opens = document.getElementById("fd-paper-opens");
+const closed = document.getElementById("fd-paper-closed");
+const openTable = opens && opens.querySelector("table.fd-paper-table");
+const closedTable = closed && closed.querySelector("table.fd-paper-table");
+const openHeads = openTable ? Array.from(openTable.querySelectorAll("thead th")).map(function (th) {{ return th.textContent; }}) : [];
+const closedHeads = closedTable ? Array.from(closedTable.querySelectorAll("thead th")).map(function (th) {{ return th.textContent; }}) : [];
+const tableOpenRows = openTable ? openTable.querySelectorAll("tr.fd-paper-open-row").length : 0;
+const closeBtn = pane && pane.querySelector("#fd-paper-opens [data-fd-paper-close]");
+const cnhRow = pane && pane.querySelector("tr.fd-paper-open-row[data-fd-paper-ticker='CNH']");
+const cnhCells = cnhRow ? Array.from(cnhRow.querySelectorAll("td")).map(function (td) {{ return td.textContent.trim(); }}) : [];
+if (closeBtn) closeBtn.click();
+const after = JSON.parse(dom.window.localStorage.getItem("fd-paper-book") || "{{}}");
+const report = {{
+  ignorePaper: !!dom.window.__FD_BB_IGNORE_PAPER__,
+  ignoreForeign: !!dom.window.__FD_SS_IGNORE_FOREIGN_NAV__,
+  sipBeforeShow: src.indexOf("stopImmediatePropagation") !== -1 &&
+    src.split('if (kind === "paper")')[1].split('if (kind === "other")')[0].indexOf("stopImmediatePropagation") <
+    src.split('if (kind === "paper")')[1].split('if (kind === "other")')[0].indexOf("showPaper(true)"),
+  paperOn: !!(pane && pane.classList.contains("fd-paper-on")),
+  homeHide: !!(document.getElementById("home") && document.getElementById("home").classList.contains("hide")),
+  hasOpenTable: !!openTable,
+  openHeads: openHeads,
+  chipCount: opens ? opens.querySelectorAll(".fd-paper-chip").length : -1,
+  divOpenRows: opens ? opens.querySelectorAll("div.fd-paper-open-row").length : -1,
+  tableOpenRows: tableOpenRows,
+  closeWired: !!closeBtn,
+  clickBound: !!dom.window.__FD_PAPER_CLICK__,
+  cnhCells: cnhCells,
+  hasClosedTable: !!closedTable,
+  closedHeads: closedHeads,
+  closedAfterClose: Object.keys(after.positions || {{}}).sort()
+}};
+console.log(JSON.stringify(report));
+}})().catch(function (err) {{ console.error(err); process.exit(1); }});
+""",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [node, str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        if proc.returncode != 0:
+            self.fail(proc.stderr or proc.stdout)
+        report = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertTrue(report.get("ignorePaper"), report)
+        self.assertTrue(report.get("ignoreForeign"), report)
+        self.assertTrue(report.get("sipBeforeShow"), report)
+        self.assertTrue(report.get("paperOn"), report)
+        self.assertTrue(report.get("homeHide"), report)
+        self.assertTrue(report.get("hasOpenTable"), report)
+        self.assertEqual(report.get("openHeads"), ["Ticker", "Side", "Entry", "P&L %", ""])
+        self.assertEqual(report.get("chipCount"), 0)
+        self.assertEqual(report.get("divOpenRows"), 0)
+        self.assertEqual(report.get("tableOpenRows"), 2)
+        self.assertTrue(report.get("closeWired"), report)
+        self.assertTrue(report.get("clickBound"), report)
+        cells = report.get("cnhCells") or []
+        self.assertGreaterEqual(len(cells), 4, report)
+        self.assertEqual(cells[0], "CNH")
+        self.assertEqual(cells[1], "LONG")
+        self.assertEqual(cells[2], "13.63")
+        self.assertTrue(cells[3].endswith("%"), report)
+        self.assertEqual(cells[4], "Close")
+        self.assertTrue(report.get("hasClosedTable"), report)
+        self.assertEqual(
+            report.get("closedHeads"),
+            ["Date", "Ticker", "Side", "Entry", "Exit", "P&L %"],
+        )
+        self.assertEqual(report.get("closedAfterClose"), ["PWR"], report)
 
 
 if __name__ == "__main__":

@@ -27,9 +27,10 @@ Missing mark → buttons disabled, ``title`` explains why.
 Paper tab (not a home chrome strip)
 -----------------------------------
 Top-nav **Paper** (``data-view="paper"``, ``#fd-nav-paper``) opens
-``#view-paper``: open positions with live P&L % and inline **Close**,
-ticker + Buy/Sell to open at the current mark, week scorecard since
-Monday 00:00 ``America/Edmonton``, and collapsible closed trades.
+``#view-paper``: open positions as ``table.fd-paper-table`` (Ticker /
+Side / Entry / P&L % / Close), ticker + Buy/Sell to open at the
+current mark, week scorecard since Monday 00:00 ``America/Edmonton``,
+and collapsible closed trades as a matching table.
 Same ``fd-paper-book`` store as card Buy/Sell. Never inject
 ``#fd-paper-home`` into top chrome / BOOK delta.
 
@@ -69,7 +70,7 @@ QTY = 1.0
 DB_SCRIPT_ID = "fd-paper-marks"
 JS_SCRIPT_ID = "fd-paper-js"
 CSS_STYLE_ID = "fd-paper-css"
-JS_VER = "pr21-nav-sip"
+JS_VER = "pr-open-table"
 HOST_CLASS = "fd-paper"
 HOME_HOST_ID = "fd-paper-home"  # legacy chrome strip — stripped, never re-injected
 VIEW_ID = "view-paper"
@@ -155,6 +156,7 @@ WEEK_TZ_NAME = "America/Edmonton"
 OPEN_SHOW_MAX = 12  # legacy chip-strip cap; the Paper tab lists every open
 EMPTY_OPENS = "no open paper"
 EMPTY_WEEK = "no closed yet this week"
+EMPTY_CLOSED = "no closed paper"
 
 # First finite > 0 wins. Live Refresh often writes px / PX_LAST / last.
 MARK_KEYS: tuple[str, ...] = (
@@ -358,6 +360,13 @@ def fmt_pct(value: float | None) -> str:
     if value is None:
         return "—"
     return f"{value:+.2f}%"
+
+
+def fmt_px(value: float | None) -> str:
+    px = dapi_enrich.as_float(value)
+    if px is None:
+        return "—"
+    return f"{px:.2f}"
 
 
 def position_of(book: Mapping[str, Any] | None, ticker: str) -> dict[str, Any] | None:
@@ -815,19 +824,77 @@ def closed_rows(book: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     return rows
 
 
-def _open_row_html(row: Mapping[str, Any]) -> str:
-    ret = row.get("pnl_pct")
-    cls = "fd-paper-chip"
+def _side_cell(side: str | None) -> str:
+    raw = str(side or "").strip().upper()
+    return html.escape(raw or "—")
+
+
+def _ret_cell(ret: float | None) -> str:
+    cls = "fd-paper-num"
     if ret is not None:
         cls += " fd-paper-up" if ret >= 0 else " fd-paper-down"
-    ticker = html.escape(str(row.get("ticker") or ""), quote=True)
-    label = html.escape(str(row.get("label") or ticker))
+    return f'<span class="{cls}">{html.escape(fmt_pct(ret))}</span>'
+
+
+def _open_row_html(row: Mapping[str, Any]) -> str:
+    ticker_raw = str(row.get("ticker") or "")
+    ticker = html.escape(ticker_raw, quote=True)
+    ticker_txt = html.escape(ticker_raw)
+    ret = row.get("pnl_pct")
+    if not isinstance(ret, (int, float)):
+        ret = dapi_enrich.as_float(ret)
     return (
-        f'<div class="fd-paper-open-row" data-fd-paper-ticker="{ticker}">'
-        f'<button type="button" class="{cls}" data-fd-paper-ticker="{ticker}">{label}</button>'
-        f'<button type="button" class="fd-paper-btn fd-paper-close" data-fd-paper-close="1" '
-        f'data-fd-paper-ticker="{ticker}">Close</button>'
-        f"</div>"
+        f'<tr class="fd-paper-open-row" data-fd-paper-ticker="{ticker}">'
+        f'<td><button type="button" class="fd-paper-ticker" data-fd-paper-ticker="{ticker}">'
+        f"{ticker_txt}</button></td>"
+        f"<td>{_side_cell(str(row.get('side') or ''))}</td>"
+        f'<td class="fd-paper-num">{html.escape(fmt_px(row.get("entry")))}</td>'
+        f"<td>{_ret_cell(ret)}</td>"
+        f'<td><button type="button" class="fd-paper-btn fd-paper-close" data-fd-paper-close="1" '
+        f'data-fd-paper-ticker="{ticker}">Close</button></td>'
+        f"</tr>"
+    )
+
+
+def _closed_row_html(row: Mapping[str, Any]) -> str:
+    ticker_raw = str(row.get("ticker") or "")
+    ticker = html.escape(ticker_raw, quote=True)
+    return (
+        f'<tr data-fd-paper-ticker="{ticker}">'
+        f'<td class="fd-paper-num">{html.escape(_date_label(row.get("closed_at")))}</td>'
+        f"<td>{html.escape(ticker_raw)}</td>"
+        f"<td>{_side_cell(str(row.get('side') or ''))}</td>"
+        f'<td class="fd-paper-num">{html.escape(fmt_px(row.get("entry")))}</td>'
+        f'<td class="fd-paper-num">{html.escape(fmt_px(row.get("exit")))}</td>'
+        f"<td>{_ret_cell(_row_ret(row))}</td>"
+        f"</tr>"
+    )
+
+
+def _open_table_html(opens: Sequence[Mapping[str, Any]]) -> str:
+    if not opens:
+        return f'<p class="fd-paper-home-empty">{html.escape(EMPTY_OPENS)}</p>'
+    body = "".join(_open_row_html(row) for row in opens)
+    return (
+        '<table class="fd-paper-table" aria-label="Open paper">'
+        "<thead><tr>"
+        "<th>Ticker</th><th>Side</th><th>Entry</th><th>P&amp;L %</th><th></th>"
+        "</tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+    )
+
+
+def _closed_table_html(closed: Sequence[Mapping[str, Any]]) -> str:
+    if not closed:
+        return f'<p class="fd-paper-home-empty">{html.escape(EMPTY_CLOSED)}</p>'
+    body = "".join(_closed_row_html(row) for row in closed)
+    return (
+        '<table class="fd-paper-table" aria-label="Closed paper">'
+        "<thead><tr>"
+        "<th>Date</th><th>Ticker</th><th>Side</th>"
+        "<th>Entry</th><th>Exit</th><th>P&amp;L %</th>"
+        "</tr></thead>"
+        f"<tbody>{body}</tbody></table>"
     )
 
 
@@ -845,18 +912,8 @@ def panes_html(
         "tz": WEEK_TZ_NAME,
     }
     closed = closed_rows(book) if book else []
-    if opens:
-        open_inner = "".join(_open_row_html(row) for row in opens)
-    else:
-        open_inner = f'<p class="fd-paper-home-empty">{html.escape(EMPTY_OPENS)}</p>'
-    closed_bits: list[str] = []
-    for row in closed:
-        line = (
-            f"{_date_label(row.get('closed_at'))} · {str(row.get('ticker') or '')} · "
-            f"{str(row.get('side') or '').upper()} · {fmt_pct(_row_ret(row))}"
-        )
-        closed_bits.append(f"<li>{html.escape(line)}</li>")
-    closed_items = "".join(closed_bits)
+    open_inner = _open_table_html(opens)
+    closed_inner = _closed_table_html(closed)
     n_closed = len(closed)
     summary = f"Closed trades ({n_closed})" if n_closed else "Closed trades"
     empty_cls = " fd-paper-home-empty" if score.get("empty") else ""
@@ -884,9 +941,9 @@ def panes_html(
             f'      <span id="{WEEK_ID}" class="fd-paper-home-score{empty_cls}">'
             f"{html.escape(scorecard_line(score))}</span>",
             "    </section>",
-            f'    <details class="fd-paper-hist fd-paper-closed">',
+            '    <details class="fd-paper-hist fd-paper-closed">',
             f"      <summary>{html.escape(summary)}</summary>",
-            f'      <ul id="{CLOSED_ID}">{closed_items}</ul>',
+            f'      <div id="{CLOSED_ID}" class="fd-paper-closed-wrap">{closed_inner}</div>',
             "    </details>",
             "  </div>",
             "</div>",
@@ -1037,15 +1094,66 @@ body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
   gap: 6px;
 }}
 .fd-paper-opens {{
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: block;
+  overflow-x: auto;
 }}
+.fd-paper-closed-wrap {{
+  display: block;
+  overflow-x: auto;
+  margin-top: 6px;
+}}
+#{VIEW_ID} table.fd-paper-table,
+.fd-paper-table {{
+  display: table !important;
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  table-layout: auto;
+}}
+#{VIEW_ID} table.fd-paper-table thead {{ display: table-header-group !important; }}
+#{VIEW_ID} table.fd-paper-table tbody {{ display: table-row-group !important; }}
+#{VIEW_ID} table.fd-paper-table tr {{ display: table-row !important; }}
+#{VIEW_ID} table.fd-paper-table th,
+#{VIEW_ID} table.fd-paper-table td {{ display: table-cell !important; }}
+.fd-paper-table th {{
+  text-align: left;
+  color: #6b7280;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 10px 6px 0;
+  border-bottom: 1px solid #1f2937;
+  white-space: nowrap;
+}}
+.fd-paper-table td {{
+  padding: 6px 10px 6px 0;
+  border-bottom: 1px solid #1f2937;
+  color: #d1d5db;
+  vertical-align: middle;
+  white-space: nowrap;
+}}
+.fd-paper-table th:last-child,
+.fd-paper-table td:last-child {{
+  padding-right: 0;
+}}
+.fd-paper-num {{
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+}}
+.fd-paper-num.fd-paper-up {{ color: #6ee7b7; }}
+.fd-paper-num.fd-paper-down {{ color: #fda4af; }}
+.fd-paper-ticker {{
+  background: none;
+  border: 0;
+  color: #e5e7eb;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: 0.04em;
+  padding: 0;
+}}
+.fd-paper-ticker:hover {{ color: #fff; text-decoration: underline; }}
 .fd-paper-open-row {{
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+  /* table row; keep class for JS observers */
 }}
 .fd-paper-close {{
   color: #fde68a;
@@ -1066,20 +1174,12 @@ body[data-fd-paper="1"] #{VIEW_ID}.fd-paper-on:not(.hide):not([hidden]),
   margin-right: 2px;
 }}
 .fd-paper-chip {{
-  display: inline-block;
-  font: 650 10px/1.15 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.03em;
-  padding: 2px 7px;
-  border-radius: 3px;
-  border: 1px solid #4b5563;
-  color: #d1d5db;
-  background: #111827;
-  cursor: pointer;
-  font-variant-numeric: tabular-nums;
+  display: none !important;
 }}
-.fd-paper-chip:hover {{ color: #fff; }}
-.fd-paper-chip.fd-paper-up {{ color: #6ee7b7; border-color: #34d399; }}
-.fd-paper-chip.fd-paper-down {{ color: #fda4af; border-color: #fb7185; }}
+#{VIEW_ID} .fd-paper-chip,
+#{VIEW_ID} div.fd-paper-open-row {{
+  display: none !important;
+}}
 .fd-paper-home-empty, .fd-paper-home-score.fd-paper-home-empty {{
   color: #6b7280;
   letter-spacing: 0.03em;
@@ -1105,6 +1205,7 @@ def strip_js() -> str:
     week_tz = json.dumps(WEEK_TZ_NAME, ensure_ascii=False)
     empty_opens = json.dumps(EMPTY_OPENS, ensure_ascii=False)
     empty_week = json.dumps(EMPTY_WEEK, ensure_ascii=False)
+    empty_closed = json.dumps(EMPTY_CLOSED, ensure_ascii=False)
     open_limit = str(int(OPEN_SHOW_MAX))
     return r"""
 (function () {
@@ -1121,6 +1222,7 @@ def strip_js() -> str:
   var OPEN_LIMIT = """ + open_limit + r""";
   var EMPTY_OPENS = """ + empty_opens + r""";
   var EMPTY_WEEK = """ + empty_week + r""";
+  var EMPTY_CLOSED = """ + empty_closed + r""";
   var HOME_ID = "fd-paper-home";
   var VIEW = "view-paper";
   var NAV_ID = "fd-nav-paper";
@@ -1253,6 +1355,11 @@ def strip_js() -> str:
   function fmtPct(v) {
     if (v == null || !isFinite(v)) return "—";
     return (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+  }
+  function fmtPx(v) {
+    var n = num(v);
+    if (!n) return "—";
+    return n.toFixed(2);
   }
   function isoNow() { return new Date().toISOString().replace(/\.\d{3}Z$/, "Z"); }
   function dateLabel(v) { return String(v || "").slice(0, 10) || "—"; }
@@ -1419,19 +1526,25 @@ def strip_js() -> str:
     try { if (typeof selectTicker === "function") return selectTicker; } catch (e) {}
     return null;
   }
-  function chipEl(row, bookMark) {
+  function td(text, cls) {
+    var cell = document.createElement("td");
+    if (cls) cell.className = cls;
+    cell.textContent = text;
+    return cell;
+  }
+  function retEl(ret) {
+    var span = document.createElement("span");
+    span.className = "fd-paper-num";
+    if (ret != null && isFinite(ret)) span.classList.add(ret >= 0 ? "fd-paper-up" : "fd-paper-down");
+    span.textContent = fmtPct(ret);
+    return span;
+  }
+  function tickerBtn(ticker) {
     var btn = document.createElement("button");
     btn.type = "button";
-    var ticker = shortOf(row.ticker || "");
-    var mark = bookMark;
-    if (mark == null) mark = markOf(ticker, null, findMomCard(ticker));
-    var ret = pnlPct(row.side, row.entry, mark);
-    var entry = Number(row.entry);
-    btn.className = "fd-paper-chip";
-    if (ret != null) btn.classList.add(ret >= 0 ? "fd-paper-up" : "fd-paper-down");
+    btn.className = "fd-paper-ticker";
     btn.setAttribute("data-fd-paper-ticker", ticker);
-    btn.textContent = ticker + " " + String(row.side || "").toUpperCase() + " @ " +
-      (isFinite(entry) ? entry.toFixed(2) : "—") + "  " + fmtPct(ret);
+    btn.textContent = ticker;
     return btn;
   }
   function closeBtn(ticker) {
@@ -1443,15 +1556,103 @@ def strip_js() -> str:
     btn.textContent = "Close";
     return btn;
   }
+  function openTableHead() {
+    var thead = document.createElement("thead");
+    var tr = document.createElement("tr");
+    ["Ticker", "Side", "Entry", "P&L %", ""].forEach(function (h) {
+      var th = document.createElement("th");
+      th.textContent = h;
+      tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+    return thead;
+  }
+  function closedTableHead() {
+    var thead = document.createElement("thead");
+    var tr = document.createElement("tr");
+    ["Date", "Ticker", "Side", "Entry", "Exit", "P&L %"].forEach(function (h) {
+      var th = document.createElement("th");
+      th.textContent = h;
+      tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+    return thead;
+  }
+  function openRowEl(row) {
+    var ticker = shortOf(row.ticker || "");
+    var mark = markOf(ticker, null, findMomCard(ticker));
+    var ret = pnlPct(row.side, row.entry, mark);
+    var tr = document.createElement("tr");
+    tr.className = "fd-paper-open-row";
+    tr.setAttribute("data-fd-paper-ticker", ticker);
+    var tcell = document.createElement("td");
+    tcell.appendChild(tickerBtn(ticker));
+    tr.appendChild(tcell);
+    tr.appendChild(td(String(row.side || "").toUpperCase() || "—"));
+    tr.appendChild(td(fmtPx(row.entry), "fd-paper-num"));
+    var rcell = document.createElement("td");
+    rcell.appendChild(retEl(ret));
+    tr.appendChild(rcell);
+    var ccell = document.createElement("td");
+    ccell.appendChild(closeBtn(ticker));
+    tr.appendChild(ccell);
+    return tr;
+  }
+  function closedRowEl(row) {
+    var ticker = shortOf(row.ticker || "");
+    var r = (row.ret_pct != null) ? Number(row.ret_pct) : pnlPct(row.side, row.entry, row.exit);
+    if (r != null && !isFinite(r)) r = null;
+    var tr = document.createElement("tr");
+    tr.setAttribute("data-fd-paper-ticker", ticker);
+    tr.appendChild(td(dateLabel(row.closed_at), "fd-paper-num"));
+    tr.appendChild(td(ticker));
+    tr.appendChild(td(String(row.side || "").toUpperCase() || "—"));
+    tr.appendChild(td(fmtPx(row.entry), "fd-paper-num"));
+    tr.appendChild(td(fmtPx(row.exit), "fd-paper-num"));
+    var rcell = document.createElement("td");
+    rcell.appendChild(retEl(r));
+    tr.appendChild(rcell);
+    return tr;
+  }
   function stripLegacyHome() {
     var host = $(HOME_ID);
     if (host && host.parentNode) host.parentNode.removeChild(host);
   }
+  function ensureHostById(id, cls, parentSel) {
+    var el = $(id);
+    if (el && (el.tagName === "UL" || el.tagName === "OL")) {
+      var swap = document.createElement("div");
+      swap.id = id;
+      swap.className = cls || el.className || "";
+      if (el.parentNode) el.parentNode.replaceChild(swap, el);
+      el = swap;
+    }
+    if (el) return el;
+    var view = $(VIEW);
+    if (!view) return null;
+    var parent = (parentSel && view.querySelector(parentSel)) || view.querySelector(".fd-paper-tab") || view;
+    el = document.createElement("div");
+    el.id = id;
+    el.className = cls || "";
+    parent.appendChild(el);
+    return el;
+  }
+  function stripChipRows(root) {
+    var host = root || $(VIEW);
+    if (!host || !host.querySelectorAll) return;
+    var stale = host.querySelectorAll(".fd-paper-chip, div.fd-paper-open-row");
+    for (var i = 0; i < stale.length; i++) {
+      var n = stale[i];
+      if (n.closest && n.closest(".fd-paper-table")) continue;
+      if (n.parentNode) n.parentNode.removeChild(n);
+    }
+  }
   function paintTab() {
     stripLegacyHome();
-    var opensEl = $(OPENS_ID);
+    var opensEl = ensureHostById(OPENS_ID, "fd-paper-opens", ".fd-paper-opens-sec");
     var weekEl = $(WEEK_ID);
-    var closedEl = $(CLOSED_ID);
+    var closedEl = ensureHostById(CLOSED_ID, "fd-paper-closed-wrap", ".fd-paper-closed");
+    stripChipRows($(VIEW));
     if (!opensEl && !$(VIEW)) return;
     var book = loadBook();
     var opens = openList(book);
@@ -1466,15 +1667,14 @@ def strip_js() -> str:
         empty.textContent = EMPTY_OPENS;
         opensEl.appendChild(empty);
       } else {
-        opens.forEach(function (row) {
-          var ticker = shortOf(row.ticker || "");
-          var wrap = document.createElement("div");
-          wrap.className = "fd-paper-open-row";
-          wrap.setAttribute("data-fd-paper-ticker", ticker);
-          wrap.appendChild(chipEl(row));
-          wrap.appendChild(closeBtn(ticker));
-          opensEl.appendChild(wrap);
-        });
+        var table = document.createElement("table");
+        table.className = "fd-paper-table";
+        table.setAttribute("aria-label", "Open paper");
+        table.appendChild(openTableHead());
+        var tbody = document.createElement("tbody");
+        opens.forEach(function (row) { tbody.appendChild(openRowEl(row)); });
+        table.appendChild(tbody);
+        opensEl.appendChild(table);
       }
     }
     if (weekEl) {
@@ -1489,10 +1689,7 @@ def strip_js() -> str:
       var rows = [];
       Object.keys(closedMap).forEach(function (key) {
         var items = closedMap[key] || [];
-        for (var i = 0; i < items.length; i++) {
-          var row = items[i] || {};
-          rows.push(row);
-        }
+        for (var i = 0; i < items.length; i++) rows.push(items[i] || {});
       });
       rows.sort(function (a, b) {
         var ac = String(a.closed_at || ""), bc = String(b.closed_at || "");
@@ -1500,13 +1697,20 @@ def strip_js() -> str:
         var at = String(a.ticker || ""), bt = String(b.ticker || "");
         return at < bt ? -1 : (at > bt ? 1 : 0);
       });
-      for (var j = 0; j < rows.length; j++) {
-        var c = rows[j] || {};
-        var li = document.createElement("li");
-        var r = (c.ret_pct != null) ? Number(c.ret_pct) : pnlPct(c.side, c.entry, c.exit);
-        li.textContent = dateLabel(c.closed_at) + " · " + shortOf(c.ticker || "") + " · " +
-          String(c.side || "").toUpperCase() + " · " + fmtPct(r);
-        closedEl.appendChild(li);
+      if (!rows.length) {
+        var emptyC = document.createElement("p");
+        emptyC.className = "fd-paper-home-empty";
+        emptyC.textContent = EMPTY_CLOSED;
+        closedEl.appendChild(emptyC);
+      } else {
+        var ctable = document.createElement("table");
+        ctable.className = "fd-paper-table";
+        ctable.setAttribute("aria-label", "Closed paper");
+        ctable.appendChild(closedTableHead());
+        var cbody = document.createElement("tbody");
+        for (var j = 0; j < rows.length; j++) cbody.appendChild(closedRowEl(rows[j] || {}));
+        ctable.appendChild(cbody);
+        closedEl.appendChild(ctable);
       }
       if (details) {
         var sum = details.querySelector("summary");
@@ -1747,7 +1951,8 @@ def strip_js() -> str:
       return;
     }
     var chip = ev.target && ev.target.closest ? ev.target.closest("#" + VIEW + " [data-fd-paper-ticker]") : null;
-    if (chip && !chip.getAttribute("data-fd-paper-close") && !chip.getAttribute("data-fd-paper-act")) {
+    if (chip && !chip.getAttribute("data-fd-paper-close") && !chip.getAttribute("data-fd-paper-act") && !chip.getAttribute("data-fd-paper-open")) {
+      if (chip.tagName === "TR" || chip.tagName === "TABLE") return;
       ev.preventDefault();
       ev.stopPropagation();
       if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
@@ -2119,20 +2324,49 @@ def _ensure_db(html_text: str, marks: Mapping[str, Any] | None) -> str:
     return html_text + tag
 
 
+_ANY_SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>\s*", re.I | re.S)
+
+
+def _strip_stale_paper_scripts(html_text: str) -> str:
+    """Drop leftover paper IIFEs that are not ``#fd-paper-js`` (old chip painter)."""
+    text = html_text or ""
+    chunks: list[str] = []
+    last = 0
+    for match in _ANY_SCRIPT_RE.finditer(text):
+        attrs = match.group(1) or ""
+        body = match.group(2) or ""
+        if re.search(rf'\bid=["\']{JS_SCRIPT_ID}["\']', attrs, re.I):
+            continue
+        stale = (
+            "__FD_PAPER_APPLY__" in body
+            or ("fd-paper-book" in body and "function paintTab" in body)
+            or ("function chipEl" in body and "fd-paper-chip" in body)
+        )
+        if not stale:
+            continue
+        chunks.append(text[last : match.start()])
+        last = match.end()
+    if not last:
+        return text
+    chunks.append(text[last:])
+    return "".join(chunks)
+
+
 def _ensure_js(html_text: str) -> str:
     script = f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
+    text = _strip_stale_paper_scripts(html_text or "")
     text, n = re.subn(
         rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
         lambda _m: script,
-        html_text,
+        text,
         count=1,
         flags=re.I | re.S,
     )
     if n:
         return text
-    if "</body>" in html_text:
-        return html_text.replace("</body>", script + "</body>", 1)
-    return html_text + script
+    if "</body>" in text:
+        return text.replace("</body>", script + "</body>", 1)
+    return text + script
 
 
 def ensure_embedded(html_text: str, marks: Mapping[str, Any] | None = None) -> str:

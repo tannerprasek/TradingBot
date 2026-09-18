@@ -38,9 +38,9 @@ First finite `> 0` among: `paper_mark`, `px_last` / `PX_LAST` / `LAST_PRICE`, `p
 - `<details>` **Previous trades** — collapsed by default; each row is date · side · signed %.
 - Paper tab (`#view-paper`, after Options / near Experimental — not replacing Mom Up/Down):
   - **Open** — ticker field + Buy / Sell at the current mark (same mark path as card buttons).
-  - **open** — every open long/short with live P&L % and inline **Close**. Click ticker → `selectTicker` if present. Empty: `no open paper`.
+  - **open** — `table.fd-paper-table` of every open long/short: Ticker, Side, Entry, P&L % (green ≥0, red/pink &lt;0), inline **Close**. Click ticker → `selectTicker` if present. Empty: `no open paper`.
   - **week** — scorecard of closes **since Monday 00:00 America/Edmonton**: closed count, hit rate (% with positive signed return), avg win %, avg loss %. Empty: `no closed yet this week`.
-  - Collapsible **Closed trades** for the full local book.
+  - Collapsible **Closed trades** — matching `table.fd-paper-table` (date, ticker, side, entry, exit, P&L %).
 
 Leftover `#fd-paper-home` in top chrome is stripped and CSS-hidden. Mom Up/Down chrome is otherwise unchanged. `desk_dash.write_combined` always re-embeds `#fd-paper-marks` + `#view-paper` + wrap JS (`paper_trade.ensure_embedded`) so a Refresh rewrite cannot drop the tab.
 

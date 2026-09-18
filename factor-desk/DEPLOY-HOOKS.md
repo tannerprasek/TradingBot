@@ -541,9 +541,9 @@ Same-side click while a position is open is a **no-op + brief toast** (`Already 
 The book lives on a top-nav **Paper** tab (`#fd-nav-paper`, `data-view="paper"`, `#view-paper`) — **not** a home chrome strip next to BOOK / baseline:
 
 - **Open from the tab** — ticker field + Buy / Sell at the current mark (same `#fd-paper-marks` / MOM / last-print resolver as card buttons).
-- **Open book** — every open paper long/short from `localStorage` key `fd-paper-book` (same store as the card Buy/Sell). Each row is ticker, `LONG`/`SHORT`, entry, live P&L %, plus inline **Close** (opposite click: long → sell, short → buy). Click ticker → live `selectTicker` when that function exists.
+- **Open book** — `table.fd-paper-table` of every open paper long/short from `localStorage` key `fd-paper-book` (same store as the card Buy/Sell). Columns: ticker, `LONG`/`SHORT`, entry (tabular/mono), live P&L % (green ≥0, rose &lt;0), plus inline **Close** (opposite click: long → sell, short → buy). Click ticker → live `selectTicker` when that function exists. Not a pill/chip stack.
 - **Week scorecard** — closed trades **since Monday 00:00 `America/Edmonton`**: closed count, hit rate (% of those closes with **positive signed** return), avg win % and avg loss % (shorts profit when price falls; losses stay negative).
-- **Closed trades** — collapsible list of the full local book.
+- **Closed trades** — collapsible `table.fd-paper-table` of the full local book (date, ticker, side, entry, exit, P&L %).
 - Empty copy: no opens → `no open paper`; no closes this week → `no closed yet this week`.
 - Persistence is unchanged: **only** `fd-paper-book`. Do not add a sidecar write on Refresh.
 - `ensure_embedded` **strips** leftover `#fd-paper-home` from top chrome so a previous Home-strip recopy cannot jam chips next to BOOK delta.
