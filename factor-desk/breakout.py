@@ -97,7 +97,7 @@ PX_SERIES_KEYS: tuple[str, ...] = (
 
 DB_SCRIPT_ID = "fd-breakout-db"
 JS_SCRIPT_ID = "fd-breakout-js"
-JS_VER = "pr17-dense-nocardhtml"
+JS_VER = "pr17-metrics-drill"
 CSS_STYLE_ID = "fd-breakout-css"
 PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
@@ -298,14 +298,14 @@ def closes_from_panel(panel: Mapping[str, Any] | None, ticker: str) -> list[floa
 
 
 def ret_n(closes: Sequence[float], n: int) -> float | None:
-    """Percent return over ``n`` trading days (needs n+1 closes)."""
+    """Decimal return over ``n`` trading days (needs n+1 closes). Live ``fmtPct`` does ``x*100``."""
     if n <= 0 or len(closes) < n + 1:
         return None
     start = float(closes[-(n + 1)])
     last = float(closes[-1])
     if start == 0:
         return None
-    return _round_stat(100.0 * (last / start - 1.0))
+    return round(last / start - 1.0, 4)
 
 
 def atr_pct(closes: Sequence[float], period: int = ATR_N) -> float | None:
@@ -342,6 +342,30 @@ def _bench_closes(
     return []
 
 
+def _nested_metrics(card: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(card, Mapping):
+        return {}
+    raw = card.get("metrics")
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _float_any(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    return dapi_enrich.as_float(value)
+
+
+def metrics_of(card: Mapping[str, Any] | None) -> dict[str, float | None]:
+    """Live MOM ``cardHTML`` reads ``c.metrics.r20_pct`` / ``rs_63`` / ``atr_pct``."""
+    blob = _nested_metrics(card)
+    return {
+        "day": _float_any(blob.get("day_pct") if blob.get("day_pct") is not None else blob.get("r1_pct") or blob.get("ret_1d")),
+        "r20": _float_any(blob.get("r20_pct") if blob.get("r20_pct") is not None else blob.get("r20")),
+        "rs63": _float_any(blob.get("rs_63") if blob.get("rs_63") is not None else blob.get("rs63") or blob.get("rs_63d")),
+        "atr_pct": _float_any(blob.get("atr_pct") if blob.get("atr_pct") is not None else blob.get("atr")),
+    }
+
+
 def _num_stat(src: Mapping[str, Any] | None, keys: Sequence[str]) -> float | None:
     if not isinstance(src, Mapping):
         return None
@@ -361,15 +385,20 @@ def px_stats(
     ticker: str = "",
     bench: Sequence[float] | None = None,
 ) -> dict[str, float | None]:
-    """Day / R20 / RS63 / ATR% from existing card fields or price history."""
+    """Day / R20 / RS63 / ATR% from ``metrics.*``, then aliases, then price history.
+
+    Returns are **decimals** (0.1277 → live ``fmtPct`` → 12.8%). ``atr_pct`` is
+    already percent points (~2–5); do not multiply by 100 again.
+    """
     src = card if isinstance(card, Mapping) else {}
+    from_metrics = metrics_of(src)
     aliased = dict(src)
     card_render.alias_stats(aliased)
     existing = {
-        "day": _num_stat(aliased, card_render.DAY_KEYS),
-        "r20": _num_stat(aliased, card_render.R20_KEYS),
-        "rs63": _num_stat(aliased, card_render.RS63_KEYS),
-        "atr_pct": _num_stat(aliased, card_render.ATR_KEYS),
+        "day": from_metrics["day"] if from_metrics["day"] is not None else _num_stat(aliased, card_render.DAY_KEYS),
+        "r20": from_metrics["r20"] if from_metrics["r20"] is not None else _num_stat(aliased, card_render.R20_KEYS),
+        "rs63": from_metrics["rs63"] if from_metrics["rs63"] is not None else _num_stat(aliased, card_render.RS63_KEYS),
+        "atr_pct": from_metrics["atr_pct"] if from_metrics["atr_pct"] is not None else _num_stat(aliased, card_render.ATR_KEYS),
     }
     name = ticker or str(src.get("ticker") or src.get("t") or src.get("name") or "")
     closes = closes_from_card(src)
@@ -384,10 +413,29 @@ def px_stats(
         bench_closes = list(bench) if bench is not None else _bench_closes(panel, [src] if src else None)
         bench63 = ret_n(bench_closes, RS63_N)
         if stock63 is not None and bench63 is not None:
-            rs63 = _round_stat(stock63 - bench63)
+            rs63 = round(stock63 - bench63, 4)
         else:
             rs63 = stock63
     return {"day": day, "r20": r20, "rs63": rs63, "atr_pct": atr}
+
+
+def metrics_payload(stats: Mapping[str, Any] | None, card: Mapping[str, Any] | None = None) -> dict[str, float]:
+    """Shape live ``cardHTML`` actually reads."""
+    stats = stats or {}
+    out = _nested_metrics(card)
+    mapping = (
+        ("r20_pct", stats.get("r20")),
+        ("rs_63", stats.get("rs63")),
+        ("atr_pct", stats.get("atr_pct")),
+        ("day_pct", stats.get("day")),
+    )
+    for key, value in mapping:
+        if out.get(key) is None and value is not None and value != "":
+            try:
+                out[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+    return {k: v for k, v in out.items() if v is not None and v != ""}
 
 
 def attach_px_stats(
@@ -409,6 +457,9 @@ def attach_px_stats(
             row[key] = value
         elif key not in row:
             row[key] = None
+    metrics = metrics_payload(stats, card)
+    if metrics:
+        row["metrics"] = metrics
     return row
 
 
@@ -825,6 +876,9 @@ def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
             for key, value in stats.items():
                 if value is not None:
                     card.setdefault(key, value)
+            metrics = metrics_payload(stats, src)
+            if metrics:
+                card["metrics"] = metrics
             payload = {
                 "t": row.get("t") or _short(str(row.get("ticker") or "")),
                 "ticker": row.get("ticker"),
@@ -840,6 +894,7 @@ def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
                 "r20": stats.get("r20"),
                 "rs63": stats.get("rs63"),
                 "atr_pct": stats.get("atr_pct"),
+                "metrics": metrics or None,
                 "pills": card_render.why_pills(row),
                 "card": card,
             }
@@ -950,12 +1005,19 @@ def strip_js() -> str:
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }}
-  function fmt(v) {{
-    if (v == null || v === "") return "—";
-    if (typeof v === "number" && isFinite(v)) return String(v);
-    var s = String(v).trim();
-    if (!s || s === "-" || s === "—" || s === "–") return "—";
-    return s;
+  function fmtPct(x, d) {{
+    d = (d == null) ? 1 : d;
+    if (x == null || x === "") return "—";
+    var n = Number(x);
+    if (!isFinite(n)) return "—";
+    return (n * 100).toFixed(d) + "%";
+  }}
+  function fmtAtr(x) {{
+    if (x == null || x === "") return "—";
+    var n = Number(x);
+    if (!isFinite(n)) return "—";
+    if (Math.abs(n) < 1) return (n * 100).toFixed(1) + "%";
+    return n.toFixed(1) + "%";
   }}
   function pickNum(obj, keys) {{
     if (!obj) return null;
@@ -1031,7 +1093,7 @@ def strip_js() -> str:
     var a = closes[closes.length - (n + 1)];
     var b = closes[closes.length - 1];
     if (!isFinite(a) || !isFinite(b) || a === 0) return null;
-    return Math.round((100 * (b / a - 1)) * 100) / 100;
+    return Math.round((b / a - 1) * 1e6) / 1e6;
   }}
   function atrPct(closes, period) {{
     period = period || 14;
@@ -1054,10 +1116,33 @@ def strip_js() -> str:
     }}
     return [];
   }}
+  function liveMetrics(ticker) {{
+    var want = shortOf(ticker);
+    if (!want) return null;
+    var found = null;
+    if (typeof window.__FD_FIND_CARD__ === "function") {{
+      try {{ found = window.__FD_FIND_CARD__(ticker); }} catch (e0) {{ found = null; }}
+    }}
+    if (found && found.metrics) return found.metrics;
+    var bags = [];
+    var mom = window.MOM || {{}};
+    [mom.cards, mom.up, mom.down, mom.all, window.CARDS, window.MOM_CARDS].forEach(function (src) {{
+      if (!src) return;
+      if (Array.isArray(src)) {{ for (var i = 0; i < src.length; i++) bags.push(src[i]); return; }}
+      if (typeof src === "object") bags.push(src);
+    }});
+    for (var i = 0; i < bags.length; i++) {{
+      var c = bags[i];
+      if (!c || typeof c !== "object") continue;
+      if (shortOf(c.t || c.ticker || c.d || "") === want && c.metrics) return c.metrics;
+    }}
+    return null;
+  }}
   function mergeStats(row) {{
     row = row || {{}};
     var card = (row.card && typeof row.card === "object") ? row.card : {{}};
     var t = row.t || row.ticker || card.t || card.ticker || "";
+    var m = (row.metrics && typeof row.metrics === "object") ? row.metrics : ((card.metrics && typeof card.metrics === "object") ? card.metrics : (liveMetrics(t) || {{}}));
     var closes = lookupPx(t);
     var bench = benchCloses();
     var computed = {{
@@ -1066,25 +1151,27 @@ def strip_js() -> str:
       rs63: (function () {{
         var s = retN(closes, 63);
         var b = retN(bench, 63);
-        if (s != null && b != null) return Math.round((s - b) * 100) / 100;
+        if (s != null && b != null) return Math.round((s - b) * 1e6) / 1e6;
         return s;
       }})(),
       atr_pct: atrPct(closes, 14)
     }};
-    var dayKeys = ["day","Day","d1","ret_1d","r1","R1"];
-    var r20Keys = ["r20","R20","ret20","ret_20","ret_20d","RET_20D"];
-    var rsKeys = ["rs63","RS63","rs_63","rel_63","RS_63"];
-    var atrKeys = ["atr_pct","atrpct","ATR_PCT","atrs","ATRS","atr","ATR"];
-    function take(keys, fallback) {{
-      var v = pickNum(row, keys);
-      if (v == null) v = pickNum(card, keys);
+    function takeMetric(obj, keys, fallback) {{
+      var v = pickNum(obj, keys);
       if (v == null) v = fallback;
       return v;
     }}
-    row.day = take(dayKeys, computed.day);
-    row.r20 = take(r20Keys, computed.r20);
-    row.rs63 = take(rsKeys, computed.rs63);
-    row.atr_pct = take(atrKeys, computed.atr_pct);
+    row.day = takeMetric(m, ["day_pct","r1_pct","ret_1d","day"], takeMetric(row, ["day","Day","d1","ret_1d"], takeMetric(card, ["day","Day","d1"], computed.day)));
+    row.r20 = takeMetric(m, ["r20_pct","r20","R20"], takeMetric(row, ["r20","R20","ret_20d"], takeMetric(card, ["r20","R20","ret_20d"], computed.r20)));
+    row.rs63 = takeMetric(m, ["rs_63","rs63","RS63"], takeMetric(row, ["rs63","RS63","rs_63"], takeMetric(card, ["rs63","RS63","rs_63"], computed.rs63)));
+    row.atr_pct = takeMetric(m, ["atr_pct","atr"], takeMetric(row, ["atr_pct","atrs","ATR"], takeMetric(card, ["atr_pct","atrs","ATR"], computed.atr_pct)));
+    row.metrics = {{
+      r20_pct: row.r20,
+      rs_63: row.rs63,
+      atr_pct: row.atr_pct,
+      day_pct: row.day
+    }};
+    card.metrics = row.metrics;
     if (row.day != null) card.day = row.day;
     if (row.r20 != null) {{ card.r20 = row.r20; if (card.R20 == null) card.R20 = row.r20; }}
     if (row.rs63 != null) {{ card.rs63 = row.rs63; if (card.RS63 == null) card.RS63 = row.rs63; }}
@@ -1119,10 +1206,10 @@ def strip_js() -> str:
       "<header><h2>" + t + '</h2><span class="sc">' + esc(String(score)) + "</span>" +
       '<div class="pills">' + pillsHTML(pills) + "</div></header>" +
       '<div class="stats">' +
-        "<span>Day " + esc(fmt(row.day)) + "</span>" +
-        "<span>R20 " + esc(fmt(row.r20)) + "</span>" +
-        "<span>RS63 " + esc(fmt(row.rs63)) + "</span>" +
-        "<span>ATR% " + esc(fmt(row.atr_pct)) + "</span>" +
+        "<span>Day " + esc(fmtPct(row.day)) + "</span>" +
+        "<span>R20 " + esc(fmtPct(row.r20)) + "</span>" +
+        "<span>RS63 " + esc(fmtPct(row.rs63)) + "</span>" +
+        "<span>ATR% " + esc(fmtAtr(row.atr_pct)) + "</span>" +
       "</div></article>";
   }}
   function hasGhostMatrix(node) {{
@@ -1141,14 +1228,30 @@ def strip_js() -> str:
     }}
     return n >= 6;
   }}
+  function drillTicker(ticker) {{
+    var t = ticker;
+    if (!t) return false;
+    var fn = window.selectTicker;
+    if (typeof fn !== "function") {{
+      try {{ if (typeof selectTicker === "function") fn = selectTicker; }} catch (e0) {{ fn = null; }}
+    }}
+    if (typeof fn === "function") {{
+      try {{ fn(t); return true; }} catch (e1) {{}}
+    }}
+    return false;
+  }}
   function bindSelect(node, row, card) {{
-    if (!node || node.__fdBbClick) return node;
-    node.__fdBbClick = true;
-    node.addEventListener("click", function (ev) {{
+    if (!node) return node;
+    var t = shortOf((card && (card.t || card.d)) || (row && (row.t || row.ticker)) || node.getAttribute("data-t") || "");
+    var full = (card && (card.ticker || card.name)) || (row && row.ticker) || t;
+    if (t) node.setAttribute("data-t", t);
+    if (full) node.setAttribute("data-ticker", String(full));
+    node.onclick = function (ev) {{
       if (ev.target && ev.target.closest && ev.target.closest(".fd-paper, [data-fd-paper-act]")) return;
-      var sel = window.selectTicker || (typeof selectTicker === "function" ? selectTicker : null);
-      if (sel) sel((card && (card.t || card.d || card.ticker)) || (row && (row.t || row.ticker)));
-    }});
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      if (ev && ev.preventDefault) ev.preventDefault();
+      drillTicker(node.getAttribute("data-t") || t || full);
+    }};
     return node;
   }}
   function fromHTML(html, row, card) {{
@@ -1165,7 +1268,7 @@ def strip_js() -> str:
         var node = window.__FD_RENDER_ROW__(row);
         if (node && !hasGhostMatrix(node)) {{
           node.classList.remove("hide", "fd-bb-hid", "gics-hid");
-          return node;
+          return bindSelect(node, row, row.card || row);
         }}
       }} catch (e0) {{}}
     }}
@@ -1177,7 +1280,7 @@ def strip_js() -> str:
         var painted = render(card);
         if (painted && !hasGhostMatrix(painted)) {{
           painted.classList.remove("hide", "fd-bb-hid", "gics-hid");
-          return painted;
+          return bindSelect(painted, row, card);
         }}
       }} catch (e1) {{}}
     }}
@@ -1222,9 +1325,11 @@ def strip_js() -> str:
     btn.setAttribute("aria-pressed", on ? "true" : "false");
   }}
   function navButtons() {{
-    return document.querySelectorAll("#topnav .btn, #topnav .nav-btn, .topnav .nav-btn, nav .btn, nav .nav-btn, [data-view], [data-fd-breakout], [data-fd-breakdown]");
+    return document.querySelectorAll("#topnav .btn, #topnav .nav-btn, .topnav .nav-btn, nav .btn, nav .nav-btn, #fd-nav-breakout, #fd-nav-breakdown, button[data-fd-breakout], button[data-fd-breakdown], button[data-view]");
   }}
   function oursOf(b, kind) {{
+    if (!b || !b.getAttribute) return false;
+    if (b.closest && b.closest("article.card, #breakout-grid, #breakdown-grid, #view-breakout, #view-breakdown") && !(b.closest("#topnav, nav, .topnav"))) return false;
     var view = (b.getAttribute("data-view") || "");
     return view === kind || (kind === "breakout" && (b.getAttribute("data-fd-breakout") === "1" || b.id === "fd-nav-breakout")) ||
       (kind === "breakdown" && (b.getAttribute("data-fd-breakdown") === "1" || b.id === "fd-nav-breakdown"));
@@ -1257,8 +1362,23 @@ def strip_js() -> str:
   window.__FD_BB_SHOW__ = show;
   window.__FD_BB_SYNC_NAV__ = syncNav;
   window.__FD_BB_RENDER_ROW__ = renderRow;
+  function isNavControl(el) {{
+    if (!el || !el.getAttribute) return false;
+    if (el.closest && el.closest("article.card, .card, #breakout-grid, #breakdown-grid, #fd-name-drill")) return false;
+    if (el.id === "view-breakout" || el.id === "view-breakdown" || el.id === "breakout-grid" || el.id === "breakdown-grid") return false;
+    var tag = (el.tagName || "").toLowerCase();
+    var inNav = !!(el.closest && el.closest("#topnav, nav, .topnav"));
+    if (tag === "button" || tag === "a" || (el.classList && (el.classList.contains("btn") || el.classList.contains("nav-btn")))) {{
+      if (inNav) return true;
+      if (el.id === "fd-nav-breakout" || el.id === "fd-nav-breakdown") return true;
+      if (el.getAttribute("data-fd-breakout") === "1" || el.getAttribute("data-fd-breakdown") === "1") return true;
+      var view = (el.getAttribute("data-view") || "").toLowerCase();
+      if (inNav && (view === "breakout" || view === "breakdown" || view)) return true;
+    }}
+    return false;
+  }}
   function kindOf(btn) {{
-    if (!btn || !btn.getAttribute) return "";
+    if (!isNavControl(btn)) return "";
     var view = (btn.getAttribute("data-view") || "").toLowerCase();
     if (view === "breakout" || btn.getAttribute("data-fd-breakout") === "1" || btn.id === "fd-nav-breakout") return "breakout";
     if (view === "breakdown" || btn.getAttribute("data-fd-breakdown") === "1" || btn.id === "fd-nav-breakdown") return "breakdown";
@@ -1267,14 +1387,17 @@ def strip_js() -> str:
     if (label === "Breakdown") return "breakdown";
     if (btn.id === "refresh" || btn.id === "options-refresh") return "";
     if (btn.closest && btn.closest("#topnav, nav, .topnav") && (btn.classList.contains("btn") || btn.classList.contains("nav-btn") || view)) return "other";
-    if (btn.classList && (btn.classList.contains("nav-btn") || view)) return "other";
+    if (btn.classList && btn.classList.contains("nav-btn")) return "other";
     return "";
   }}
   if (window.__FD_BB_CLICK__) {{
     document.removeEventListener("click", window.__FD_BB_CLICK__, true);
   }}
   window.__FD_BB_CLICK__ = function (ev) {{
-    var t = ev.target && ev.target.closest ? ev.target.closest("button, [data-view], [data-fd-breakout], [data-fd-breakdown]") : ev.target;
+    if (ev.target && ev.target.closest && ev.target.closest("article.card, .card")) return;
+    var t = ev.target && ev.target.closest
+      ? ev.target.closest("#topnav .nav-btn, #topnav .btn, nav .nav-btn, nav .btn, .topnav .nav-btn, button[data-view], button[data-fd-breakout], button[data-fd-breakdown], #fd-nav-breakout, #fd-nav-breakdown")
+      : ev.target;
     var kind = kindOf(t);
     if (!kind) return;
     if (kind === "breakout" || kind === "breakdown") {{

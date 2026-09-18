@@ -514,19 +514,20 @@ Pills (`DA·A` / `DA·B` / `DA·C` / `DA`) appear when a recent `YYYY-MM-DD-*.md
 
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
-| `card_render.py` | **new / recopy** — wrap live `cardHTML`; portable chip CSS on `article.card`; `__FD_RENDER_CARD__` / `__FD_RENDER_ROW__`; Day/R20/RS63/ATR% aliases |
-| `breakout.py` | **recopy** — tabs only rank; grids never call `cardHTML`; dense Day/R20/RS63/ATR% fallback; `px_stats` from prices_long / px_series |
+| `card_render.py` | **recopy** — wrap live `cardHTML`; portable chip CSS; `__FD_RENDER_CARD__` / `__FD_RENDER_ROW__`; Day/R20/RS63/ATR% aliases |
+| `breakout.py` | **recopy** — never call `cardHTML`; dense Day/R20/RS63/ATR% cards; `metrics.r20_pct` / `rs_63` / `atr_pct`; nav listener is nav-only so card click → `selectTicker` (name-drill), not `show(breakdown)` |
 | `book_delta.py` | new — since-last-Refresh strip |
 | `desk_hitch.py` | new — DA hitch pills |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/BREAKOUT-BREAKDOWN.md` | optional, for the desk |
 | gitignore `desk_snapshot.json` | local, like `mom_score_hist.json` |
 
-Do **not** copy generated `factorbook.html`, `desk_snapshot.json`, `mom_score_hist.json`, or the ideas markdown. After drop-in, Refresh once and confirm Breakout / Breakdown sit beside Momentum Down, clicking Breakout shows the same dense card grid as Momentum Up (full card chrome, **chip tags** not a cramped gray matrix, **band / Δ chips** not a brown why dump, few names), `#fd-card-js` + `#fd-breakout-db` are filled, `#fd-book-delta` shows `baseline set` on the first write, hitch pills appear only when `FACTOR_DESK_IDEAS_DIR` (or `ideas/`) has dated notes, and no skinny `#fd-bb-*` list bleeds onto other tabs.
+Do **not** copy generated `factorbook.html`, `desk_snapshot.json`, `mom_score_hist.json`, or the ideas markdown. After drop-in, call `card_render.ensure_embedded` then `breakout.ensure_embedded(html, ranked)` on the **live ~4.8MB** `factorbook.html` only — never replace it with skinny `desk_dash` generator HTML (~190KB). Refresh once and confirm: Breakout / Breakdown sit beside Momentum Down; cards are dense MOM chrome (no gray digest matrix); Day/R20/RS63/ATR% are numbers; **clicking a card opens the company name-drill** (`selectTicker`) and does **not** jump to the Breakdown tab; `#fd-card-js` + `#fd-breakout-db` are filled; Paper (`#fd-paper-marks`) and Experimental stay; `#fd-book-delta` shows `baseline set` on the first write. No CoS Desktop hot-patches — recopy the modules.
 
 Suggested Desktop sync paths:
 
 - Code: `factor-desk/*.py` → `C:\Users\MLP\Desktop\factorbook\`
+- Then patch live HTML in place (`ensure_embedded`); do not emit a new skinny desk
 - Ideas: `C:\Users\MLP\Desktop\jr-analysts\ideas\` → env `FACTOR_DESK_IDEAS_DIR` or a synced copy at `C:\Users\MLP\Desktop\factorbook\ideas\`
 
 ---

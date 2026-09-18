@@ -53,12 +53,15 @@ Optional boosts (cheap card fields only — **no DAPI pull**):
 
 Top-nav **Breakout** / **Breakdown** sit beside Momentum Up / Down. Tabs **only rank/filter**. Clicking a tab fills `#view-breakout` / `#view-breakdown` (`.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`) with **dense MOM-style cards**:
 
-- Ranked JSON (`#fd-breakout-db`) carries top-level numeric `day` / `r20` / `rs63` / `atr_pct` plus a nested `card` object. Stats are computed from the same close history Mom uses (`card.px_series` / `prices_long.csv` / live `px.by`) — they must not be left `null` when that history exists.
+- Ranked JSON (`#fd-breakout-db`) carries top-level numeric `day` / `r20` / `rs63` / `atr_pct` **and** a nested `metrics` blob (`r20_pct` / `rs_63` / `atr_pct`) — the shape live Momentum `cardHTML` actually reads. Returns are decimals (`0.1277` → desk `fmtPct` → `12.8%`). `atr_pct` is already percent points (~2–5). Prefer `card.metrics` from the live book; else compute from `px_series` / `prices_long.csv` / live `px.by`.
 - [`card_render.py`](../card_render.py) still wraps live `cardHTML` for Momentum Up/Down / Paper. Breakout JS **never** calls `cardHTML`. If `__FD_RENDER_ROW__` is missing or paints the 12-label gray digest matrix, Breakout builds its own dense card (ticker, score, Day/R20/RS63/ATR% row, spike chips).
+- **Card click opens the company name-drill** via `selectTicker(data-t)` — same as Mom Up. The capture-phase nav listener matches **nav buttons only** (`#topnav .nav-btn`, `button[data-view]`, `#fd-nav-breakout` / `#fd-nav-breakdown`). It does **not** match `#view-breakout` / `#view-breakdown` `[data-view]`, so a click on a card inside the pane cannot call `show("breakdown")`.
 - BB “why” is extra chips (`band 10`, `+3/7d`) plus the existing `mom-streak` pill — **not** a brown `.why` dump and not a gray tag matrix (MA FAN / CLOSE HI / …).
-- `breakout.ensure_embedded(html, ranked=None)` **does not skip the JS patch**. `#fd-breakout-js` is always replaced (version stamp `pr17-dense-nocardhtml`) so an old `__FD_BB_BOUND__` IIFE cannot keep the `cardHTML` fallback alive.
+- `breakout.ensure_embedded(html, ranked=None)` **does not skip the JS patch**. `#fd-breakout-js` is always replaced (version stamp `pr17-metrics-drill`) so an old `__FD_BB_BOUND__` IIFE cannot keep the `cardHTML` fallback alive.
 
-Drill is `selectTicker`. Legacy `#fd-bb-breakout` / `#fd-bb-breakdown` stay empty and hidden so old CSS cannot paint skinny stub articles. `desk_dash.write_combined` always re-embeds `#fd-card-js` then `#fd-breakout-db` + nav + JS (`card_render.ensure_embedded` then `breakout.ensure_embedded`) so a Refresh rewrite cannot drop the renderer or the tabs. Live ~2.7–4.8MB `factorbook.html` is **patched**, never replaced. Recopy `card_render.py` **and** `breakout.py`; paste the small `desk_dash` `ensure_embedded` hook; do not wholesale replace live `desk_dash.py`.
+Drill is `article.card.onclick → selectTicker`. Legacy `#fd-bb-breakout` / `#fd-bb-breakdown` stay empty and hidden so old CSS cannot paint skinny stub articles. `desk_dash.write_combined` always re-embeds `#fd-card-js` then `#fd-breakout-db` + nav + JS (`card_render.ensure_embedded` then `breakout.ensure_embedded`) so a Refresh rewrite cannot drop the renderer or the tabs. Live ~2.7–4.8MB `factorbook.html` is **patched**, never replaced.
+
+**Desktop sync:** recopy `card_render.py` and `breakout.py` next to live `desk_dash.py`, then run `ensure_embedded` against the live ~4.8MB `factorbook.html` only. Do **not** wholesale replace live `desk_dash.py` and do **not** emit skinny ~190KB generator HTML. No CoS Desktop hot-patches — this pack is the durable path.
 
 ## Related
 

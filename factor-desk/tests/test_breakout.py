@@ -199,8 +199,34 @@ class RankingTests(unittest.TestCase):
         self.assertIsInstance(stats["atr_pct"], float)
         self.assertIsInstance(stats["day"], float)
         self.assertGreater(stats["r20"], 0)
+        self.assertLess(abs(stats["r20"]), 1.0)
         self.assertGreater(stats["atr_pct"], 0)
         self.assertNotEqual(stats["r20"], stats["rs63"])
+
+    def test_slim_payload_reads_live_metrics_blob(self) -> None:
+        ranked = {
+            "breakout": [
+                {
+                    "t": "SPCX",
+                    "ticker": "SPCX US Equity",
+                    "score": 9,
+                    "why": "band 9",
+                    "_card": {
+                        "t": "SPCX",
+                        "ticker": "SPCX US Equity",
+                        "metrics": {"r20_pct": 0.1277, "rs_63": 0.041, "atr_pct": 2.3},
+                    },
+                }
+            ],
+            "breakdown": [],
+        }
+        row = bo.slim_payload(ranked)["breakout"][0]
+        self.assertEqual(row["metrics"]["r20_pct"], 0.1277)
+        self.assertEqual(row["metrics"]["rs_63"], 0.041)
+        self.assertEqual(row["metrics"]["atr_pct"], 2.3)
+        self.assertEqual(row["r20"], 0.1277)
+        self.assertEqual(row["card"]["metrics"]["r20_pct"], 0.1277)
+        self.assertEqual(row["card"]["metrics"]["atr_pct"], 2.3)
 
     def test_slim_payload_computes_stats_when_card_fields_null(self) -> None:
         closes = [100.0]
@@ -235,6 +261,9 @@ class RankingTests(unittest.TestCase):
         self.assertIsInstance(row["day"], float)
         self.assertIsInstance(row["card"], dict)
         self.assertEqual(row["card"]["r20"], row["r20"])
+        self.assertLess(abs(row["r20"]), 1.0)
+        self.assertIn("r20_pct", row["metrics"])
+        self.assertEqual(row["metrics"]["r20_pct"], row["r20"])
         self.assertNotIn("px_series", json.dumps(payload))
 
     def test_rank_book_fills_stats_from_prices_long(self) -> None:
@@ -399,6 +428,11 @@ function syncNav() {}
         self.assertNotIn("window.cardHTML", js)
         self.assertNotRegex(js, r"\bcardHTML\s*\(")
         self.assertIn("selectTicker", js)
+        self.assertIn("isNavControl", js)
+        self.assertIn('closest("article.card, .card")', js)
+        self.assertNotIn('closest("button, [data-view], [data-fd-breakout], [data-fd-breakdown]")', js)
+        self.assertIn("fmtPct", js)
+        self.assertIn("r20_pct", js)
         self.assertNotIn("if (!display) return null", js)
         self.assertNotIn("fd-bb-card", js)
         self.assertNotIn('key: "fd-bb"', js)
@@ -520,6 +554,9 @@ function syncNav() {}
         self.assertIn("RS63 ", js)
         self.assertIn("ATR% ", js)
         self.assertIn("hasGhostMatrix", js)
+        self.assertIn("fmtPct", js)
+        self.assertIn("selectTicker", js)
+        self.assertNotIn('closest("button, [data-view], [data-fd-breakout], [data-fd-breakdown]")', js)
 
     def test_jsdom_dense_fallback_fills_stats_without_ghost(self) -> None:
         node = shutil.which("node")
@@ -594,15 +631,29 @@ const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1
 const window = dom.window;
 window.px = {{ by: {{ SPCX: {json.dumps(closes)} }} }};
 const called = [];
+const views = [];
 const orig = window.cardHTML;
 window.cardHTML = function () {{ called.push("cardHTML"); return orig.apply(this, arguments); }};
+window.selectTicker = function (t) {{ called.push("sel:" + String(t)); }};
+const origShow = window.__FD_BB_SHOW__;
+window.__FD_BB_SHOW__ = function (kind) {{ views.push(String(kind)); if (origShow) return origShow.apply(this, arguments); }};
+const pane = window.document.getElementById("view-breakout");
+if (pane) {{ pane.classList.remove("hide"); pane.setAttribute("data-view", "breakout"); }}
+const grid = window.document.getElementById("breakout-grid");
 const row = JSON.parse(window.document.getElementById("fd-breakout-db").textContent).breakout[0];
+row.metrics = {{ r20_pct: 0.1277, rs_63: 0.04, atr_pct: 2.3 }};
 const node = window.__FD_BB_RENDER_ROW__(row);
 if (!node) {{ console.log(JSON.stringify({{error:"no node"}})); process.exit(2); }}
+if (grid) grid.appendChild(node);
+else if (pane) pane.appendChild(node);
+else window.document.body.appendChild(node);
+node.click();
 const report = {{
   called: called,
+  views: views,
   flags: {{ portable: !!window.__FD_BB_PORTABLE_FIX__, noCard: !!window.__FD_BB_NO_CARDHTML_FALLBACK__ }},
   dense: node.getAttribute("data-fd-bb-dense"),
+  dataT: node.getAttribute("data-t"),
   text: (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim(),
   html: node.outerHTML
 }};
@@ -619,9 +670,12 @@ console.log(JSON.stringify(report));
             )
             self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
             report = json.loads(proc.stdout.strip().splitlines()[-1])
-            self.assertEqual(report["called"], [], report)
+            self.assertEqual(report["called"], ["sel:SPCX"], report)
+            self.assertNotIn("cardHTML", report["called"])
+            self.assertNotIn("breakdown", report.get("views") or [])
             self.assertTrue(report["flags"]["noCard"])
             self.assertEqual(report.get("dense"), "1")
+            self.assertEqual(report.get("dataT"), "SPCX")
             text = report["text"]
             self.assertIn("SPCX", text)
             self.assertNotIn("CLOSE HI", text)
@@ -629,7 +683,7 @@ console.log(JSON.stringify(report));
             self.assertNotIn("V.EMA", text)
             self.assertIn("R20 ", text)
             self.assertNotIn("R20 —", text)
-            self.assertNotIn("R20 -", text)
+            self.assertIn("12.8%", text)
             self.assertIn("ATR%", text)
             self.assertRegex(text, r"R20 -?\d")
 
