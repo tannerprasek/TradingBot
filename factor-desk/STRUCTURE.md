@@ -9,6 +9,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `dapi_enrich.py` | DAPI enrichment pack (9 layers, chips, JSON) |
 | `gics_filter.py` | GICS sector chip filter (pure logic + strip CSS/JS; `ensure_embedded`) |
 | `mom_streak.py` | Home momentum rank streak vs 5 (tags + hist + span) |
+| `card_render.py` | Portable MOM `cardHTML` wrap — one card component for every tab |
 | `breakout.py` | Breakout / Breakdown tab ranking (mid-score climbers / crackers) |
 | `book_delta.py` | Since-last-Refresh chip strip (`desk_snapshot.json`) |
 | `desk_hitch.py` | Desk Analyst hitch pills from `ideas/` notes |

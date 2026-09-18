@@ -19,6 +19,7 @@ HERE = __import__("pathlib").Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import card_render  # noqa: E402
 import dapi_enrich  # noqa: E402
 import mom_streak  # noqa: E402
 
@@ -559,6 +560,7 @@ def slim_payload(ranked: Mapping[str, Any] | None) -> dict[str, Any]:
                     "label": row.get("label"),
                     score_key: row.get(score_key),
                     "why": row.get("why"),
+                    "pills": card_render.why_pills(row),
                 }
             )
         return out
@@ -613,11 +615,14 @@ article.fd-bb-card, .fd-bb-card {{
 
 
 def strip_js() -> str:
-    """Fill #breakout-grid / #breakdown-grid with live ``cardHTML`` (MOM chrome).
+    """Fill #breakout-grid / #breakdown-grid via the shared MOM card renderer.
 
-    Capture-phase click stops the live topnav listener. ``show`` is
-    ``window.__FD_BB_SHOW__`` so a patched live ``setView`` early-returns
-    without ``paint()`` and without toggling legacy ``#fd-bb-*`` panes.
+    Tabs only choose which rows to show. Markup comes from
+    ``window.__FD_RENDER_ROW__`` / live ``cardHTML`` (see ``card_render.py``),
+    not a Breakout-specific skin. Capture-phase click stops the live topnav
+    listener. ``show`` is ``window.__FD_BB_SHOW__`` so a patched live
+    ``setView`` early-returns without ``paint()`` and without toggling
+    legacy ``#fd-bb-*`` panes.
     """
     view_ids = json.dumps(list(NATIVE_VIEW_IDS))
     return rf"""
@@ -641,84 +646,44 @@ def strip_js() -> str:
     catch (e) {{ return {{ breakout: [], breakdown: [] }}; }}
   }}
   function shortOf(t) {{ return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }}
-  function momCards() {{
-    var mom = window.MOM || {{}};
-    if (Array.isArray(mom.cards)) return mom.cards; // window.MOM.cards
-    if (Array.isArray(mom.up) && Array.isArray(mom.down)) return mom.up.concat(mom.down);
-    if (Array.isArray(window.MOM_CARDS)) return window.MOM_CARDS;
-    return [];
-  }}
-  function findMomCard(ticker) {{
-    var want = shortOf(ticker);
-    var cards = momCards();
-    for (var i = 0; i < cards.length; i++) {{
-      var c = cards[i] || {{}};
-      var t = shortOf(c.t || c.ticker || c.name || c.symbol || "");
-      if (t && t === want) return c;
-    }}
-    return null;
-  }}
-  function withPills(card, row) {{
-    row = row || {{}};
-    var out = {{}};
-    if (card) {{ for (var k in card) out[k] = card[k]; }}
-    var display = shortOf(out.d || out.t || out.ticker || out.name || out.symbol || row.t || row.ticker || row.d || "");
-    if (display) {{
-      if (!out.t) out.t = display;
-      if (!out.d) out.d = display;
-      if (!out.name) out.name = display;
-      if (!out.ticker) out.ticker = row.ticker || out.ticker || display;
-    }}
-    if (out.score == null && row.score != null) out.score = row.score;
-    if (out.mom_score == null && row.score != null) out.mom_score = row.score;
-    var pills = Array.isArray(out.enrich_pills) ? out.enrich_pills.slice() : [];
-    pills = pills.filter(function (p) {{ return p && p.key !== "fd-bb"; }});
-    if (row.why) {{
-      pills.push({{ key: "fd-bb", label: String(row.why), cls: "fd-bb-why", title: String(row.why) }});
-    }}
-    if (row.label && !pills.some(function (p) {{ return p && p.key === "mom-streak"; }})) {{
-      var side = row.side || "";
-      pills.push({{
-        key: "mom-streak",
-        label: String(row.label),
-        cls: side === "below" ? "mom-streak-down" : (side === "above" ? "mom-streak-up" : "mom-streak"),
-        title: String(row.label)
-      }});
-    }}
-    out.enrich_pills = pills;
-    return out;
-  }}
-  function htmlFn() {{
-    if (typeof window.cardHTML === "function") return window.cardHTML;
-    if (typeof cardHTML === "function") return cardHTML;
-    return null;
-  }}
-  function selectFn() {{
-    if (typeof window.selectTicker === "function") return window.selectTicker;
-    if (typeof selectTicker === "function") return selectTicker;
-    return null;
-  }}
   function renderRow(row) {{
     row = row || {{}};
-    var fn = htmlFn();
-    if (!fn) return null;
-    var card = withPills(findMomCard(row.ticker || row.t), row);
-    var display = shortOf(card.d || card.t || card.ticker || card.name || row.t || row.ticker || "");
+    if (typeof window.__FD_RENDER_ROW__ === "function") {{
+      var node = window.__FD_RENDER_ROW__(row);
+      if (node) {{
+        node.classList.remove("hide", "fd-bb-hid", "gics-hid");
+        return node;
+      }}
+    }}
+    var norm = window.__FD_NORMALIZE_CARD__;
+    var find = window.__FD_FIND_CARD__;
+    var render = window.__FD_RENDER_CARD__;
+    var card = typeof norm === "function"
+      ? norm((typeof find === "function" ? find(row.ticker || row.t) : null), row)
+      : row;
+    var display = shortOf((card && (card.d || card.t || card.ticker || card.name)) || row.t || row.ticker || "");
     if (!display) return null;
-    card.d = card.d || display;
-    card.t = card.t || display;
-    card.name = card.name || display;
-    if (!card.ticker) card.ticker = row.ticker || display;
+    if (typeof render === "function") {{
+      var painted = render(card);
+      if (painted) {{
+        painted.classList.remove("hide", "fd-bb-hid", "gics-hid");
+        return painted;
+      }}
+    }}
+    var fn = null;
+    try {{ if (typeof window.cardHTML === "function") fn = window.cardHTML; }} catch (e1) {{ fn = null; }}
+    if (!fn) {{ try {{ if (typeof cardHTML === "function") fn = cardHTML; }} catch (e2) {{ fn = null; }} }}
+    if (!fn) return null;
     var wrap = document.createElement("div");
     wrap.innerHTML = fn(card);
-    var node = wrap.firstElementChild;
-    if (!node) return null;
-    node.classList.remove("hide", "fd-bb-hid", "gics-hid");
-    node.addEventListener("click", function () {{
-      var sel = selectFn();
+    var fallback = wrap.firstElementChild;
+    if (!fallback) return null;
+    fallback.classList.remove("hide", "fd-bb-hid", "gics-hid");
+    fallback.addEventListener("click", function () {{
+      var sel = window.selectTicker || (typeof selectTicker === "function" ? selectTicker : null);
       if (sel) sel(card.t || card.d || card.ticker || row.t);
     }});
-    return node;
+    return fallback;
   }}
   function fillGrid(grid, rows) {{
     if (!grid) return;
@@ -835,7 +800,7 @@ def strip_js() -> str:
 
 
 def panes_html(ranked: Mapping[str, Any] | None = None, article_html=None) -> str:
-    """Momentum-style view shells. Grids are filled by ``strip_js`` via ``cardHTML``.
+    """Momentum-style view shells. Grids are filled by ``__FD_RENDER_ROW__``.
 
     ``ranked`` / ``article_html`` are unused (kept for call-site compatibility).
     Legacy ``#fd-bb-*`` stay empty so old CSS cannot paint stub articles.

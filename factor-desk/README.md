@@ -29,6 +29,7 @@ factor-desk/
   dapi_enrich.py         # DAPI enrichment pack (9 layers, no news)
   gics_filter.py         # GICS sector chips (filter strip, not a Sectors tab)
   mom_streak.py          # home momentum rank streak vs 5
+  card_render.py         # portable MOM cardHTML wrap (one card, every tab)
   breakout.py            # Breakout / Breakdown tab ranking
   book_delta.py          # since-last-Refresh chip strip
   desk_hitch.py          # Desk Analyst hitch pills

@@ -51,7 +51,14 @@ Optional boosts (cheap card fields only — **no DAPI pull**):
 
 ## UI
 
-Top-nav **Breakout** / **Breakdown** sit beside Momentum Up / Down. Clicking a tab fills `#view-breakout` / `#view-breakdown` (`.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`) with live `cardHTML(window.MOM.cards)` — the same dense chrome as Momentum Up — plus why / streak `enrich_pills` (`fd-bb`, `mom-streak`). After merging a MOM card (or a thin BB row like `{t:'AMGN', ticker:'AMGN US Equity', ...}`), `withPills` / `renderRow` always set display `d` / `t` / `name` from the short ticker so titles never render as `"undefined"`. Drill is `selectTicker`. Legacy `#fd-bb-breakout` / `#fd-bb-breakdown` stay empty and hidden so old CSS cannot paint skinny stub articles. `desk_dash.write_combined` always re-embeds `#fd-breakout-db` + nav + JS (`breakout.ensure_embedded`) so a Refresh rewrite cannot drop the tabs. Live ~2.7MB `factorbook.html` is **patched**, never replaced. Recopy `breakout.py`; do not wholesale replace live `desk_dash.py`.
+Top-nav **Breakout** / **Breakdown** sit beside Momentum Up / Down. Tabs **only rank/filter**; they do not invent card markup. Clicking a tab fills `#view-breakout` / `#view-breakdown` (`.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`) by resolving each ticker to a **full MOM-shaped card** and mounting it through the shared renderer:
+
+- [`card_render.py`](../card_render.py) wraps live `cardHTML` (fallback if missing) as `window.__FD_RENDER_CARD__` / `window.__FD_RENDER_ROW__`
+- Breakout JS calls `__FD_RENDER_ROW__(row)` — same ticker / score / tag chips / R20 / RS63 / ATR / Buy/Sell / previous trades as Momentum Up
+- BB “why” is extra chips on the card object (`band 10`, `+3/7d`) plus the existing `mom-streak` pill — **not** a brown `.why` dump and not a long `fd-bb` text block
+- Tag chrome (MA FAN / CLOSE HI / 52W HI / …) is the same `.badge.spike-chip` language as MOM, with portable CSS on `article.card` so the node can move between `#breakout-grid`, `#home`, and mom grids without tab-specific fixups
+
+Drill is `selectTicker`. Legacy `#fd-bb-breakout` / `#fd-bb-breakdown` stay empty and hidden so old CSS cannot paint skinny stub articles. `desk_dash.write_combined` always re-embeds `#fd-card-js` then `#fd-breakout-db` + nav + JS (`card_render.ensure_embedded` then `breakout.ensure_embedded`) so a Refresh rewrite cannot drop the renderer or the tabs. Live ~2.7–4.8MB `factorbook.html` is **patched**, never replaced. Recopy `card_render.py` **and** `breakout.py`; paste the small `desk_dash` `ensure_embedded` hook; do not wholesale replace live `desk_dash.py`.
 
 ## Related
 

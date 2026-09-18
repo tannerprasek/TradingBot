@@ -23,6 +23,7 @@ import dapi_enrich  # noqa: E402
 import gics_filter  # noqa: E402
 import mom_streak  # noqa: E402
 import chart_marks  # noqa: E402
+import card_render  # noqa: E402
 import breakout  # noqa: E402
 import book_delta  # noqa: E402
 import desk_hitch  # noqa: E402
@@ -741,6 +742,7 @@ def render_html(
     .empty {{ color: #9ca3af; }}
     {NAV_CSS}
     {PILL_CSS}
+    {card_render.strip_css()}
     {gics_filter.strip_css()}
     {mom_streak.streak_css()}
     {chart_marks.strip_css()}
@@ -791,6 +793,7 @@ def render_html(
     html_text = gics_filter.ensure_embedded(html_text, db)
     html_text = mom_streak.ensure_embedded(html_text, streak_map)
     html_text = chart_marks.ensure_embedded(html_text, chart_map)
+    html_text = card_render.ensure_embedded(html_text)
     html_text = breakout.ensure_embedded(html_text, ranked)
     html_text = book_delta.ensure_embedded(html_text, delta)
     html_text = desk_hitch.ensure_embedded(html_text, hitch_map)
@@ -863,6 +866,7 @@ def write_combined(
     text = gics_filter.ensure_embedded(text, mapping)
     text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards, hist=hist))
     text = chart_marks.ensure_embedded(text, chart_marks.chart_db(cards))
+    text = card_render.ensure_embedded(text)
     text = breakout.ensure_embedded(text, ranked)
     text = book_delta.ensure_embedded(text, delta)
     text = desk_hitch.ensure_embedded(text, hitch_map)

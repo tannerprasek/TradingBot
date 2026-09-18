@@ -404,7 +404,7 @@ Also copy `mom_streak.py` (now has `streak_span` / `mom_streak_start` / `mom_str
 
 ## 9) Breakout / Breakdown tabs + book-delta strip + Desk Analyst hitch
 
-Copy `breakout.py`, `book_delta.py`, `desk_hitch.py` next to live `desk_dash.py`. **Do not** reintroduce a Sectors tab. **Do not** add a DAPI stage. **Recopy `breakout.py`** after this hot-fix; **do not wholesale replace** live `desk_dash.py` (paste the `write_combined` tail below if that hook is not already there).
+Copy `card_render.py`, `breakout.py`, `book_delta.py`, `desk_hitch.py` next to live `desk_dash.py`. **Do not** reintroduce a Sectors tab. **Do not** add a DAPI stage. **Recopy `card_render.py` and `breakout.py`** after this hot-fix; **do not wholesale replace** live `desk_dash.py` (paste the `write_combined` tail below if that hook is not already there).
 
 Live FLAGS/WATCH/MOM cards use **`t`** and **`score`**. Stamp `list` (`FLAGS` / `WATCH` / `OUTLIERS` / `MOM`) on each card dict when you already know the bucket — boosts and the delta strip read that field (plus `flags` / `watch` / `outlier` booleans and hop/leader / OPT SPIKE already on the card).
 
@@ -413,6 +413,7 @@ Live FLAGS/WATCH/MOM cards use **`t`** and **`score`**. Stamp `list` (`FLAGS` / 
 After the existing GICS / streak / chart `ensure_embedded` tail:
 
 ```python
+import card_render
 import breakout
 import book_delta
 import desk_hitch
@@ -427,7 +428,8 @@ delta = book_delta.diff_snapshots(book_delta.load_snapshot(root=PATHS["fb_root"]
 html = gics_filter.ensure_embedded(html, db)
 html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
 html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
-html = breakout.ensure_embedded(html, ranked)       # Breakout/Breakdown nav + view shells + #fd-breakout-db
+html = card_render.ensure_embedded(html)           # wrap live cardHTML; portable chip CSS
+html = breakout.ensure_embedded(html, ranked)      # Breakout/Breakdown nav + view shells + #fd-breakout-db
 html = book_delta.ensure_embedded(html, delta)      # #fd-book-delta strip
 html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
 # dest.write_text(html)
@@ -436,11 +438,17 @@ book_delta.write_snapshot(snap, root=PATHS["fb_root"])  # gitignored desk_snapsh
 
 **Never** call `breakout.ensure_embedded(html)` / `ensure_embedded(html, None)` on the live dash — that leaves `#fd-breakout-db` alone in this pack, but Desktop must still pass `ranked` so the JSON stays filled.
 
-Breakout/Breakdown must render **dense MOM cards** via live `cardHTML` (same chrome as Momentum Up), **not** skinny `article.fd-bb-card` stubs. `ensure_embedded` emits:
+Breakout/Breakdown must render **dense MOM cards** via the shared portable renderer (live `cardHTML` wrapped by `card_render`), **not** skinny `article.fd-bb-card` stubs and **not** a tab-specific skin. `card_render.ensure_embedded` (before `breakout.ensure_embedded`) emits:
+
+- `#fd-card-css` chip chrome on `article.card` (not scoped to a tab) so MA FAN / CLOSE HI / 52W HI / enrich pills match Momentum Up `.badge.spike-chip`
+- `#fd-card-js` wrapping live `window.cardHTML` plus `window.__FD_RENDER_CARD__(card)` / `window.__FD_RENDER_ROW__(row)`
+- Card lookup across `MOM.cards` **and** `MOM.up` / `MOM.down` / FLAGS / WATCH (empty `MOM.cards = []` must not hide the rest)
+
+`breakout.ensure_embedded` emits:
 
 - `#view-breakout` / `#view-breakdown` with `.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`
 - empty hidden `#fd-bb-breakout` / `#fd-bb-breakdown` so old CSS cannot paint stubs
-- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, resolves each ticker against `window.MOM.cards`, renders `cardHTML(card)`, wires click → `selectTicker`, and appends why/streak as `enrich_pills` (`fd-bb` / `mom-streak`)
+- JS `window.__FD_BB_SHOW__(kind)` that reads `#fd-breakout-db`, passes each ranked row into `__FD_RENDER_ROW__` (full MOM-shaped object + short `band 10` / `+3/7d` / streak chips — **not** a brown why dump)
 
 ### Live `setView` / `hideAllPanes` / `paintView` (required on Desktop)
 
@@ -486,7 +494,7 @@ Injected nav buttons use live chrome: `class="btn nav-btn"` (not bare `nav-btn`)
 
 Cloud `desk_dash.write_combined` already does this. If you are **not** swapping live `desk_dash.py`, paste the tail. `breakout.ensure_embedded` injects **Breakout** / **Breakdown** buttons after Momentum Down even when the live nav already exists.
 
-Dense cards come from live `cardHTML` + `window.MOM.cards` — do not clone skinny stub articles. Formula / thresholds: `docs/BREAKOUT-BREAKDOWN.md` and the constants block in `breakout.py`.
+Dense cards come from the shared `card_render` wrap of live `cardHTML` — do not clone skinny stub articles and do not re-skin tags per tab. Formula / thresholds: `docs/BREAKOUT-BREAKDOWN.md` and the constants block in `breakout.py`.
 
 ### Desk Analyst hitch — ideas path
 
@@ -505,14 +513,15 @@ Pills (`DA·A` / `DA·B` / `DA·C` / `DA`) appear when a recent `YYYY-MM-DD-*.md
 
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
-| `breakout.py` | **recopy** — dense `cardHTML` grids in `#view-breakout` / `#view-breakdown`; do not keep stub `fd-bb-card` panes |
+| `card_render.py` | **new / recopy** — wrap live `cardHTML`; portable chip CSS on `article.card`; `__FD_RENDER_CARD__` / `__FD_RENDER_ROW__` |
+| `breakout.py` | **recopy** — tabs only rank; grids call `__FD_RENDER_ROW__` (no stub `fd-bb-card`, no why dump box) |
 | `book_delta.py` | new — since-last-Refresh strip |
 | `desk_hitch.py` | new — DA hitch pills |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/BREAKOUT-BREAKDOWN.md` | optional, for the desk |
 | gitignore `desk_snapshot.json` | local, like `mom_score_hist.json` |
 
-Do **not** copy generated `factorbook.html`, `desk_snapshot.json`, `mom_score_hist.json`, or the ideas markdown. After drop-in, Refresh once and confirm Breakout / Breakdown sit beside Momentum Down, clicking Breakout shows the same dense card grid as Momentum Up (full card chrome, why/streak pills, few names), `#fd-breakout-db` is filled, `#fd-book-delta` shows `baseline set` on the first write, hitch pills appear only when `FACTOR_DESK_IDEAS_DIR` (or `ideas/`) has dated notes, and no skinny `#fd-bb-*` list bleeds onto other tabs.
+Do **not** copy generated `factorbook.html`, `desk_snapshot.json`, `mom_score_hist.json`, or the ideas markdown. After drop-in, Refresh once and confirm Breakout / Breakdown sit beside Momentum Down, clicking Breakout shows the same dense card grid as Momentum Up (full card chrome, **chip tags** not a cramped gray matrix, **band / Δ chips** not a brown why dump, few names), `#fd-card-js` + `#fd-breakout-db` are filled, `#fd-book-delta` shows `baseline set` on the first write, hitch pills appear only when `FACTOR_DESK_IDEAS_DIR` (or `ideas/`) has dated notes, and no skinny `#fd-bb-*` list bleeds onto other tabs.
 
 Suggested Desktop sync paths:
 
@@ -542,6 +551,7 @@ The book lives on a top-nav **Paper** tab (`#fd-nav-paper`, `data-view="paper"`,
 After the existing GICS / streak / chart / breakout / hitch `ensure_embedded` tail:
 
 ```python
+import card_render
 import paper_trade
 
 # cards already attached (enrich + mom_streak). Marks come from card px / PX_LAST / last Refresh print.
@@ -550,6 +560,7 @@ paper_marks = paper_trade.marks_db(cards, book=book)
 html = gics_filter.ensure_embedded(html, db)
 html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
 html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
+html = card_render.ensure_embedded(html)           # wrap live cardHTML; portable chips
 html = breakout.ensure_embedded(html, ranked)
 html = book_delta.ensure_embedded(html, delta)
 html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
@@ -573,7 +584,8 @@ Cloud `desk_dash.write_combined` already calls this. If you are **not** swapping
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
 | `paper_trade.py` | **recopy** — Buy/Sell on dense `cardHTML` cards **and** Paper tab (inline open + Close); strips `#fd-paper-home`; localStorage `fd-paper-book` only |
-| `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; dense `cardHTML` titles use `d` / ticker (never `"undefined"`) |
+| `card_render.py` | **recopy** — must wrap `cardHTML` *before* paper so Buy/Sell hydrate polished cards |
+| `breakout.py` | **recopy** — hide `#view-paper` from Breakout/Breakdown; grids call `__FD_RENDER_ROW__` (titles from `d` / ticker) |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/PAPER-TRADE.md` | optional, for the desk |
 
