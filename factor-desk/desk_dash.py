@@ -819,7 +819,6 @@ def write_combined(
     )
     delta = book_delta.diff_snapshots(book_delta.load_snapshot(root=base), snap)
     hitch_map = desk_hitch.hitch_db(cards, hitch_index)
-    paper_marks = paper_trade.marks_db(cards, book=book)
     ss_ranked = s_score.rank_book(cards, root=base, write_panel_file=True)
 
     existing = ""
@@ -843,6 +842,8 @@ def write_combined(
             delta=delta,
             hitch_index=hitch_index,
         )
+
+    paper_marks = paper_trade.marks_db(cards, book=book, html=text)
 
     text = _ensure_nav(text)
     text = _ensure_options_refresh_ui(text)
