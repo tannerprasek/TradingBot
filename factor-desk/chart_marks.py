@@ -1328,8 +1328,17 @@ def overlay_js() -> str:
     }
     return d;
   }
+  function hasTrendSegs(root) {
+    return !!(root && root.querySelector && root.querySelector("[data-fd-trend-seg]"));
+  }
   function hidePricePath(el) {
-    if (!el) return;
+    /* FAIL A: NEVER hide until green/red segments exist. */
+    if (!el) return false;
+    var host = el.ownerSVGElement || el.parentNode;
+    if (!hasTrendSegs(host)) {
+      showPricePath(el);
+      return false;
+    }
     if (!el.getAttribute("data-fd-src-stroke")) {
       el.setAttribute("data-fd-src-stroke", el.getAttribute("stroke") || LIVE_PX_PRICE);
     }
@@ -1341,18 +1350,20 @@ def overlay_js() -> str:
     el.style.opacity = "0";
     el.style.display = "none";
     el.style.visibility = "hidden";
+    return true;
   }
   function showPricePath(el) {
     if (!el) return;
     el.removeAttribute("data-fd-trend-src");
-    var st = el.getAttribute("data-fd-src-stroke") || LIVE_PX_PRICE;
-    el.setAttribute("stroke", st);
+    el.setAttribute("stroke", "#e6edf3");
+    el.setAttribute("fill", "none");
     el.removeAttribute("opacity");
     el.removeAttribute("display");
-    el.style.stroke = st;
-    el.style.opacity = "";
+    el.style.stroke = "#e6edf3";
+    el.style.fill = "none";
+    el.style.opacity = "1";
     el.style.display = "";
-    el.style.visibility = "";
+    el.style.visibility = "visible";
   }
   function remapAttrX(el, names, padL, oldInner, newInner) {
     names.forEach(function (name) {
@@ -1481,13 +1492,13 @@ def overlay_js() -> str:
       polishChips(host);
       var src = findPricePath(svg);
       if (!src) { ensureHtmlLegend(host, svg); return; }
-      var hadSeg = !!svg.querySelector("[data-fd-trend-seg]");
-      if (src.getAttribute("data-fd-trend-src") === "1" && hadSeg) {
+      if (!hasTrendSegs(svg)) showPricePath(src);
+      if (src.getAttribute("data-fd-trend-src") === "1" && hasTrendSegs(svg)) {
         ensureHtmlLegend(host, svg);
         return;
       }
-      if (src.getAttribute("data-fd-trend-src") === "1" && !hadSeg) showPricePath(src);
       Array.prototype.forEach.call(svg.querySelectorAll("[data-fd-trend-seg]"), function (n) { n.remove(); });
+      showPricePath(src);
       var pts = parsePoints(src);
       if (pts.length < 2) { ensureHtmlLegend(host, svg); return; }
       pts = expandPadR(svg, pts);
@@ -1537,7 +1548,7 @@ def overlay_js() -> str:
         }
         emit(cur, start, flags.length - 1);
       }
-      var drew = svg.querySelector("[data-fd-trend-seg]");
+      var drew = hasTrendSegs(svg);
       if (drew) hidePricePath(src);
       else showPricePath(src);
       ensureHtmlLegend(host, svg);
@@ -1754,10 +1765,8 @@ def overlay_js() -> str:
       if (kind !== cur) { emit(cur, start, j - 1); start = j; cur = kind; }
     }
     emit(cur, start, flags.length - 1);
-    if (parent.querySelector("[data-fd-trend-seg]")) {
-      src.setAttribute("data-fd-trend-src", "1");
-      src.style.opacity = "0";
-    }
+    if (hasTrendSegs(parent) || hasTrendSegs(chart)) hidePricePath(src);
+    else showPricePath(src);
     var svg = chart.tagName === "svg" || chart.tagName === "SVG" ? chart : (chart.querySelector && chart.querySelector("svg"));
     if (svg && isDetailChart(chart)) addLegend(svg, (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width) || chart.getBoundingClientRect().width);
   }
