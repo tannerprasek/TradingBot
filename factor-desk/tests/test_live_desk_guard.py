@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 import add_server  # noqa: E402
 import desk_dash  # noqa: E402
+import portfolio  # noqa: E402
 import write_dash  # noqa: E402
 
 
@@ -153,6 +154,96 @@ class LiveDeskWriteTests(unittest.TestCase):
         self.assertNotIn("replace(\"__PAYLOAD__\"", src)
         dash = Path(desk_dash.__file__).read_text(encoding="utf-8")
         self.assertNotIn("def write_combined(\n    path: Path | str | None = None,\n    *,\n    root: Path | None = None,\n    cards: list[Mapping[str, Any]] | None = None,\n    book: Mapping[str, Any] | None = None,\n    html: str | None = None,\n    factor_payload", dash)
+
+
+class NavIntegrityTests(unittest.TestCase):
+    def _with_portfolio_button(self, html: str) -> str:
+        extra = ""
+        if "Breakout" not in html:
+            extra += "<span>Breakout</span><span>Breakdown</span>"
+        if 'data-view="portfolio"' not in html:
+            extra += (
+                '<button type="button" class="btn nav-btn" id="fd-nav-portfolio" '
+                'data-view="portfolio">Portfolio</button>'
+            )
+        if not extra:
+            return html
+        return html.replace("</nav>", extra + "\n</nav>", 1)
+
+    def test_portfolio_nav_without_show_assignment_fails(self) -> None:
+        html = self._with_portfolio_button(_fat_desk_html())
+        html += "<script>if(window.__FD_PF_SHOW__)window.__FD_PF_SHOW__();</script>"
+        self.assertIn("window.__FD_PF_SHOW__", html)
+        self.assertNotRegex(html, r"window\.__FD_PF_SHOW__\s*=(?!=)")
+        with self.assertRaises(RuntimeError) as ctx:
+            desk_dash.assert_nav_integrity(html)
+        self.assertIn("__FD_PF_SHOW__", str(ctx.exception))
+
+    def test_ensure_embedded_satisfies_portfolio_gate(self) -> None:
+        html = self._with_portfolio_button(_fat_desk_html())
+        with self.assertRaises(RuntimeError):
+            desk_dash.assert_nav_integrity(html)
+        fixed = portfolio.ensure_embedded(html, scorecard=None, desk=None)
+        desk_dash.assert_nav_integrity(fixed)
+        self.assertRegex(fixed, r"window\.__FD_PF_SHOW__\s*=(?!=)")
+        self.assertGreaterEqual(len(fixed.encode("utf-8")), desk_dash.LIVE_MIN_BYTES)
+        self.assertIn("Portfolio", fixed)
+        self.assertIn("Momentum Up", fixed)
+        self.assertIn("Refresh", fixed)
+        self.assertNotIn('data-view="paper"', fixed)
+
+    def test_shrunk_fat_chrome_fails_gate(self) -> None:
+        fixed = portfolio.ensure_embedded(self._with_portfolio_button(_fat_desk_html()))
+        prior = len(fixed.encode("utf-8"))
+        self.assertGreaterEqual(prior, desk_dash.LIVE_MIN_BYTES)
+        shrunk = fixed.split("<!--", 1)[0]
+        self.assertLess(len(shrunk.encode("utf-8")), desk_dash.LIVE_MIN_BYTES)
+        with self.assertRaises(RuntimeError) as ctx:
+            desk_dash.assert_nav_integrity(shrunk, prior_bytes=prior)
+        self.assertIn("legacy-sized", str(ctx.exception))
+
+    def test_write_combined_embeds_portfolio_show_and_keeps_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "factorbook.html"
+            dest.write_text(_fat_desk_html(), encoding="utf-8")
+            before = dest.stat().st_size
+            out = desk_dash.write_combined(dest, root=root, book=_book())
+            text = out.read_text(encoding="utf-8")
+            self.assertGreaterEqual(out.stat().st_size, desk_dash.LIVE_MIN_BYTES)
+            self.assertGreaterEqual(out.stat().st_size, before - 1024)
+            self.assertRegex(text, r"window\.__FD_PF_SHOW__\s*=(?!=)")
+            self.assertRegex(text, r"window\.__FD_BB_SHOW__\s*=(?!=)")
+            self.assertRegex(text, r"window\.__FD_SS_SHOW__\s*=(?!=)")
+            self.assertIn('data-view="portfolio"', text)
+            self.assertIn("Momentum Up", text)
+            self.assertIn("Refresh", text)
+            self.assertNotIn("__PAYLOAD__", text)
+            desk_dash.assert_nav_integrity(text, prior_bytes=before)
+
+    def test_write_combined_does_not_keep_nav_that_fails_the_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "factorbook.html"
+            original = self._with_portfolio_button(_fat_desk_html())
+            dest.write_text(original, encoding="utf-8")
+            before = dest.read_bytes()
+
+            def drop_show(html: str, scorecard: object = None, desk: object = None) -> str:
+                text = html.replace("window.__FD_PF_SHOW__ =", "window.__FD_PF_SHOW__ ")
+                if 'data-view="portfolio"' not in text:
+                    text = text.replace(
+                        "</nav>",
+                        '<button type="button" class="nav-btn" data-view="portfolio">Portfolio</button></nav>',
+                        1,
+                    )
+                return text
+
+            with patch.object(portfolio, "ensure_embedded", side_effect=drop_show):
+                with self.assertRaises(RuntimeError) as ctx:
+                    desk_dash.write_combined(dest, root=root, book=_book())
+            self.assertIn("__FD_PF_SHOW__", str(ctx.exception))
+            self.assertEqual(dest.read_bytes(), before)
 
 
 class AddServerLiveOutTests(unittest.TestCase):

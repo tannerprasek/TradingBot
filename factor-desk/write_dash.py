@@ -37,6 +37,13 @@ def write(path: Path | str | None = None, root: Path | None = None) -> Path:
     base = Path(root) if root is not None else HERE
     dest = desk_dash.resolve_live_dest(base, path)
     out = desk_dash.write_combined(dest, root=base)
+    if out.is_file():
+        written_html = out.read_text(encoding="utf-8")
+        prior = out.stat().st_size
+        desk_dash.assert_nav_integrity(
+            written_html,
+            prior_bytes=prior if prior >= desk_dash.LIVE_MIN_BYTES else 0,
+        )
     if _is_desktop_live(out, base) and out.is_file():
         size = out.stat().st_size
         if size < desk_dash.LIVE_MIN_BYTES:
@@ -74,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     explicit = Path(args.out) if args.out else None
     try:
         written = write(explicit, root=root)
-    except desk_dash.LiveDeskShrinkError as exc:
+    except (desk_dash.LiveDeskShrinkError, RuntimeError) as exc:
         LOG.error("%s", exc)
         return 2
     size = written.stat().st_size if written.is_file() else 0
