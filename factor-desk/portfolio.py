@@ -1428,8 +1428,8 @@ def _metric_scorecard(rows: Sequence[Mapping[str, Any]], desk: Mapping[str, Any]
                 "key": dest,
                 "weighted_avg": acc / covered,
                 "coverage": covered,
-                "q1_gross": q1_gross,
-                "q5_gross": q5_gross,
+                "q1_gross": q1_gross if bounds else None,
+                "q5_gross": q5_gross if bounds else None,
                 "desk_n": len(universe_vals.get(dest) or []),
                 "contributors": _top_contrib(contribs, "contrib"),
             }
@@ -1754,7 +1754,11 @@ def strip_css() -> str:
 body[data-fd-pf="1"] #{VIEW_ID}.fd-pf-on:not(.hide):not([hidden]) {{
   display: block !important;
 }}
-.{HID_CLASS} {{ display: none !important; }}
+body[data-fd-pf="1"] > .grid,
+body[data-fd-pf="1"] > h1,
+body[data-fd-pf="1"] > .meta {{
+  display: none !important;
+}}
 #{VIEW_ID}.fd-pf-on {{ margin: 0 0 16px; }}
 #{VIEW_ID} .ph {{
   font: 650 13px/1.2 "Segoe UI", "DejaVu Sans", sans-serif;
@@ -1915,16 +1919,19 @@ def strip_js() -> str:
     });
   }
   function fmt(v, d) {
+    if (v == null || v === "") return "—";
     var n = Number(v);
     if (!isFinite(n)) return "—";
     return n.toFixed(d);
   }
   function fmtPx(v) {
+    if (v == null || v === "") return "—";
     var n = Number(v);
     if (!isFinite(n)) return "—";
     return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   }
   function fmtUsd(v) {
+    if (v == null || v === "") return "—";
     var n = Number(v);
     if (!isFinite(n)) return "—";
     var abs = Math.abs(n);
@@ -1935,6 +1942,7 @@ def strip_js() -> str:
     return sign + "$" + abs.toFixed(0);
   }
   function pct(v) {
+    if (v == null || v === "") return "—";
     var n = Number(v);
     if (!isFinite(n)) return "—";
     return (100 * n).toFixed(1) + "%";
