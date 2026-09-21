@@ -371,8 +371,11 @@ def strip_js() -> str:
       var el = cards[i];
       var s = sectorOf(el, map);
       var hide = selected && s !== selected;
-      if (hide) el.classList.add("gics-hid");
-      else el.classList.remove("gics-hid");
+      var hid = "gics-hid";
+      if (el.classList && hid) {
+        if (hide) el.classList.add(hid);
+        else el.classList.remove(hid);
+      }
     }
     var chips = document.querySelectorAll("#gics-filter-strip [data-gics-chip]");
     for (var c = 0; c < chips.length; c++) {
@@ -473,7 +476,11 @@ _DB_ID_RE = re.compile(
     r'<script\b[^>]*\bid=["\']gics-sector-db["\'][^>]*>.*?</script>\s*',
     re.I | re.S,
 )
-_HID_CLASS_RE = re.compile(r'(?<=["\'\s])gics-hid\b\s*', re.I)
+_CLASS_ATTR_RE = re.compile(
+    r"""(\bclass\s*=\s*)(?P<q>["'])(?P<body>.*?)(?P=q)""",
+    re.I | re.S,
+)
+_CLASSLIST_CALL_RE = re.compile(r"""\.classList\.(add|remove|toggle)\(([^)]*)\)""")
 
 
 def _remove_css(html_text: str) -> str:
@@ -497,18 +504,62 @@ def _remove_js(html_text: str) -> str:
     return _LEGACY_JS_RE.sub("", text)
 
 
+def _strip_gics_hid_attrs(text: str) -> str:
+    """Drop ``gics-hid`` from HTML class attributes only.
+
+    Do not rewrite JavaScript string literals. A whole-document replace of
+    ``gics-hid`` turned ``classList.add("gics-hid")`` into ``classList.add("")``,
+    and DOMTokenList throws on an empty token.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        body = re.sub(r"(?:^|\s+)gics-hid(?=\s|$)", " ", match.group("body"), flags=re.I)
+        body = " ".join(body.split())
+        quote = match.group("q")
+        return f"{match.group(1)}{quote}{body}{quote}"
+
+    return _CLASS_ATTR_RE.sub(repl, text)
+
+
+def _scrub_empty_class_tokens(text: str) -> str:
+    """Remove empty string arguments from ``classList.add/remove/toggle``.
+
+    ``classList.add("")`` throws ``SyntaxError`` on every card. Calls whose
+    arguments are not all string literals are left alone.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        method = match.group(1)
+        args = match.group(2)
+        if not re.fullmatch(r"""[\s,]*(?:(["']).*?\1[\s,]*)*""", args or ""):
+            return match.group(0)
+        parts = re.findall(r"""(["'])(.*?)\1""", args or "")
+        if not parts or all(body for _q, body in parts):
+            return match.group(0)
+        kept = [f"{quote}{body}{quote}" for quote, body in parts if body]
+        if not kept:
+            # Drop the call but keep the receiver a valid expression:
+            # ``el.classList.add("")`` -> ``el&& void 0`` (not ``elvoid 0``).
+            return "&& void 0"
+        return f".classList.{method}({', '.join(kept)})"
+
+    return _CLASSLIST_CALL_RE.sub(repl, text)
+
+
 def strip_ui(html_text: str, mapping: Mapping[str, str] | None = None) -> str:
     """Remove GICS sector filter strip host / CSS / JS / sector-db from HTML.
 
-    Unhides leftover ``.gics-hid`` cards so a prior filter cannot stick.
-    G1–G12 group chips (FLAGS/PAIRS/WATCH) are not this host and stay.
+    Unhides leftover ``gics-hid`` on class attributes so a prior filter cannot
+    stick. Does not blank the token inside scripts. Empty ``classList`` tokens
+    already baked into the page are scrubbed. G1–G12 group chips stay.
     """
     text = html_text or ""
     text = _remove_css(text)
     text = _remove_host(text, mapping)
     text = _remove_db(text, mapping)
     text = _remove_js(text)
-    text = _HID_CLASS_RE.sub("", text)
+    text = _strip_gics_hid_attrs(text)
+    text = _scrub_empty_class_tokens(text)
     return text
 
 

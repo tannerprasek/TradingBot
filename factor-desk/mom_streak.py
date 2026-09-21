@@ -1071,9 +1071,9 @@ def d10_css() -> str:
     return """
 .mom-score-d10-near { display: block; margin-top: 1px; text-align: right; font: 600 10px/1.15 ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace; letter-spacing: 0.01em; }
 .score .mom-score-d10-near, .sc .mom-score-d10-near { display: block; font-size: 10px !important; font-weight: 600 !important; line-height: 1.15 !important; font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace !important; }
-.mom-score-d10-near.up { color: #6ee7b7; }
-.mom-score-d10-near.down { color: #fda4af; }
-.mom-score-d10-near.flat { color: #9ca3af; }
+.card .mom-score-d10-near.up, .card .score-d10.up, .mom-score-d10-near.up { color: #6ee7b7 !important; }
+.card .mom-score-d10-near.down, .card .score-d10.down, .score-d10.down, .mom-score-d10-near.down { color: #fda4af !important; }
+.card .mom-score-d10-near.flat, .card .score-d10.flat, .mom-score-d10-near.flat { color: #9ca3af !important; }
 """.strip()
 
 

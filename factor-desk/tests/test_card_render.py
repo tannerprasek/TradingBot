@@ -440,6 +440,26 @@ console.log(JSON.stringify(report));
             self.assertNotRegex(static_html, r'data-key="mom-score-d10"(?!-)')
 
 
+class DivCardColorTests(unittest.TestCase):
+    def test_d10_signed_color_matches_div_card(self) -> None:
+        css = cr.strip_css()
+        self.assertIn(".card .mom-score-d10-near.down", css)
+        self.assertIn(".card .mom-score-d10-near.up", css)
+        self.assertIn(".card .mom-score-d10-near.flat", css)
+        self.assertIn(".score-d10.down", css)
+        self.assertNotRegex(css, r"\.score-d10\.dn(?!o)")
+        down = css.split(".card .mom-score-d10-near.down", 1)[1].split("}", 1)[0]
+        up = css.split(".card .mom-score-d10-near.up", 1)[1].split("}", 1)[0]
+        self.assertIn("#fda4af", down)
+        self.assertNotIn("#6ee7b7", down)
+        self.assertIn("#6ee7b7", up)
+        self.assertNotRegex(css, r"article\.card \.mom-score-d10-near\.down")
+        streak = ms.d10_css()
+        self.assertIn(".card .mom-score-d10-near.down", streak)
+        self.assertIn("#fda4af", streak.split(".card .mom-score-d10-near.down", 1)[1].split("}", 1)[0])
+        self.assertIn("#6ee7b7", streak.split(".card .mom-score-d10-near.up", 1)[1].split("}", 1)[0])
+
+
 class Chg1dHeaderTests(unittest.TestCase):
     def test_signed_percent_beside_name_and_distinct_from_d10(self) -> None:
         up = cr.chg_1d_html({"t": "MSTR", "ret_1d": 0.012, "mom_score_d10": 0, "mom_score_d10_short": "0"})
@@ -551,7 +571,12 @@ class Chg1dHeaderTests(unittest.TestCase):
                 text=True,
                 timeout=60,
             )
-        live = """<!DOCTYPE html><html><head></head><body>
+        live = """<!DOCTYPE html><html><head>
+<style>
+.score.hi, .score.hi .mom-score-d10-near { color: rgb(61, 204, 138); }
+article.card .mom-score-d10-near.down { color: #fda4af !important; }
+</style>
+</head><body>
 <section id="view-detail" data-t="MSTR US Equity">
   <article class="card" data-t="MSTR">
     <header>
@@ -564,6 +589,18 @@ class Chg1dHeaderTests(unittest.TestCase):
     <header><h2>MSTR STRATEGY INC</h2><span class="badge">LEADER</span></header>
   </div>
 </section>
+<div class="card" data-t="AMD US Equity">
+  <div class="top">
+    <span class="sym">AMD</span>
+    <span class="score hi">8<span class="mom-score-d10-near down" data-key="mom-score-d10-near">−2</span></span>
+  </div>
+</div>
+<div class="card" data-t="LULU US Equity">
+  <div class="top">
+    <span class="sym">LULU</span>
+    <span class="score hi">6</span>
+  </div>
+</div>
 <script>function cardHTML(c){
   var t = (c && (c.t || c.d)) || "";
   var d10 = (c && c.mom_score_d10_short) ? '<span class="mom-score-d10-near flat" data-key="mom-score-d10-near">'+c.mom_score_d10_short+'</span>' : '';
@@ -572,8 +609,19 @@ class Chg1dHeaderTests(unittest.TestCase):
 </body></html>"""
         html = cr.ensure_embedded(
             live,
-            {"MSTR": 0.012, "MSTR US Equity": 0.012},
-            {"MSTR": "STRATEGY INC", "MSTR US Equity": "STRATEGY INC"},
+            {
+                "MSTR": 0.012,
+                "MSTR US Equity": 0.012,
+                "AMD": -0.021,
+                "AMD US Equity": -0.021,
+                "LULU": 0.004,
+            },
+            {
+                "MSTR": "STRATEGY INC",
+                "MSTR US Equity": "STRATEGY INC",
+                "AMD": "ADVANCED MICRO DEVICES",
+                "AMD US Equity": "ADVANCED MICRO DEVICES",
+            },
         )
         self.assertIn('id="fd-chg-1d-db"', html)
         self.assertIn('id="fd-co-name-db"', html)
@@ -591,7 +639,28 @@ const html = fs.readFileSync({json.dumps(str(page))}, "utf8");
 const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1/factorbook.html" }});
 const window = dom.window;
 const document = window.document;
-if (typeof window.__FD_PAINT_CHG_1D__ === "function") window.__FD_PAINT_CHG_1D__();
+if (typeof window.__FD_PAINT_CHG_1D__ === "function") {{
+  window.__FD_PAINT_CHG_1D__();
+  window.__FD_PAINT_CHG_1D__();
+}}
+function denseInfo(card) {{
+  if (!card) return null;
+  var sym = card.querySelector(".sym");
+  var top = card.querySelector(".top");
+  var chip = top ? top.querySelector(".px-1d, .chg-1d") : null;
+  var d10 = card.querySelector(".mom-score-d10-near");
+  var score = card.querySelector(".score");
+  return {{
+    sym: sym ? sym.textContent : "",
+    chipText: chip ? chip.textContent : null,
+    chipCls: chip ? chip.className : "",
+    chipParent: chip && chip.parentElement ? chip.parentElement.className : "",
+    chipAfterSym: !!(chip && sym && chip.previousElementSibling === sym),
+    chipCount: top ? top.querySelectorAll(".px-1d, .chg-1d").length : 0,
+    scoreText: score ? score.textContent : "",
+    d10Color: d10 ? window.getComputedStyle(d10).color : ""
+  }};
+}}
 function chipInfo(root) {{
   if (!root) return null;
   var el = root.querySelector(".px-1d, .chg-1d, [data-key='chg-1d']");
@@ -636,7 +705,9 @@ const report = {{
   amdChip: chipInfo(bb),
   amdScore: bb.querySelector(".score") ? bb.querySelector(".score").textContent : "",
   zeroChip: chipInfo(zero),
-  zeroScore: zero.querySelector(".score") ? zero.querySelector(".score").textContent : ""
+  zeroScore: zero.querySelector(".score") ? zero.querySelector(".score").textContent : "",
+  amdDense: denseInfo(document.querySelector('div.card[data-t="AMD US Equity"]')),
+  luluDense: denseInfo(document.querySelector('div.card[data-t="LULU US Equity"]'))
 }};
 console.log(JSON.stringify(report));
 """,
@@ -675,7 +746,7 @@ console.log(JSON.stringify(report));
             self.assertIsNone(report["missChip"])
             self.assertNotIn("px-1d", report["missHtml"])
             self.assertNotIn("|", report["missHtml"])
-            self.assertNotIn("|", report["amd"])
+            self.assertIn("AMD | ADVANCED MICRO DEVICES", report["amd"])
             self.assertNotIn("n/a", report["qqq"].lower())
             self.assertEqual(report["amdChip"]["text"], "+1.2%")
             self.assertIn("+1", report["amdScore"])
@@ -684,6 +755,25 @@ console.log(JSON.stringify(report));
             self.assertIn("flat", report["zeroChip"]["cls"])
             self.assertNotIn("0.0%", report["zeroScore"])
             self.assertIn("0", report["zeroScore"])
+            amd_dense = report["amdDense"]
+            self.assertEqual(amd_dense["sym"], "AMD | ADVANCED MICRO DEVICES")
+            self.assertEqual(amd_dense["chipText"], "\u22122.1%")
+            self.assertIn("down", amd_dense["chipCls"])
+            self.assertEqual(amd_dense["chipParent"], "top")
+            self.assertTrue(amd_dense["chipAfterSym"])
+            self.assertEqual(amd_dense["chipCount"], 1)
+            self.assertNotIn("\u22122.1%", amd_dense["scoreText"])
+            self.assertIn("\u22122", amd_dense["scoreText"])
+            d10_color = amd_dense["d10Color"].replace(" ", "").lower()
+            self.assertTrue("253,164,175" in d10_color or "fda4af" in d10_color, amd_dense["d10Color"])
+            lulu_dense = report["luluDense"]
+            self.assertEqual(lulu_dense["sym"], "LULU")
+            self.assertNotIn("|", lulu_dense["sym"])
+            self.assertEqual(lulu_dense["chipText"], "+0.4%")
+            self.assertIn("up", lulu_dense["chipCls"])
+            self.assertEqual(lulu_dense["chipParent"], "top")
+            self.assertTrue(lulu_dense["chipAfterSym"])
+            self.assertEqual(lulu_dense["chipCount"], 1)
 
 
 if __name__ == "__main__":

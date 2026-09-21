@@ -23,7 +23,7 @@ from typing import Any, Mapping, MutableMapping
 
 CSS_STYLE_ID = "fd-card-css"
 JS_SCRIPT_ID = "fd-card-js"
-JS_VER = "pr22-sym-co"
+JS_VER = "pr23-div-card"
 DB_SCRIPT_ID = "fd-chg-1d-db"
 CO_DB_SCRIPT_ID = "fd-co-name-db"
 
@@ -782,16 +782,24 @@ article.card .stats {
 article.card .stats span {
   white-space: nowrap;
 }
-article.card .mom-score-d10-near {
+.card .mom-score-d10-near {
   display: block !important;
   margin-top: 1px;
   text-align: right;
   font: 600 10px/1.15 ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace !important;
   letter-spacing: 0.01em;
 }
-article.card .mom-score-d10-near.up { color: #6ee7b7 !important; }
-article.card .mom-score-d10-near.down { color: #fda4af !important; }
-article.card .mom-score-d10-near.flat { color: #9ca3af !important; }
+/* Live cards are <div class="card">, not <article>. .score.hi must not win. */
+.card .mom-score-d10-near.up,
+.card .score-d10.up,
+.mom-score-d10-near.up { color: #6ee7b7 !important; }
+.card .mom-score-d10-near.down,
+.card .score-d10.down,
+.score-d10.down,
+.mom-score-d10-near.down { color: #fda4af !important; }
+.card .mom-score-d10-near.flat,
+.card .score-d10.flat,
+.mom-score-d10-near.flat { color: #9ca3af !important; }
 /* 1-day price change beside the ticker / company name. Not the 10d score delta. */
 .px-1d, .chg-1d {
   display: inline !important;
@@ -815,7 +823,7 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
-  var CARD_VER = "pr22-sym-co";
+  var CARD_VER = "pr23-div-card";
   if (window.__FD_CARD_BOUND__ === CARD_VER) return;
   window.__FD_CARD_BOUND__ = CARD_VER;
 
@@ -1588,7 +1596,7 @@ def strip_js() -> str:
     var tag = el.tagName;
     if (tag === "H1" || tag === "H2" || tag === "H3") return true;
     var cls = String(el.className || "");
-    return /(^|\s)(name|company|sec-name|long-name|nm|ticker)(\s|$)/.test(cls);
+    return /(^|\s)(name|company|sec-name|long-name|nm|ticker|sym)(\s|$)/.test(cls);
   }
   function looksLikeChromeTitle(text) {
     var t = String(text || "").replace(/\s+/g, " ").trim().toUpperCase();
@@ -1600,8 +1608,8 @@ def strip_js() -> str:
   function nameEl(node) {
     if (!node || !node.querySelector) return null;
     if (isNameNode(node) && !looksLikeChromeTitle(ownText(node) || node.textContent)) return node;
-    var header = node.querySelector("header, .hd, .head, .row1, .name-row, .title-row") || node;
-    var el = header.querySelector("h1, h2, h3, .name, .company, .sec-name, .long-name, .nm, .ticker");
+    var header = node.querySelector(".top, header, .hd, .head, .row1, .name-row, .title-row") || node;
+    var el = header.querySelector(".sym, h1, h2, h3, .name, .company, .sec-name, .long-name, .nm, .ticker");
     if (!el) return null;
     if (el.closest && el.closest(".score, .sc, .pills, .chips, .badges, .stats, svg, nav, .topnav")) return null;
     if (looksLikeChromeTitle(ownText(el) || el.textContent)) return null;
@@ -1692,6 +1700,10 @@ def strip_js() -> str:
       var lead = raw.match(/^([A-Z][A-Z0-9]{0,4}(?:\.[A-Z])?)\s+(\S.*)$/);
       if (lead) sym = lead[1];
     }
+    if (!sym) {
+      var lone = String(raw || "").trim();
+      if (/^[A-Za-z][A-Za-z0-9.\-]{0,9}$/.test(lone)) sym = shortOf(lone);
+    }
     var co = companyOf(card);
     if (!co) {
       var found = null;
@@ -1727,13 +1739,23 @@ def strip_js() -> str:
       if (chip && chip.parentNode) chip.parentNode.removeChild(chip);
       return;
     }
-    if (chip && chip.textContent === view.label && chip.classList.contains(view.side) && chip.parentNode === host) return;
+    var inTop = !!(host.classList && host.classList.contains("sym") && host.parentElement &&
+      host.parentElement.classList && host.parentElement.classList.contains("top"));
+    var homeOk = chip && chip.textContent === view.label && chip.classList.contains(view.side) &&
+      (chip.parentNode === host || (inTop && chip.previousElementSibling === host));
+    if (homeOk) return;
     if (!chip) chip = document.createElement("span");
     chip.className = "px-1d chg-1d " + view.side;
     chip.setAttribute("data-key", "chg-1d");
     chip.setAttribute("data-chg-1d", String(dec));
     chip.title = "1d CHG_PCT_1D";
     chip.textContent = view.label;
+    if (inTop) {
+      var top = host.parentElement;
+      if (host.nextSibling) top.insertBefore(chip, host.nextSibling);
+      else top.appendChild(chip);
+      return;
+    }
     var score = host.querySelector(".score, .sc, .mom-score-d10-near");
     if (score && host.contains(score)) host.insertBefore(chip, score);
     else host.appendChild(chip);
@@ -1861,7 +1883,9 @@ def strip_js() -> str:
     }
     var node = renderCard(card);
     if (!node) return null;
-    node.classList.remove("hide", "fd-bb-hid", "gics-hid");
+    ["hide", "fd-bb-hid", "gics-hid"].forEach(function (cls) {
+      if (cls) node.classList.remove(cls);
+    });
     node.addEventListener("click", function (ev) {
       if (ev.target && ev.target.closest && ev.target.closest(".fd-paper, [data-fd-paper-act]")) return;
       var sel = null;
