@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -58,6 +59,22 @@ class FilterLogicTests(unittest.TestCase):
         names = gf.sectors_present(_cards())
         self.assertEqual(names, ["Energy", "Financials", "Information Technology"])
         self.assertNotIn("Health Care", names)
+
+    def test_sectors_from_mapping_keeps_energy_and_skips_missing_re(self) -> None:
+        mapping = {
+            "AAPL US Equity": "Information Technology",
+            "XOM US Equity": "Energy",
+            "JPM US Equity": "Financials",
+            "JNJ US Equity": "Health Care",
+        }
+        names = gf.sectors_from_mapping(mapping)
+        self.assertEqual(names[0], "Energy")
+        self.assertIn("Health Care", names)
+        self.assertNotIn("Real Estate", names)
+        self.assertEqual(
+            names,
+            ["Energy", "Health Care", "Financials", "Information Technology"],
+        )
 
     def test_code_only_rejected_no_invented_map(self) -> None:
         name, reason = de.parse_gics_sector_name("45")
@@ -168,6 +185,89 @@ class HtmlChipTests(unittest.TestCase):
         self.assertNotIn("tab-sectors", html)
         self.assertIn(f'id="{gf.CSS_STYLE_ID}"', html)
         self.assertIn("gap: 6px", html)
+        self.assertIn(">All</button>", html)
+
+    def test_empty_host_bakes_all_and_energy_from_db(self) -> None:
+        html = (
+            "<html><body><nav></nav>"
+            '<div id="gics-filter-strip" class="filter-strip gics-chips"></div>'
+            '<article class="card" data-t="AAPL US Equity">AAPL</article>'
+            "</body></html>"
+        )
+        mapping = {
+            "XOM US Equity": "Energy",
+            "AAPL US Equity": "Information Technology",
+            "SHW US Equity": "Materials",
+            "JPM US Equity": "Financials",
+        }
+        out = gf.ensure_embedded(html, mapping)
+        match = re.search(
+            r'<div[^>]*id="gics-filter-strip"[^>]*>(.*?)</div>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(match)
+        host = match.group(1)
+        self.assertTrue(host.strip(), "empty #gics-filter-strip must be replaced with chips")
+        self.assertIn(">All</button>", host)
+        self.assertIn(">EN</button>", host)
+        self.assertIn('data-gics-chip="Energy"', host)
+        self.assertIn(">MAT</button>", host)
+        self.assertIn(">IT</button>", host)
+        self.assertIn(">FIN</button>", host)
+        self.assertNotIn(">RE</button>", host)
+        labels = re.findall(r'data-gics-chip="([^"]*)"', host)
+        self.assertEqual(labels[0], "")
+        self.assertEqual(labels[1], "Energy")
+        self.assertEqual(out.count('id="gics-filter-strip"'), 1)
+        again = gf.ensure_embedded(out, mapping)
+        again_host = re.search(
+            r'<div[^>]*id="gics-filter-strip"[^>]*>(.*?)</div>',
+            again,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(again_host)
+        self.assertIn(">EN</button>", again_host.group(1))
+        self.assertIn(">All</button>", again_host.group(1))
+        self.assertEqual(again.count(f'id="{gf.JS_SCRIPT_ID}"'), 1)
+
+    def test_span_empty_host_replaced_with_filled_div(self) -> None:
+        html = (
+            "<html><body>"
+            '<span id="gics-filter-strip" class="filter-strip gics-chips"></span>'
+            "</body></html>"
+        )
+        out = gf.ensure_embedded(html, {"XOM US Equity": "Energy"})
+        self.assertNotIn('<span id="gics-filter-strip"', out)
+        self.assertIn('<div id="gics-filter-strip"', out)
+        self.assertIn(">All</button>", out)
+        self.assertIn(">EN</button>", out)
+
+    def test_unique_sectors_js_uses_db_not_on_screen_cards(self) -> None:
+        js = gf.strip_js()
+        start = js.index("function uniqueSectors")
+        end = js.index("function ensureStrip")
+        body = js[start:end]
+        self.assertNotIn("cardNodes", body)
+        self.assertIn("ORDER", body)
+        self.assertIn("#gics-sector-db", body)
+        stale = (
+            "<html><body>"
+            '<div id="gics-filter-strip" class="filter-strip gics-chips"></div>'
+            "<script>\n(function () {\n"
+            '  var STRIP_ID = "gics-filter-strip";\n'
+            "  function uniqueSectors(map) { var cards = cardNodes(); }\n"
+            "  var hide = 'gics-hid';\n"
+            "})();\n</script>"
+            "</body></html>"
+        )
+        out = gf.ensure_embedded(stale, {"XOM US Equity": "Energy"})
+        self.assertEqual(out.count("function uniqueSectors"), 1)
+        start = out.index("function uniqueSectors")
+        end = out.index("function ensureStrip")
+        self.assertNotIn("cardNodes", out[start:end])
+        self.assertIn(">EN</button>", out)
+        self.assertIn(f'id="{gf.JS_SCRIPT_ID}"', out)
 
     def test_css_style_id_replaces_even_when_gchip_already_present(self) -> None:
         seed = (

@@ -369,21 +369,24 @@ def strip_css() -> str:
   margin: 0;
   padding: 0;
   min-height: 20px;
+  overflow: visible;
 }}
 .fd-book-delta-kicker {{
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  align-self: center;
   box-sizing: border-box;
-  height: 20px;
+  flex: 0 0 100%;
+  width: 100%;
+  min-height: 20px;
+  height: auto;
   margin: 0;
   padding: 0;
   font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.08em;
-  color: #6b7280;
-  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #9ca3af;
+  text-transform: none;
   white-space: nowrap;
-  flex: 0 0 auto;
+  overflow: visible;
 }}
 .fd-dchip {{
   display: inline-flex;

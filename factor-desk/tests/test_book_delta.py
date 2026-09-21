@@ -94,6 +94,34 @@ class DiffTests(unittest.TestCase):
         self.assertIn("fd-book-delta-db", html)
         self.assertIn(f'id="{bd.CSS_STYLE_ID}"', html)
         self.assertIn("gap: 6px", html)
+        self.assertIn("fd-book-delta-kicker", html)
+
+    def test_kicker_own_row_readable_not_crowded(self) -> None:
+        diff = {
+            "baseline": False,
+            "chips": [
+                {"label": "OUT +DKS +GTLB", "cls": "delta-out", "title": "New outliers"},
+                {"label": "CRWD +2", "cls": "delta-jump", "title": "CRWD"},
+            ],
+            "extra": [{"label": "extra", "cls": "delta-jump", "title": "x"}],
+        }
+        html = bd.ensure_embedded("<html><head></head><body><nav></nav></body></html>", diff)
+        self.assertIn("since last Refresh", html)
+        self.assertIn('class="fd-book-delta-kicker">since last Refresh</span>', html)
+        kicker_at = html.index("fd-book-delta-kicker")
+        pills_at = html.index("OUT +DKS")
+        self.assertLess(kicker_at, pills_at)
+        css = bd.strip_css()
+        block = css.split(".fd-book-delta-kicker", 1)[1].split(".fd-dchip", 1)[0]
+        self.assertIn("flex: 0 0 100%", block)
+        self.assertIn("#9ca3af", block)
+        self.assertNotIn("uppercase", block)
+        self.assertNotIn("#6b7280", block)
+        js = bd.strip_js()
+        self.assertIn('kicker.textContent = data.baseline ? "book" : "since last Refresh"', js)
+        again = bd.ensure_embedded(html.replace("since last Refresh", "gone", 1), diff)
+        self.assertIn("since last Refresh", again)
+        self.assertEqual(again.count('id="fd-book-delta"'), 1)
 
     def test_css_style_id_replaces_on_resync(self) -> None:
         diff = bd.diff_snapshots(None, {"names": {}, "flags": [], "watch": [], "outliers": []})
