@@ -18,11 +18,14 @@ P&L (1 unit notional)
 - Long:  ``(mark - entry) / entry``
 - Short: ``(entry - mark) / entry``  (profits when price falls)
 
-Mark price (first finite > 0)
------------------------------
-card ``price`` / ``px`` / ``px_last`` / ``PX_LAST`` / last Refresh print /
-last point of ``px_series``, then ``#fd-paper-marks``, then ``MOM.cards``.
-Missing mark → buttons disabled, ``title`` explains why.
+Mark price (dollar-like, first finite ``> 1``)
+---------------------------------------------
+``#fd-paper-marks`` first, then card ``paper_mark`` / ``px_last`` / ``PX_LAST`` /
+``last_px`` / ``last_price`` / sidecar ``quote`` / last ``prices_long``
+``adj_close``. Card ``last`` is a **factor residual** (e.g. AAPL
+``last: -0.0035``) — never a dollar print, not in ``MARK_KEYS``. JS ``markOf``
+must not prefer the card (``if (m) return m`` is true for negative residuals).
+Missing / ``mark <= 0`` → P&L is blank (em dash), never ``-100%``.
 
 Paper tab (not a home chrome strip)
 -----------------------------------
@@ -70,7 +73,7 @@ QTY = 1.0
 DB_SCRIPT_ID = "fd-paper-marks"
 JS_SCRIPT_ID = "fd-paper-js"
 CSS_STYLE_ID = "fd-paper-css"
-JS_VER = "pr-open-table"
+JS_VER = "pr-missing-marks"
 HOST_CLASS = "fd-paper"
 HOME_HOST_ID = "fd-paper-home"  # legacy chrome strip — stripped, never re-injected
 VIEW_ID = "view-paper"
@@ -158,7 +161,10 @@ EMPTY_OPENS = "no open paper"
 EMPTY_WEEK = "no closed yet this week"
 EMPTY_CLOSED = "no closed paper"
 
-# First finite > 0 wins. Live Refresh often writes px / PX_LAST / last.
+# Dollar-like prints only (``> 1``). Never include bare ``last`` — on this desk
+# it is a factor residual, not PX_LAST. ``if (m) return m`` is true for
+# ``m = -0.0035``, which is how Paper showed -100%.
+MIN_DOLLAR_PX = 1.0
 MARK_KEYS: tuple[str, ...] = (
     "paper_mark",
     "px_last",
@@ -166,23 +172,102 @@ MARK_KEYS: tuple[str, ...] = (
     "LAST_PRICE",
     "last_px",
     "last_price",
+    "lastPx",
+    "pxLast",
+    "LAST_PX",
     "mark",
     "mark_px",
     "price",
     "px",
-    "last",
     "close",
     "px_close",
     "adj_close",
     "PX_CLOSE",
+    "last_print",
 )
 SERIES_KEYS: tuple[str, ...] = (
     "px_series",
     "prices",
+    "prices_long",
     "closes",
+    "p",
     "px",
     "last_refresh",
     "refresh_px",
+)
+NEST_MARK_KEYS: tuple[str, ...] = (
+    "quote",
+    "sidecar",
+    "raw",
+    "fields",
+    "dapi",
+    "bloomberg",
+    "ohlc",
+    "ref",
+)
+_RESIDUAL_KEYS = frozenset({"last", "LAST", "Last"})
+_STRUCT_KEYS = frozenset(
+    {
+        "CARDS",
+        "CARD",
+        "UP",
+        "DOWN",
+        "FLAGS",
+        "WATCH",
+        "PX",
+        "LAST",
+        "MARK",
+        "MARKS",
+        "PRICE",
+        "PRICES",
+        "CLOSE",
+        "CLOSES",
+        "RAW",
+        "QUOTE",
+        "QUOTES",
+        "REF",
+        "FIELDS",
+        "OHLC",
+        "SERIES",
+        "HIST",
+        "PAYLOAD",
+        "PRINT",
+        "PRINTS",
+        "MOM",
+        "HOME",
+        "ALL",
+        "NAMES",
+        "BOOK",
+        "META",
+        "ASOF",
+        "VERSION",
+        "KIND",
+        "POSITIONS",
+        "CLOSED",
+        "OUTLIERS",
+        "SEARCH",
+        "DATA",
+        "ITEMS",
+        "ROWS",
+        "VALUES",
+        "T",
+        "TICKER",
+        "SYMBOL",
+        "NAME",
+        "D",
+        "SIDE",
+        "ENTRY",
+        "EXIT",
+        "QTY",
+        "OPEN",
+        "OPENS",
+        "WEEK",
+        "BLOOMBERG",
+        "DAPI",
+        "BY",
+        "P",
+        "HI",
+    }
 )
 
 SIDECAR_SCHEMA: dict[str, Any] = {
@@ -264,41 +349,83 @@ def empty_book(*, asof: str | None = None) -> dict[str, Any]:
     }
 
 
+def _is_residual_last_key(key: Any) -> bool:
+    return str(key) in _RESIDUAL_KEYS or str(key).lower() == "last"
+
+
+def _dollar_px(value: Any) -> float | None:
+    """Finite price ``> 1``. Residuals (``last: -0.0035`` / ``0.012``) are not marks."""
+    px = dapi_enrich.as_float(value)
+    return px if px is not None and px > MIN_DOLLAR_PX else None
+
+
 def _series_last(value: Any) -> float | None:
     if isinstance(value, Mapping):
         for key in MARK_KEYS:
-            px = dapi_enrich.as_float(value.get(key))
-            if px is not None and px > 0:
+            if _is_residual_last_key(key):
+                continue
+            px = _dollar_px(value.get(key))
+            if px is not None:
                 return px
-        px = dapi_enrich.as_float(value.get("value") or value.get("y"))
-        if px is not None and px > 0:
+        px = _dollar_px(value.get("value") or value.get("y"))
+        if px is not None:
             return px
         return None
     if isinstance(value, (list, tuple)):
         if not value:
             return None
         if len(value) >= 2 and not isinstance(value[0], (list, tuple, Mapping)):
-            px = dapi_enrich.as_float(value[-1])
-            return px if px is not None and px > 0 else None
+            return _dollar_px(value[-1])
         return _series_last(value[-1])
-    px = dapi_enrich.as_float(value)
-    return px if px is not None and px > 0 else None
+    return _dollar_px(value)
 
 
-def mark_of(card: Mapping[str, Any] | None) -> float | None:
-    """Best available mark on a card / enrich rec / MOM row."""
-    if not card:
+def mark_of(card: Mapping[str, Any] | None, *, _depth: int = 0) -> float | None:
+    """Best available **dollar** mark on a card / enrich rec / MOM / quote row.
+
+    Skips bare ``last`` (factor residual). Nested ``quote`` / ``prices_long``
+    ``adj_close`` count. ``None`` / ``<= 1`` is no mark.
+    """
+    if not card or _depth > 6:
         return None
     for key in MARK_KEYS:
-        px = dapi_enrich.as_float(card.get(key))
-        if px is not None and px > 0:
-            return px
-    for key in SERIES_KEYS:
-        if key in MARK_KEYS and not isinstance(card.get(key), (list, tuple)):
+        if _is_residual_last_key(key):
             continue
         raw = card.get(key)
+        if isinstance(raw, Mapping):
+            px = mark_of(raw, _depth=_depth + 1)
+        elif isinstance(raw, (list, tuple)):
+            px = _series_last(raw)
+        else:
+            px = _dollar_px(raw)
+        if px is not None:
+            return px
+    lowered = {str(k).lower(): v for k, v in card.items()}
+    for key in MARK_KEYS:
+        if _is_residual_last_key(key):
+            continue
+        raw = lowered.get(key.lower())
+        if isinstance(raw, Mapping):
+            continue
+        px = _dollar_px(raw)
+        if px is not None:
+            return px
+    for key in SERIES_KEYS:
+        raw = card.get(key)
+        if key in MARK_KEYS and not isinstance(raw, (list, tuple)):
+            continue
         if isinstance(raw, (list, tuple)) and raw:
             px = _series_last(raw)
+            if px is not None:
+                return px
+    for nest in NEST_MARK_KEYS:
+        inner = card.get(nest)
+        if isinstance(inner, Mapping) and inner is not card:
+            px = mark_of(inner, _depth=_depth + 1)
+            if px is not None:
+                return px
+        elif isinstance(inner, (list, tuple)) and inner:
+            px = _series_last(inner)
             if px is not None:
                 return px
     return None
@@ -316,40 +443,327 @@ def attach_mark(
     return card
 
 
+def _put_mark(out: dict[str, float], ticker: str, px: float | None) -> None:
+    dollar = _dollar_px(px)
+    if not ticker or dollar is None:
+        return
+    out[ticker] = dollar
+    short = _short(ticker)
+    if short:
+        out.setdefault(short, dollar)
+
+
+def _looks_like_ticker(value: str) -> bool:
+    short = _short(value)
+    if not short or short in _STRUCT_KEYS or len(short) > 12:
+        return False
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9./-]*", short))
+
+
+def _collect_mark(
+    out: dict[str, float],
+    obj: Any,
+    ticker_hint: str | None = None,
+    *,
+    _depth: int = 0,
+) -> None:
+    if _depth > 6 or obj is None:
+        return
+    if isinstance(obj, Mapping):
+        hint = ticker_hint
+        for key in ("t", "ticker", "symbol", "d", "name"):
+            raw = obj.get(key)
+            if isinstance(raw, str) and _looks_like_ticker(raw):
+                hint = raw
+                break
+        px = mark_of(obj)
+        if hint:
+            _put_mark(out, str(hint), px)
+        by = obj.get("by")
+        if isinstance(by, Mapping):
+            for ticker, rec in by.items():
+                if isinstance(rec, Mapping):
+                    _collect_mark(out, rec, ticker_hint=str(ticker), _depth=_depth + 1)
+                else:
+                    _put_mark(out, str(ticker), _dollar_px(rec))
+        for key, val in obj.items():
+            key_s = str(key)
+            if _is_residual_last_key(key_s):
+                continue
+            if _looks_like_ticker(key_s) and key_s.lower() not in {
+                "quote",
+                "close",
+                "price",
+                "mark",
+                "cards",
+                "names",
+            }:
+                if isinstance(val, Mapping):
+                    _collect_mark(out, val, ticker_hint=key_s, _depth=_depth + 1)
+                elif isinstance(val, (list, tuple)):
+                    _put_mark(out, key_s, _series_last(val))
+                    _collect_mark(out, val, ticker_hint=key_s, _depth=_depth + 1)
+                else:
+                    _put_mark(out, key_s, _dollar_px(val))
+            elif isinstance(val, (Mapping, list, tuple)) and key_s.lower() not in {
+                "null_reasons",
+                "fields_used",
+                "enrich_pills",
+            }:
+                _collect_mark(out, val, ticker_hint=hint, _depth=_depth + 1)
+        return
+    if isinstance(obj, (list, tuple)):
+        if len(obj) >= 2 and isinstance(obj[0], str) and _looks_like_ticker(obj[0]):
+            _put_mark(out, str(obj[0]), _dollar_px(obj[1]))
+        for item in obj:
+            _collect_mark(out, item, ticker_hint=ticker_hint, _depth=_depth + 1)
+
+
+def _extract_balanced(text: str, start: int, max_len: int = 4_000_000) -> str | None:
+    if start >= len(text) or text[start] not in "{[":
+        return None
+    opener = text[start]
+    closer = "}" if opener == "{" else "]"
+    depth = 0
+    in_str = False
+    quote = ""
+    esc = False
+    j = start
+    n = len(text)
+    while j < n and (j - start) < max_len:
+        ch = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == quote:
+                in_str = False
+        elif ch in "'\"":
+            in_str = True
+            quote = ch
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start : j + 1]
+        j += 1
+    return None
+
+
+def _js_like_load(blob: str) -> Any:
+    s = (blob or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
+    s = re.sub(r"(^|[^:\"'])//.*?$", r"\1", s, flags=re.M)
+    s = re.sub(r"\bundefined\b|\bNaN\b", "null", s)
+    try:
+        s2 = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", lambda m: json.dumps(m.group(1)), s)
+    except re.error:
+        s2 = s
+    s2 = re.sub(r"([{\[,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', s2)
+    s2 = re.sub(r",\s*([}\]])", r"\1", s2)
+    try:
+        return json.loads(s2)
+    except json.JSONDecodeError:
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            return None
+
+
+def _skip_to_value_start(text: str, start: int) -> int:
+    i = start
+    n = len(text)
+    guard = 0
+    while i < n and guard < 64:
+        guard += 1
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i >= n:
+            return i
+        if text.startswith("//", i):
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if text[i] in "{[":
+            return i
+        if text[i] == "(":
+            i += 1
+            continue
+        if text[i].isalpha() or text[i] in "_$":
+            j = i
+            while j < n and (text[j].isalnum() or text[j] in "_.$"):
+                j += 1
+            k = j
+            while k < n and text[k] in " \t\r\n":
+                k += 1
+            if text.startswith("||", k) or text.startswith("??", k):
+                i = k + 2
+                continue
+            if k < n and text[k] == "=" and not text.startswith("==", k):
+                i = k + 1
+                continue
+            return i
+        return i
+    return i
+
+
+_ARTICLE_OPEN_RE = re.compile(r"<article\b([^>]*)>", re.I)
+_ATTR_RE = re.compile(r"""\b([:\w.-]+)\s*=\s*["']([^"']*)["']""", re.I)
+_MARKS_SCRIPT_RE = re.compile(
+    rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>(.*?)</script>',
+    re.I | re.S,
+)
+_JSON_SCRIPT_RE = re.compile(
+    r'<script\b[^>]*type=["\']application/json["\'][^>]*>(.*?)</script>',
+    re.I | re.S,
+)
+_ASSIGN_RE = re.compile(
+    r"(?:(?:window|self|globalThis)\s*\.\s*)?(?:MOM(?:_CARDS)?(?:\s*\.\s*"
+    r"(?:cards|up|down|flags|watch|all|px|PX))?|"
+    r"prices_long|PRICES_LONG|quote|quotes|QUOTES|"
+    r"(?:px|PX)(?:\s*\.\s*by)?)\s*=\s*",
+    re.I,
+)
+_PX_BY_P_RE = re.compile(
+    r"""(?:["']([A-Z][A-Z0-9./-]{0,11})(?:\s+US\s+Equity)?["']|"""
+    r"""(?:^|[{\,])\s*([A-Z][A-Z0-9./]{1,11}))\s*:\s*"""
+    r"""\{[^{}]{0,800}?\bp\s*:\s*\[([^\[\]]{1,12000})\]""",
+    re.I | re.S,
+)
+_TICKER_FIELD_RE = re.compile(
+    r"""["']?(?:t|ticker|symbol)["']?\s*:\s*["']([^"']+)["']""",
+    re.I,
+)
+_PX_FIELD_RE = re.compile(
+    r"""["']?(?:PX_LAST|px_last|LAST_PRICE|last_px|last_price|lastPx|pxLast|"""
+    r"""paper_mark|mark_px|adj_close|PX_CLOSE)["']?\s*:\s*"""
+    r"""["']?([0-9]+(?:\.[0-9]+)?)["']?""",
+    re.I,
+)
+
+
+def harvest_html_marks(html_text: str | None) -> dict[str, float]:
+    """Pull dollar marks already on the live desk so Refresh cannot wipe them.
+
+    Sources: existing ``#fd-paper-marks``, ``data-px``, ``MOM.cards``
+    ``px_last`` / ``PX_LAST`` / ``paper_mark``, sidecar ``quote``,
+    last ``prices_long`` ``adj_close``, ``px.by[ticker].p[-1]``.
+    Card ``last`` (residual) is ignored. Never treats 0 / null as a mark.
+    """
+    out: dict[str, float] = {}
+    text = html_text or ""
+    blob_m = _MARKS_SCRIPT_RE.search(text)
+    if blob_m:
+        raw = (blob_m.group(1) or "").replace("<\\/", "</").strip()
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, Mapping):
+            for key, val in parsed.items():
+                _put_mark(out, str(key), val)
+    for tag in _ARTICLE_OPEN_RE.finditer(text):
+        attrs = {name.lower(): val for name, val in _ATTR_RE.findall(tag.group(1) or "")}
+        ticker = attrs.get("data-t") or attrs.get("data-ticker") or attrs.get("data-name") or ""
+        px = attrs.get("data-px") or attrs.get("data-px-last") or attrs.get("data-mark")
+        _put_mark(out, ticker, px)
+    for assign in _ASSIGN_RE.finditer(text):
+        idx = _skip_to_value_start(text, assign.end())
+        blob = _extract_balanced(text, idx)
+        if not blob:
+            continue
+        parsed = _js_like_load(blob)
+        if parsed is not None:
+            _collect_mark(out, parsed)
+    for script in _JSON_SCRIPT_RE.finditer(text):
+        raw = (script.group(1) or "").replace("<\\/", "</").strip()
+        if not raw or raw in {"{}", "[]"}:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        _collect_mark(out, parsed)
+    for m in _PX_BY_P_RE.finditer(text):
+        ticker = m.group(1) or m.group(2) or ""
+        if not _looks_like_ticker(ticker):
+            continue
+        nums = re.findall(r"[0-9]+(?:\.[0-9]+)?", m.group(3) or "")
+        if nums:
+            _put_mark(out, ticker, nums[-1])
+    for m in _TICKER_FIELD_RE.finditer(text):
+        ticker = m.group(1)
+        if not _looks_like_ticker(ticker):
+            continue
+        window = text[m.end() : m.end() + 480]
+        px_m = _PX_FIELD_RE.search(window)
+        if px_m:
+            _put_mark(out, ticker, px_m.group(1))
+    return out
+
+
+def merge_marks(*maps: Mapping[str, Any] | None) -> dict[str, float]:
+    """Later maps win when their values are finite ``> 0``. ``0`` / ``None`` cannot wipe."""
+    out: dict[str, float] = {}
+    for mapping in maps:
+        if not isinstance(mapping, Mapping):
+            continue
+        for key, val in mapping.items():
+            _put_mark(out, str(key), val)
+    return out
+
+
 def marks_db(
     cards: Iterable[Mapping[str, Any]] | None = None,
     book: Mapping[str, Any] | None = None,
+    html: str | None = None,
 ) -> dict[str, float]:
-    """ticker / short → mark, for ``#fd-paper-marks`` after Refresh."""
-    out: dict[str, float] = {}
+    """ticker / short → mark, for ``#fd-paper-marks`` after Refresh.
 
-    def put(ticker: str, px: float | None) -> None:
-        if not ticker or px is None or px <= 0:
-            return
-        out[ticker] = px
-        short = _short(ticker)
-        if short:
-            out.setdefault(short, px)
-
+    Rebuilds from live HTML even when the JSON db is ``{}``. Card ``last``
+    is a residual and is never stored.
+    """
+    out: dict[str, float] = harvest_html_marks(html) if html else {}
     for card in cards or []:
         if not isinstance(card, Mapping):
             continue
-        put(card_ticker(card), mark_of(card))
-        put(str(card.get("t") or ""), mark_of(card))
+        px = mark_of(card)
+        _put_mark(out, card_ticker(card), px)
+        _put_mark(out, str(card.get("t") or ""), px)
+        _collect_mark(out, card)
     names = (book or {}).get("names") if isinstance(book, Mapping) else None
     if isinstance(names, dict):
         for ticker, rec in names.items():
-            put(str(ticker), mark_of(rec if isinstance(rec, Mapping) else None))
+            if isinstance(rec, Mapping):
+                _collect_mark(out, rec, ticker_hint=str(ticker))
+            else:
+                _put_mark(out, str(ticker), rec)
+    elif isinstance(book, Mapping):
+        _collect_mark(out, book)
     return out
 
 
 def pnl_pct(side: str | None, entry: float | None, mark: float | None) -> float | None:
-    """Signed percent. Long up = +, short down = +."""
+    """Signed percent. Long up = +, short down = +.
+
+    Missing / empty / non-positive mark or entry → ``None`` (never coerce
+    with ``Number(null)===0``, which would paint every long −100%).
+    """
     if side not in {"long", "short"}:
+        return None
+    if mark is None or mark == "" or entry is None or entry == "":
         return None
     entry_px = dapi_enrich.as_float(entry)
     mark_px = dapi_enrich.as_float(mark)
-    if entry_px is None or mark_px is None or entry_px == 0:
+    if entry_px is None or mark_px is None or entry_px <= 0 or mark_px <= 0:
         return None
     if side == "long":
         return (mark_px - entry_px) / entry_px * 100.0
@@ -598,11 +1012,11 @@ def mark_lookup(marks: Mapping[str, Any] | None, ticker: str) -> float | None:
     if not marks or not ticker:
         return None
     px = dapi_enrich.as_float(marks.get(ticker))
-    if px is not None and px > 0:
+    if px is not None and px > MIN_DOLLAR_PX:
         return px
     short = _short(ticker)
     px = dapi_enrich.as_float(marks.get(short)) if short else None
-    if px is not None and px > 0:
+    if px is not None and px > MIN_DOLLAR_PX:
         return px
     return None
 
@@ -663,7 +1077,7 @@ def apply_click(
     px = dapi_enrich.as_float(mark)
     if not key:
         return {"ok": False, "action": "blocked", "toast": "No ticker", "reason": "no_ticker"}
-    if px is None or px <= 0:
+    if px is None or px <= MIN_DOLLAR_PX:
         return {
             "ok": False,
             "action": "blocked",
@@ -748,7 +1162,7 @@ def chrome_html(
 ) -> str:
     """Server chrome (skinny cloud cards). Live desk is hydrated by ``strip_js``."""
     key = html.escape(_short(ticker) or ticker, quote=True)
-    has_mark = mark is not None and mark > 0
+    has_mark = mark is not None and mark > MIN_DOLLAR_PX
     reason = html.escape(NO_MARK_REASON if not has_mark else "", quote=True)
     disabled = "" if has_mark else " disabled"
     title = reason if not has_mark else ""
@@ -1237,9 +1651,12 @@ def strip_js() -> str:
   function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
   function num(v) {
     if (v == null || v === "") return null;
-    if (typeof v === "number") return isFinite(v) && v > 0 ? v : null;
+    if (typeof v === "number") return isFinite(v) && v > 1 ? v : null;
     var n = parseFloat(String(v).replace(/[, ]/g, ""));
-    return isFinite(n) && n > 0 ? n : null;
+    return isFinite(n) && n > 1 ? n : null;
+  }
+  function isDollarPx(v) {
+    return typeof v === "number" && isFinite(v) && v > 1;
   }
   function emptyBook() { return { version: 1, kind: KIND, positions: {}, closed: {} }; }
   function loadBook() {
@@ -1291,28 +1708,103 @@ def strip_js() -> str:
       var last = raw[raw.length - 1];
       if (Array.isArray(last)) return num(last[last.length - 1]);
       if (last && typeof last === "object") {
-        return num(last.px_last || last.PX_LAST || last.px || last.price || last.close || last.last || last.value || last.y);
+        return num(last.paper_mark || last.px_last || last.PX_LAST || last.last_px || last.last_price || last.px || last.price || last.close || last.adj_close || last.value || last.y);
       }
       return num(last);
     }
     if (typeof raw === "object") {
-      return num(raw.px_last || raw.PX_LAST || raw.px || raw.price || raw.close || raw.last || raw.value);
+      return num(raw.paper_mark || raw.px_last || raw.PX_LAST || raw.last_px || raw.last_price || raw.px || raw.price || raw.close || raw.adj_close || raw.value);
     }
     return num(raw);
   }
-  function markFromCard(card) {
-    if (!card) return null;
-    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","mark","mark_px","price","px","last","close","px_close","adj_close","PX_CLOSE"];
+  function markFromCard(card, depth) {
+    if (!card || typeof card !== "object") return null;
+    depth = depth || 0;
+    if (depth > 6) return null;
+    var keys = ["paper_mark","px_last","PX_LAST","LAST_PRICE","last_px","last_price","lastPx","pxLast","LAST_PX","mark","mark_px","price","px","close","px_close","adj_close","PX_CLOSE","last_print"];
     for (var i = 0; i < keys.length; i++) {
-      var v = num(card[keys[i]]);
-      if (v) return v;
+      if (String(keys[i]).toLowerCase() === "last") continue;
+      var raw = card[keys[i]];
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        var nested = markFromCard(raw, depth + 1);
+        if (nested) return nested;
+      } else {
+        var v = num(raw);
+        if (v) return v;
+      }
     }
-    var seriesKeys = ["px_series","prices","closes","last_refresh","refresh_px"];
+    var seriesKeys = ["px_series","prices","prices_long","closes","p","last_refresh","refresh_px"];
     for (var j = 0; j < seriesKeys.length; j++) {
       var s = seriesLast(card[seriesKeys[j]]);
       if (s) return s;
     }
+    var nests = ["quote","sidecar","raw","fields","dapi","bloomberg","ohlc","ref"];
+    for (var n = 0; n < nests.length; n++) {
+      var inner = card[nests[n]];
+      if (inner && typeof inner === "object" && inner !== card) {
+        var nestPx = Array.isArray(inner) ? seriesLast(inner) : markFromCard(inner, depth + 1);
+        if (nestPx) return nestPx;
+      }
+    }
     return null;
+  }
+  function harvestPxBy(root) {
+    if (!root || typeof root !== "object") return;
+    var by = root.by || (root.px && root.px.by) || (root.PX && root.PX.by);
+    if (!by || typeof by !== "object") {
+      var keys0 = Object.keys(root);
+      var sample = keys0.length ? root[keys0[0]] : null;
+      if (sample && typeof sample === "object" && Array.isArray(sample.p)) by = root;
+      else return;
+    }
+    Object.keys(by).forEach(function (k) {
+      rememberMark(k, seriesLast(by[k] && by[k].p) || markFromCard(by[k]));
+    });
+  }
+  function harvestPricesLong(raw) {
+    if (raw == null) return;
+    if (Array.isArray(raw)) {
+      raw.forEach(function (row) {
+        if (!row) return;
+        if (typeof row === "object") {
+          rememberMark(row.t || row.ticker || row.symbol, seriesLast(row) || markFromCard(row) || num(row.adj_close || row.close || row.px_last));
+        }
+      });
+      return;
+    }
+    if (typeof raw !== "object") return;
+    Object.keys(raw).forEach(function (k) {
+      rememberMark(k, seriesLast(raw[k]) || markFromCard(raw[k]) || num(raw[k]));
+    });
+  }
+  var liveMarks = {};
+  function rememberMark(t, px) {
+    var n = num(px);
+    var k = shortOf(t);
+    if (!k || !n) return n;
+    liveMarks[k] = n;
+    if (t) liveMarks[t] = n;
+    return n;
+  }
+  function harvestAllMarks() {
+    var el = $(DB_ID);
+    var prev = {};
+    try { prev = JSON.parse((el && el.textContent) || "{}") || {}; } catch (e) { prev = {}; }
+    Object.keys(prev).forEach(function (k) { rememberMark(k, prev[k]); });
+    momCards().forEach(function (c) {
+      if (!c) return;
+      rememberMark(c.t || c.ticker || c.symbol || c.name, markFromCard(c));
+    });
+    harvestPricesLong(window.prices_long || window.PRICES_LONG);
+    harvestPxBy(window.px || window.PX);
+    var quote = window.quote || window.quotes || window.QUOTES;
+    if (quote) {
+      if (Array.isArray(quote) || (quote && typeof quote === "object")) harvestPricesLong(quote);
+    }
+    if (el) {
+      try { el.textContent = JSON.stringify(liveMarks); } catch (e) {}
+    }
+    return liveMarks;
   }
   function markFromNode(node) {
     if (!node || !node.getAttribute) return null;
@@ -1326,7 +1818,7 @@ def strip_js() -> str:
     var dts = node.querySelectorAll("dt");
     for (var i = 0; i < dts.length; i++) {
       var lab = (dts[i].textContent || "").replace(/\s+/g, " ").trim().toUpperCase();
-      if (lab === "PX_LAST" || lab === "PX LAST" || lab === "LAST" || lab === "PX" || lab === "PRICE") {
+      if (lab === "PX_LAST" || lab === "PX LAST" || lab === "PX" || lab === "PRICE") {
         var dd = dts[i].parentElement && dts[i].parentElement.querySelector("dd");
         var p = num(dd && dd.textContent);
         if (p) return p;
@@ -1335,21 +1827,27 @@ def strip_js() -> str:
     return null;
   }
   function markOf(ticker, node, card) {
-    var m = markFromCard(card);
-    if (m) return m;
-    m = markFromNode(node);
-    if (m) return m;
-    var db = marksDb();
     var key = shortOf(ticker);
-    if (db[ticker]) return num(db[ticker]);
-    if (db[key]) return num(db[key]);
-    return markFromCard(findMomCard(ticker || key));
+    // Prefer durable #fd-paper-marks. Card.last is a residual; if (m) is true for negatives.
+    var db = marksDb();
+    var m = num(liveMarks[ticker] || liveMarks[key] || (db && (db[ticker] || db[key])));
+    if (isDollarPx(m)) return m;
+    m = markFromNode(node);
+    if (isDollarPx(m)) return rememberMark(key || ticker, m);
+    m = markFromCard(card);
+    if (isDollarPx(m)) return rememberMark(key || ticker, m);
+    m = markFromCard(findMomCard(ticker || key));
+    if (isDollarPx(m)) return rememberMark(key || ticker, m);
+    return null;
   }
   function pnlPct(side, entry, mark) {
-    entry = Number(entry); mark = Number(mark);
-    if (!isFinite(entry) || !isFinite(mark) || entry === 0) return null;
-    if (side === "long") return (mark - entry) / entry * 100;
-    if (side === "short") return (entry - mark) / entry * 100;
+    // Number(null) === 0 would paint every long -100%. Treat missing / empty / <=0 as no mark.
+    if (mark == null || mark === "" || entry == null || entry === "") return null;
+    var e = Number(entry);
+    var m = Number(mark);
+    if (!isFinite(e) || !isFinite(m) || e <= 0 || m <= 0) return null;
+    if (side === "long") return (m - e) / e * 100;
+    if (side === "short") return (e - m) / e * 100;
     return null;
   }
   function fmtPct(v) {
@@ -1649,6 +2147,7 @@ def strip_js() -> str:
   }
   function paintTab() {
     stripLegacyHome();
+    harvestAllMarks();
     var opensEl = ensureHostById(OPENS_ID, "fd-paper-opens", ".fd-paper-opens-sec");
     var weekEl = $(WEEK_ID);
     var closedEl = ensureHostById(CLOSED_ID, "fd-paper-closed-wrap", ".fd-paper-closed");
@@ -2010,6 +2509,7 @@ def strip_js() -> str:
     if (painting) return;
     painting = true;
     try {
+      harvestAllMarks();
       var nodes = document.querySelectorAll("article.card, article[data-t], article[data-ticker], .grid .card, .grid.dense .card");
       for (var i = 0; i < nodes.length; i++) hydrateCard(nodes[i], null);
       paintTab();
@@ -2089,6 +2589,7 @@ def strip_js() -> str:
   window.__FD_PAPER_APPLY__ = applyClick;
   window.__FD_PAPER_PNL__ = pnlPct;
   window.__FD_PAPER_MARK__ = markOf;
+  window.__FD_PAPER_HARVEST__ = harvestAllMarks;
   window.__FD_PAPER_PAINT__ = paintAll;
   window.__FD_PAPER_LOAD__ = loadBook;
   window.__FD_PAPER_PAINT_HOME__ = paintTab;
@@ -2372,18 +2873,22 @@ def _ensure_js(html_text: str) -> str:
 def ensure_embedded(html_text: str, marks: Mapping[str, Any] | None = None) -> str:
     """CSS + marks db + Paper tab + cardHTML wrap JS. Safe on live ~2.7MB HTML.
 
-    ``marks=None`` still injects JS/CSS so Buy/Sell hydrate from ``MOM.cards`` /
-    localStorage after Refresh. Pass ``marks_db(cards, book=book)`` on a write.
-    ``#view-paper`` is a top-nav tab (not a home chrome strip) and reads
-    ``fd-paper-book``. Leftover ``#fd-paper-home`` is stripped.
+    ``marks=None`` or ``{}`` still injects JS/CSS and **rebuilds**
+    ``#fd-paper-marks`` from real dollar prints on the page (card
+    ``px_last`` / ``PX_LAST`` / ``paper_mark``, sidecar ``quote``, last
+    ``prices_long`` ``adj_close``). Card ``last`` is ignored. Never leaves
+    the db empty when those prices exist. ``#view-paper`` is a top-nav tab
+    (not a home chrome strip) and reads ``fd-paper-book``. Leftover
+    ``#fd-paper-home`` is stripped.
     """
     text = html_text or ""
+    harvested = harvest_html_marks(text)
+    merged = merge_marks(harvested, marks)
     text = _strip_home_host(text)
     text = _ensure_nav(text)
     text = _ensure_css(text)
     text = _patch_setview(text)
     text = _ensure_panes(text, replace=True)
-    if marks is not None or not re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', text, re.I):
-        text = _ensure_db(text, marks if marks is not None else {})
+    text = _ensure_db(text, merged)
     text = _ensure_js(text)
     return text
