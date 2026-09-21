@@ -1581,28 +1581,57 @@ def _patch_change_build_body(body: str, params: str, _script: str) -> str:
 def _change_click_js() -> str:
     return r"""
 /* fd-change-click */
+function __fdChangeView(el) {
+  if (!el || !el.closest) return "";
+  var filt = el.closest("#mom-down-filt, #mom-up-filt");
+  if (filt && filt.id === "mom-down-filt") return "mom-down";
+  if (filt && filt.id === "mom-up-filt") return "mom-up";
+  var host = el.closest("#view-mom-down, #view-mom-up");
+  if (host && host.id === "view-mom-down") return "mom-down";
+  if (host && host.id === "view-mom-up") return "mom-up";
+  var marked = el.closest("[data-view='mom-down'], [data-view='mom-up']");
+  if (marked) {
+    var dv = marked.getAttribute("data-view") || "";
+    if (dv === "mom-down" || dv === "mom-up") return dv;
+  }
+  return "";
+}
+function __fdChangeEmpty(view) {
+  try {
+    if (!document || !document.getElementById || !view) return;
+    var grid = document.getElementById(view === "mom-down" ? "mom-down-grid" : "mom-up-grid");
+    if (!grid || !grid.querySelectorAll) return;
+    var cards = grid.querySelectorAll("article, .card");
+    var msg = grid.querySelector("[data-fd-change-empty]");
+    if (cards.length) {
+      if (msg && msg.parentNode) msg.parentNode.removeChild(msg);
+      return;
+    }
+    if (grid.querySelector(".empty")) return;
+    var p = document.createElement("p");
+    p.className = "empty";
+    p.setAttribute("data-fd-change-empty", "1");
+    p.textContent = "No names match this filter.";
+    grid.appendChild(p);
+  } catch (eEmpty) {}
+}
+if (typeof paintView === "function" && !paintView.__fdChangeWrapped) {
+  var __fdPaintView = paintView;
+  paintView = function (view) {
+    var out = __fdPaintView.apply(this, arguments);
+    var ch = "";
+    try { ch = (viewFilt && viewFilt[view] && viewFilt[view].change) || ""; } catch (eCh) {}
+    if (ch && ch !== "all") __fdChangeEmpty(view);
+    return out;
+  };
+  paintView.__fdChangeWrapped = 1;
+}
 if (typeof document !== "undefined") document.addEventListener("click", function (ev) {
   if (ev.__fdChangeClick) return;
   var t = ev.target;
   var b = t && t.closest ? t.closest("[data-fk='change'], [data-k='change']") : null;
   if (!b) return;
-  var view = "";
-  var host = b.closest ? b.closest("#view-mom-up, #view-mom-down") : null;
-  if (host && host.id === "view-mom-down") view = "mom-down";
-  else if (host && host.id === "view-mom-up") view = "mom-up";
-  var upEl = document.getElementById("view-mom-up");
-  var downEl = document.getElementById("view-mom-down");
-  function shown(el) {
-    if (!el) return false;
-    if (el.classList && (el.classList.contains("hide") || el.classList.contains("hidden"))) return false;
-    if (el.hasAttribute && el.hasAttribute("hidden")) return false;
-    return true;
-  }
-  if (view !== "mom-up" && view !== "mom-down") {
-    if (shown(upEl) && !shown(downEl)) view = "mom-up";
-    else if (shown(downEl) && !shown(upEl)) view = "mom-down";
-    else if (typeof curView === "string" && (curView === "mom-up" || curView === "mom-down")) view = curView;
-  }
+  var view = __fdChangeView(b);
   if (view !== "mom-up" && view !== "mom-down") return;
   ev.__fdChangeClick = 1;
   var val = b.getAttribute("data-fv");
@@ -2023,10 +2052,19 @@ def _fallback_js() -> str:
     return false;
   }
   function viewFromEl(el) {
-    var host = el && el.closest ? el.closest("#view-mom-up, #view-mom-down") : null;
+    if (!el || !el.closest) return "";
+    var filt = el.closest("#mom-down-filt, #mom-up-filt");
+    if (filt && filt.id === "mom-down-filt") return "mom-down";
+    if (filt && filt.id === "mom-up-filt") return "mom-up";
+    var host = el.closest("#view-mom-down, #view-mom-up");
     if (host && host.id === "view-mom-down") return "mom-down";
     if (host && host.id === "view-mom-up") return "mom-up";
-    return viewOf();
+    var marked = el.closest("[data-view='mom-down'], [data-view='mom-up']");
+    if (marked) {
+      var dv = marked.getAttribute("data-view") || "";
+      if (dv === "mom-down" || dv === "mom-up") return dv;
+    }
+    return "";
   }
   function paintChange(view) {
     var root = document.getElementById(view === "mom-down" ? "view-mom-down" : "view-mom-up") || document.body;
@@ -2203,6 +2241,8 @@ def ensure_mom_status_filter(html_text: str) -> str:
     Mom Up and Mom Down also keep a single Change row (All / +>3 / +≤3 / Flat /
     −≤3 / −>3) filtered on ``mom_score_d10`` inside ``applyMomFilters``. A legacy
     Up (+) / Down (−) group is removed rather than left beside the granular chips.
+    A chip inside ``#mom-down-filt`` writes ``viewFilt["mom-down"]`` only. When
+    the selected bucket matches nothing, that view's grid shows the empty line.
     """
     if not html_text:
         return html_text

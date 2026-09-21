@@ -1385,6 +1385,227 @@ function tick() {{
         self.assertEqual(report["names"], ["+5"])
         self.assertEqual(report["hidden"], [])
 
+    def test_mom_down_change_chips_filter_trending_down(self) -> None:
+        """Down Change chips write viewFilt['mom-down'] even when Up is also shown."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        jsdom_root = Path("/tmp/fd-jsdom")
+        jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+        if not jsdom_mod.is_dir():
+            npm = shutil.which("npm")
+            if not npm:
+                self.skipTest("npm not installed")
+            jsdom_root.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+        live = r"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<div id="view-mom-up"><h2>MOMENTUM UP</h2><div id="mom-up-grid" class="grid"></div></div>
+<div id="view-mom-down"><h2>MOMENTUM DOWN</h2><div id="mom-down-grid" class="grid"></div></div>
+<div id="mom-down-filt"></div>
+<div id="mom-up-filt"></div>
+<script>
+/* Strong momentum Momentum building Constructive Weak / fading Softening fd-status-pred */
+var viewFilt = {
+  "mom-up": { score: "all", tags: "all", change: "all" },
+  "mom-down": { score: "all", tags: "all", change: "all" }
+};
+var DATA = [
+  {name:"FLAT", trend:"Trending down", mom_score_d10: 0},
+  {name:"N2", trend:"Trending down", mom_score_d10: -2},
+  {name:"N5", trend:"Trending down", mom_score_d10: -5},
+  {name:"P2", trend:"Trending down", mom_score_d10: 2},
+  {name:"UPFLAT", trend:"Trending up", mom_score_d10: 0},
+  {name:"MISS", trend:"Trending down", mom_score_d10: null}
+];
+function applyMomFilters(cards, vf, trend) {
+  return (cards || []).filter(function (c) {
+    if (trend && c.trend !== trend) return false;
+    if (vf && vf.score && vf.score !== "all") {
+      var n = parseFloat(vf.score);
+      if (isFinite(n) && !(Number(c.score) >= n)) return false;
+    }
+    if (vf && vf.tags && vf.tags !== "all" && c.tag !== vf.tags) return false;
+    return true;
+  });
+}
+function buildFiltBar(view) {
+  var vf = viewFilt[view] || {};
+  function mkGrp(label, items, key, map) {
+    var g = document.createElement("div");
+    g.className = "fgrp";
+    var lab = document.createElement("span");
+    lab.className = "flab";
+    lab.textContent = label;
+    g.appendChild(lab);
+    for (var i = 0; i < items.length; i++) {
+      (function (val, text) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "fchip";
+        b.setAttribute("data-fk", key);
+        b.setAttribute("data-fv", val);
+        b.textContent = text;
+        b.onclick = function () {
+          vf[key] = (typeof map === "function") ? map(val) : val;
+          paintView(view);
+        };
+        g.appendChild(b);
+      })(items[i][0], items[i][1]);
+    }
+    return g;
+  }
+  var host = document.getElementById(view === "mom-down" ? "mom-down-filt" : "mom-up-filt");
+  while (host.firstChild) host.removeChild(host.firstChild);
+  host.appendChild(mkGrp("SCORE", [["all","All"],["5+","5+"]], "score", function (v) { return +v; }));
+  if (view === "mom-up" || view === "mom-down") {
+    host.appendChild(mkGrp("CHANGE", [["all","All"],["gt3","+>3"],["le3","+\u22643"],["flat","Flat"],["nle3","\u2212\u22643"],["ngt3","\u2212>3"]], "change"));
+  }
+}
+function paintView(view) {
+  window.__views = window.__views || [];
+  window.__views.push(view);
+  var trend = view === "mom-down" ? "Trending down" : "Trending up";
+  var cards = applyMomFilters(DATA, viewFilt[view], trend);
+  var grid = document.getElementById(view === "mom-down" ? "mom-down-grid" : "mom-up-grid");
+  grid.innerHTML = (cards || []).map(function (c) {
+    return '<article class="card"><h2>' + c.name + '</h2></article>';
+  }).join("");
+}
+buildFiltBar("mom-down");
+buildFiltBar("mom-up");
+paintView("mom-down");
+paintView("mom-up");
+</script>
+</body></html>"""
+        html = desk_dash.ensure_mom_status_filter(live)
+        click_js = html.split("function __fdChangeView", 1)[1].split("function __fdChangeEmpty", 1)[0]
+        self.assertIn("#mom-down-filt", click_js)
+        self.assertNotIn("viewOf()", click_js)
+        fallback = html.split('id="fd-mom-status-js"', 1)[1]
+        view_fn = fallback.split("function viewFromEl", 1)[1].split("function paintChange", 1)[0]
+        self.assertIn('filt.id === "mom-down-filt"', view_fn)
+        self.assertNotIn("viewOf()", view_fn)
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            runner = Path(tmp) / "run.js"
+            page.write_text(html, encoding="utf-8")
+            runner.write_text(
+                f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+const dom = new JSDOM(fs.readFileSync({json.dumps(str(page))}, "utf8"), {{
+  runScripts: "dangerously",
+  url: "http://127.0.0.1/factorbook.html"
+}});
+function tick() {{
+  return new Promise(function (resolve) {{ setTimeout(resolve, 40); }});
+}}
+function names(list) {{
+  return (list || []).map(function (c) {{ return c.name; }});
+}}
+function gridNames(id) {{
+  return Array.from(dom.window.document.querySelectorAll("#" + id + " h2")).map(function (el) {{
+    return (el.textContent || "").trim();
+  }});
+}}
+(async function () {{
+  const document = dom.window.document;
+  await tick();
+  const downFilt = document.getElementById("mom-down-filt");
+  const downView = document.getElementById("view-mom-down");
+  const flat = downFilt.querySelector("[data-fk='change'][data-fv='flat']");
+  const ngt3 = downFilt.querySelector("[data-fk='change'][data-fv='ngt3']");
+  const gt3 = downFilt.querySelector("[data-fk='change'][data-fv='gt3']");
+  const fb = document.getElementById("fd-mom-status-js").textContent;
+  const start = fb.indexOf("function viewFromEl");
+  const end = fb.indexOf("function paintChange");
+  dom.window.eval(fb.slice(start, end) + "\\nwindow.__viewFromEl = viewFromEl;\\n");
+  const upChip = document.querySelector("#mom-up-filt [data-fk='change'][data-fv='flat']");
+  function snap(filtered) {{
+    return {{
+      down: dom.window.viewFilt["mom-down"].change,
+      up: dom.window.viewFilt["mom-up"].change,
+      filtered: filtered,
+      grid: gridNames("mom-down-grid"),
+      views: dom.window.__views.slice()
+    }};
+  }}
+  dom.window.__views = [];
+  flat.click();
+  const afterFlat = snap(names(dom.window.applyMomFilters(dom.window.DATA, dom.window.viewFilt["mom-down"], "Trending down")));
+  dom.window.viewFilt["mom-down"].change = "all";
+  dom.window.viewFilt["mom-up"].change = "all";
+  dom.window.__views = [];
+  ngt3.onclick();
+  const afterNgt = snap(names(dom.window.applyMomFilters(dom.window.DATA, dom.window.viewFilt["mom-down"], "Trending down")));
+  dom.window.__views = [];
+  gt3.click();
+  const empty = document.querySelector("#mom-down-grid .empty");
+  const upEmpty = document.querySelector("#mom-up-grid [data-fd-change-empty]");
+  const afterGt = snap(names(dom.window.applyMomFilters(dom.window.DATA, dom.window.viewFilt["mom-down"], "Trending down")));
+  afterGt.cards = document.querySelectorAll("#mom-down-grid article, #mom-down-grid .card").length;
+  afterGt.empty = empty ? (empty.textContent || "").trim() : "";
+  afterGt.emptyFlag = empty ? empty.getAttribute("data-fd-change-empty") : "";
+  afterGt.upEmpty = !!upEmpty;
+  afterGt.upGrid = gridNames("mom-up-grid");
+  process.stdout.write(JSON.stringify({{
+    filtOutsideView: !downView.contains(downFilt),
+    viewFromEl: dom.window.__viewFromEl(flat),
+    pageView: dom.window.__fdChangeView(flat),
+    upViewFromEl: dom.window.__viewFromEl(upChip),
+    changeGroups: Array.from(downFilt.querySelectorAll(".flab")).map(function (el) {{ return (el.textContent || "").trim(); }}),
+    afterFlat: afterFlat,
+    afterNgt: afterNgt,
+    afterGt: afterGt
+  }}));
+}})().catch(function (err) {{
+  console.error(err);
+  process.exit(1);
+}});
+""",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [node, str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        report = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertTrue(report["filtOutsideView"])
+        self.assertEqual(report["viewFromEl"], "mom-down")
+        self.assertEqual(report["pageView"], "mom-down")
+        self.assertEqual(report["upViewFromEl"], "mom-up")
+        self.assertEqual(report["afterFlat"]["down"], "flat")
+        self.assertEqual(report["afterFlat"]["up"], "all")
+        self.assertEqual(report["afterFlat"]["filtered"], ["FLAT"])
+        self.assertEqual(report["afterFlat"]["grid"], ["FLAT"])
+        self.assertTrue(report["afterFlat"]["views"])
+        self.assertNotIn("mom-up", report["afterFlat"]["views"])
+        self.assertEqual(report["afterNgt"]["down"], "ngt3")
+        self.assertEqual(report["afterNgt"]["up"], "all")
+        self.assertEqual(report["afterNgt"]["filtered"], ["N5"])
+        self.assertEqual(report["afterNgt"]["grid"], ["N5"])
+        self.assertEqual(report["afterNgt"]["views"], ["mom-down"])
+        self.assertEqual(report["afterGt"]["down"], "gt3")
+        self.assertEqual(report["afterGt"]["up"], "all")
+        self.assertEqual(report["afterGt"]["filtered"], [])
+        self.assertEqual(report["afterGt"]["cards"], 0)
+        self.assertEqual(report["afterGt"]["empty"], "No names match this filter.")
+        self.assertEqual(report["afterGt"]["emptyFlag"], "1")
+        self.assertFalse(report["afterGt"]["upEmpty"])
+        self.assertEqual(report["afterGt"]["upGrid"], ["UPFLAT"])
+
 
 if __name__ == "__main__":
     unittest.main()
