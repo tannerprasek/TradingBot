@@ -1561,6 +1561,9 @@ if (typeof document !== "undefined") document.addEventListener("click", function
   var b = t && t.closest ? t.closest("[data-k='change']") : null;
   if (!b) return;
   var view = "";
+  var host = b.closest ? b.closest("#view-mom-up, #view-mom-down") : null;
+  if (host && host.id === "view-mom-down") view = "mom-down";
+  else if (host && host.id === "view-mom-up") view = "mom-up";
   var upEl = document.getElementById("view-mom-up");
   var downEl = document.getElementById("view-mom-down");
   function shown(el) {
@@ -1569,9 +1572,11 @@ if (typeof document !== "undefined") document.addEventListener("click", function
     if (el.hasAttribute && el.hasAttribute("hidden")) return false;
     return true;
   }
-  if (shown(upEl) && !shown(downEl)) view = "mom-up";
-  else if (shown(downEl) && !shown(upEl)) view = "mom-down";
-  else if (typeof curView === "string" && (curView === "mom-up" || curView === "mom-down")) view = curView;
+  if (view !== "mom-up" && view !== "mom-down") {
+    if (shown(upEl) && !shown(downEl)) view = "mom-up";
+    else if (shown(downEl) && !shown(upEl)) view = "mom-down";
+    else if (typeof curView === "string" && (curView === "mom-up" || curView === "mom-down")) view = curView;
+  }
   if (view !== "mom-up" && view !== "mom-down") return;
   ev.__fdChangeClick = 1;
   var val = b.getAttribute("data-v") || "all";
@@ -1792,7 +1797,7 @@ def _fallback_js() -> str:
         if (isFinite(v)) return v;
       }
     }
-    var cap = el.querySelector(".mom-score-d10-near");
+    var cap = el.querySelector(".mom-score-d10-near, .score-d10, [data-key='mom-score-d10-near']");
     if (!cap) return null;
     var t = (cap.textContent || "").replace(/\s+/g, "").replace(/\u2212/g, "-");
     if (!t) return null;
@@ -1819,16 +1824,22 @@ def _fallback_js() -> str:
     if (want === "ngt3") return !(delta < -3);
     return true;
   }
+  function changeOwnedByApply() {
+    var t = otherScripts();
+    return t.indexOf("fd-change-pred") >= 0 && t.indexOf("mom_score_d10") >= 0;
+  }
   function applyHide(view) {
     if (view !== "mom-up" && view !== "mom-down") { clearHide(); return; }
     var want = sel[view] || "all";
     var ch = selChange[view] || "all";
     var cards = cardsIn(view);
+    var skipChange = changeOwnedByApply();
     for (var i = 0; i < cards.length; i++) {
       var st = cardStatus(cards[i]);
       var hide = !!(want && want !== "all" && st !== want);
       cards[i].classList.toggle("fd-status-hid", hide);
-      cards[i].classList.toggle("fd-change-hid", changeMiss(cardDelta(cards[i]), ch));
+      if (skipChange) cards[i].classList.remove("fd-change-hid");
+      else cards[i].classList.toggle("fd-change-hid", changeMiss(cardDelta(cards[i]), ch));
     }
   }
   function remember(view, val) {
@@ -1974,11 +1985,28 @@ def _fallback_js() -> str:
       if (onCls && offCls && onCls !== offCls) chips[j].className = (val === cur) ? onCls : offCls;
     }
   }
+  function hasGranularChange(bar) {
+    if (!bar || (bar.textContent || "").indexOf("+>3") < 0) return false;
+    var nodes = bar.querySelectorAll("div, section, li");
+    for (var i = 0; i < nodes.length; i++) {
+      if (!changeLabelText(nodes[i])) continue;
+      if ((nodes[i].textContent || "").indexOf("+>3") < 0) continue;
+      return true;
+    }
+    return false;
+  }
+  function viewFromEl(el) {
+    var host = el && el.closest ? el.closest("#view-mom-up, #view-mom-down") : null;
+    if (host && host.id === "view-mom-down") return "mom-down";
+    if (host && host.id === "view-mom-up") return "mom-up";
+    return viewOf();
+  }
   function paintChange(view) {
     var root = document.getElementById(view === "mom-down" ? "view-mom-down" : "view-mom-up") || document.body;
     var bar = smallest(root, isBar);
     if (!bar) return;
     dropLegacyChange(bar);
+    if (hasGranularChange(bar)) return;
     var existing = bar.querySelector("[data-fd-change-row]");
     if (existing && existing.getAttribute("data-fd-change-row") === view) {
       markChange(existing, view);
@@ -2017,6 +2045,11 @@ def _fallback_js() -> str:
           ev.preventDefault();
           ev.stopPropagation();
           rememberChange(view, val);
+          if (typeof window.paintView === "function") {
+            try { window.paintView(view); } catch (e4) {}
+            return;
+          }
+          if (changeOwnedByApply()) return;
           applyHide(view);
           var row = bar.querySelector("[data-fd-change-row]");
           if (row) markChange(row, view);
@@ -2033,7 +2066,7 @@ def _fallback_js() -> str:
     if (!t || !t.closest) return;
     var b = t.closest("[data-k='change'], [data-fd-change-val]");
     if (!b) return;
-    var view = viewOf();
+    var view = viewFromEl(b);
     if (view !== "mom-up" && view !== "mom-down") return;
     ev.__fdChangeClick = 1;
     var raw = b.getAttribute("data-v");
@@ -2044,6 +2077,7 @@ def _fallback_js() -> str:
       try { window.paintView(view); } catch (e3) {}
       return;
     }
+    if (changeOwnedByApply()) return;
     applyHide(view);
     var row = document.querySelector("[data-fd-change-row]");
     if (row) markChange(row, view);

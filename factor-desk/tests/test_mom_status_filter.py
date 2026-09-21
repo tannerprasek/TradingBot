@@ -879,5 +879,356 @@ function tick() {{
         self.assertGreaterEqual(report["paints"], 2)
 
 
+CHANGE_CONTRACT_JS = r"""
+var viewFilt = {
+  "mom-up": { score: "all", tags: "all", change: "all" },
+  "mom-down": { score: "all", tags: "all", change: "all" }
+};
+var DATA = [
+  {t:"+5", mom_score_d10: 5},
+  {t:"+2", mom_score_d10: 2},
+  {t:"0", mom_score_d10: 0},
+  {t:"-2", mom_score_d10: -2},
+  {t:"-5", mom_score_d10: -5},
+  {t:"null", mom_score_d10: null}
+];
+function grp(label, chips, key, cur) {
+  var h = '<div class="fgrp"><span class="flab">' + label + '</span>';
+  for (var i = 0; i < chips.length; i++) {
+    var v = chips[i][0], lab = chips[i][1];
+    var on = String(cur) === String(v) ? " on" : "";
+    h += '<button type="button" class="fchip' + on + '" data-k="' + key + '" data-v="' + v + '">' + lab + '</button>';
+  }
+  return h + '</div>';
+}
+function applyMomFilters(cards, viewKey) {
+  var vf = viewFilt[viewKey] || {};
+  return (cards || []).filter(function (c) {
+    if (vf.score && vf.score !== "all") {
+      var n = parseFloat(vf.score);
+      if (isFinite(n) && !(Number(c.score) >= n)) return false;
+    }
+    return true;
+  });
+}
+function buildFiltBar(viewKey) {
+  var vf = viewFilt[viewKey] || {};
+  var html = "";
+  html += grp("SCORE", [["all","All"],["5+","5+"],["6+","6+"],["7+","7+"],["8+","8+"]], "score", vf.score);
+  if (viewKey === "mom-up" || viewKey === "mom-down") {
+    html += grp("Change", [["all","All"],["up","Up (+)"],["down","Down (\u2212)"],["flat","Flat"]], "change", vf.change);
+  }
+  return html;
+}
+function paintView(view) {
+  window.__paintViews = window.__paintViews || [];
+  window.__paintViews.push(view);
+  window.__change = viewFilt[view] && viewFilt[view].change;
+  window.__shown = applyMomFilters(DATA, view).map(function (c) { return c.t; });
+}
+"""
+
+
+def _node_eval_prelude(prelude: str, js: str, expr: str) -> dict:
+    node = shutil.which("node")
+    if not node:
+        raise unittest.SkipTest("node not installed")
+    with tempfile.TemporaryDirectory() as tmp:
+        pre = Path(tmp) / "pre.js"
+        code = Path(tmp) / "filt.js"
+        ask = Path(tmp) / "expr.js"
+        runner = Path(tmp) / "run.js"
+        pre.write_text(prelude, encoding="utf-8")
+        code.write_text(js, encoding="utf-8")
+        ask.write_text(expr, encoding="utf-8")
+        runner.write_text(
+            """
+const vm = require("vm");
+const fs = require("fs");
+const sandbox = { console: console };
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), sandbox);
+vm.runInContext(fs.readFileSync(process.argv[3], "utf8"), sandbox);
+const result = vm.runInContext(fs.readFileSync(process.argv[4], "utf8"), sandbox);
+process.stdout.write(JSON.stringify(result));
+""",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [node, str(runner), str(pre), str(code), str(ask)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr or proc.stdout)
+        return json.loads(proc.stdout)
+
+
+class MomChangeFilterContractTests(unittest.TestCase):
+    """Mom Change chips filter mom_score_d10 inside applyMomFilters."""
+
+    def test_applyMomFilters_change_buckets_keep_known_deltas(self) -> None:
+        js = _patched_script(FILT_JS)
+        expr = r"""
+(function () {
+  var cards = [
+    {t:"+5", mom_score_d10: 5},
+    {t:"+2", mom_score_d10: 2},
+    {t:"0", mom_score_d10: 0},
+    {t:"-2", mom_score_d10: -2},
+    {t:"-5", mom_score_d10: -5},
+    {t:"null", mom_score_d10: null}
+  ];
+  function names(v) {
+    viewFilt["mom-up"].change = v;
+    return applyMomFilters(cards, "mom-up").map(function (c) { return c.t; });
+  }
+  return {
+    gt3: names("gt3"),
+    labelGt: names("+>3"),
+    le3: names("le3"),
+    flat: names("flat"),
+    nle3: names("nle3"),
+    ngt3: names("ngt3"),
+    all: names("all")
+  };
+})()
+"""
+        got = _node_eval(js, expr)
+        self.assertEqual(got["gt3"], ["+5"])
+        self.assertEqual(got["labelGt"], ["+5"])
+        self.assertEqual(got["le3"], ["+2"])
+        self.assertEqual(got["flat"], ["0"])
+        self.assertEqual(got["nle3"], ["-2"])
+        self.assertEqual(got["ngt3"], ["-5"])
+        self.assertEqual(got["all"], ["+5", "+2", "0", "-2", "-5", "null"])
+        for bucket in ("gt3", "le3", "flat", "nle3", "ngt3"):
+            self.assertNotIn("null", got[bucket])
+
+    def test_buildFiltBar_has_exactly_one_change_group(self) -> None:
+        expr = r"""
+(function () {
+  function labs(html) {
+    var out = [];
+    var re = /class="flab">([^<]+)</g;
+    var m;
+    while ((m = re.exec(html))) out.push(m[1]);
+    return out;
+  }
+  var up = buildFiltBar("mom-up");
+  var down = buildFiltBar("mom-down");
+  var outliers = buildFiltBar("outliers");
+  return {
+    up: labs(up),
+    down: labs(down),
+    outliers: labs(outliers),
+    upPlus: up.indexOf("Up (+)"),
+    downWord: up.indexOf("Down")
+  };
+})()
+"""
+        clean = _node_eval(_patched_script(FILT_JS), expr)
+        legacy = _node_eval(_patched_script(LEGACY_CHANGE_JS), expr)
+        for got in (clean, legacy):
+            self.assertEqual(got["up"].count("CHANGE") + got["up"].count("Change"), 1)
+            self.assertEqual(got["down"].count("CHANGE") + got["down"].count("Change"), 1)
+            self.assertEqual(got["outliers"].count("CHANGE") + got["outliers"].count("Change"), 0)
+            self.assertEqual(got["upPlus"], -1)
+            self.assertEqual(got["downWord"], -1)
+        up_html = _node_eval(
+            _patched_script(FILT_JS),
+            'buildFiltBar("mom-up")',
+        )
+        self.assertIsInstance(up_html, str)
+        for label in ("+>3", "+\u22643", "Flat", "\u2212\u22643", "\u2212>3"):
+            self.assertIn(label, up_html)
+
+    def test_change_chip_click_sets_viewfilt_and_calls_paintView(self) -> None:
+        js = _patched_script(CHANGE_CONTRACT_JS)
+        self.assertEqual(js.count("fd-change-click"), 1)
+        self.assertIn("viewFilt[view].change = val", js)
+        self.assertIn("paintView(view)", js)
+        self.assertNotIn("fd-change-hid", js.split("/* fd-change-click */", 1)[1])
+        prelude = r"""
+var window = {};
+var document = {
+  _handlers: [],
+  getElementById: function (id) {
+    if (id === "view-mom-up") return { id: id, classList: { contains: function () { return false; } }, hasAttribute: function () { return false; } };
+    if (id === "view-mom-down") return { id: id, classList: { contains: function (c) { return c === "hide" || c === "hidden"; } }, hasAttribute: function () { return false; } };
+    return null;
+  },
+  addEventListener: function (_type, fn) { document._handlers.push(fn); }
+};
+"""
+        expr = r"""
+(function () {
+  var chip = {
+    getAttribute: function (k) {
+      if (k === "data-v") return "+>3";
+      if (k === "data-k") return "change";
+      return "";
+    },
+    closest: function (sel) {
+      if (String(sel).indexOf("view-mom-up") >= 0) return { id: "view-mom-up" };
+      return null;
+    }
+  };
+  var ev = {
+    target: {
+      closest: function (sel) {
+        if (String(sel).indexOf("data-k") >= 0) return chip;
+        return null;
+      }
+    }
+  };
+  if (!document._handlers.length) return { error: "no click handler" };
+  document._handlers[0](ev);
+  var afterGt = { change: viewFilt["mom-up"].change, shown: window.__shown, paints: (window.__paintViews || []).slice() };
+  chip.getAttribute = function (k) {
+    if (k === "data-v") return "flat";
+    if (k === "data-k") return "change";
+    return "";
+  };
+  ev.__fdChangeClick = 0;
+  document._handlers[0](ev);
+  return { afterGt: afterGt, afterFlat: { change: viewFilt["mom-up"].change, shown: window.__shown, paints: window.__paintViews } };
+})()
+"""
+        got = _node_eval_prelude(prelude, js, expr)
+        self.assertEqual(got["afterGt"]["change"], "gt3")
+        self.assertEqual(got["afterGt"]["shown"], ["+5"])
+        self.assertEqual(got["afterGt"]["paints"], ["mom-up"])
+        self.assertEqual(got["afterFlat"]["change"], "flat")
+        self.assertEqual(got["afterFlat"]["shown"], ["0"])
+        self.assertEqual(got["afterFlat"]["paints"], ["mom-up", "mom-up"])
+
+    def test_css_hide_does_not_blank_score_d10_cards(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        jsdom_root = Path("/tmp/fd-jsdom")
+        jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+        if not jsdom_mod.is_dir():
+            npm = shutil.which("npm")
+            if not npm:
+                self.skipTest("npm not installed")
+            jsdom_root.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+        live = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<div id="view-mom-up">
+  <h2>MOMENTUM UP</h2>
+  <div id="filt">
+    <div class="fgrp"><span class="flab">Change</span>
+      <button type="button" class="fchip">All</button>
+      <button type="button" class="fchip">Up (+)</button>
+      <button type="button" class="fchip">Down (−)</button>
+      <button type="button" class="fchip">Flat</button>
+    </div>
+  </div>
+  <div id="grid">
+    <article class="card"><h2>+5</h2><span class="score-d10">+5</span></article>
+    <article class="card"><h2>+2</h2><span class="score-d10">+2</span></article>
+    <article class="card"><h2>0</h2><span class="score-d10">0</span></article>
+    <article class="card"><h2>-2</h2><span class="score-d10">−2</span></article>
+    <article class="card"><h2>-5</h2><span class="score-d10">−5</span></article>
+    <article class="card"><h2>null</h2></article>
+  </div>
+</div>
+<div id="view-mom-down" class="hide"></div>
+<script>
+""" + CHANGE_CONTRACT_JS + """
+var _recordPaint = paintView;
+paintView = function (view) {
+  _recordPaint(view);
+  var cards = applyMomFilters(DATA, view);
+  document.getElementById("grid").innerHTML = cards.map(function (c) {
+    var cap = c.mom_score_d10 == null ? "" : '<span class="score-d10">' + c.t + '</span>';
+    return '<article class="card"><h2>' + c.t + '</h2>' + cap + '</article>';
+  }).join("");
+};
+document.getElementById("filt").insertAdjacentHTML("beforeend", buildFiltBar("mom-up"));
+</script>
+</body></html>"""
+        html = desk_dash.ensure_mom_status_filter(live)
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            runner = Path(tmp) / "run.js"
+            page.write_text(html, encoding="utf-8")
+            runner.write_text(
+                f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+const dom = new JSDOM(fs.readFileSync({json.dumps(str(page))}, "utf8"), {{
+  runScripts: "dangerously",
+  url: "http://127.0.0.1/factorbook.html"
+}});
+function tick() {{
+  return new Promise(function (resolve) {{ setTimeout(resolve, 40); }});
+}}
+(async function () {{
+  const document = dom.window.document;
+  await tick();
+  function changeLabs() {{
+    return Array.from(document.querySelectorAll("#filt .flab")).map(function (el) {{
+      return (el.textContent || "").trim();
+    }}).filter(function (t) {{ return t === "Change" || t === "CHANGE"; }});
+  }}
+  const before = changeLabs();
+  const upPlus = (document.getElementById("filt").textContent || "").indexOf("Up (+)");
+  const gt = Array.from(document.querySelectorAll("#filt button")).find(function (b) {{
+    return (b.textContent || "").trim() === "+>3";
+  }});
+  gt.click();
+  await tick();
+  const names = Array.from(document.querySelectorAll("#grid h2")).map(function (el) {{
+    return (el.textContent || "").trim();
+  }});
+  const hidden = Array.from(document.querySelectorAll("#grid .fd-change-hid")).map(function (el) {{
+    var h = el.querySelector("h2");
+    return h ? h.textContent.trim() : "";
+  }});
+  process.stdout.write(JSON.stringify({{
+    before: before,
+    upPlus: upPlus,
+    names: names,
+    hidden: hidden,
+    change: dom.window.viewFilt["mom-up"].change,
+    paints: dom.window.__paintViews || []
+  }}));
+}})().catch(function (err) {{
+  console.error(err);
+  process.exit(1);
+}});
+""",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [node, str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        report = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["before"], ["Change"])
+        self.assertLess(report["upPlus"], 0)
+        self.assertEqual(report["change"], "gt3")
+        self.assertEqual(report["paints"], ["mom-up"])
+        self.assertEqual(report["names"], ["+5"])
+        self.assertEqual(report["hidden"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
