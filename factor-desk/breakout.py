@@ -359,8 +359,13 @@ def _float_any(value: Any) -> float | None:
 def metrics_of(card: Mapping[str, Any] | None) -> dict[str, float | None]:
     """Live MOM ``cardHTML`` reads ``c.metrics.r20_pct`` / ``rs_63`` / ``atr_pct``."""
     blob = _nested_metrics(card)
+    day = _float_any(blob.get("day_pct") if blob.get("day_pct") is not None else blob.get("r1_pct") or blob.get("ret_1d"))
+    if day is None:
+        pts = _float_any(blob.get("CHG_PCT_1D") if blob.get("CHG_PCT_1D") is not None else blob.get("chg_pct_1d"))
+        if pts is not None:
+            day = pts / 100.0
     return {
-        "day": _float_any(blob.get("day_pct") if blob.get("day_pct") is not None else blob.get("r1_pct") or blob.get("ret_1d")),
+        "day": day,
         "r20": _float_any(blob.get("r20_pct") if blob.get("r20_pct") is not None else blob.get("r20")),
         "rs63": _float_any(blob.get("rs_63") if blob.get("rs_63") is not None else blob.get("rs63") or blob.get("rs_63d")),
         "atr_pct": _float_any(blob.get("atr_pct") if blob.get("atr_pct") is not None else blob.get("atr")),
@@ -445,7 +450,7 @@ _TICKER_CTX_RE = re.compile(
 )
 _METRICS_KEY_RE = re.compile(r'(?:["\']metrics["\']|\bmetrics)\s*:\s*\{', re.I)
 _METRIC_NUM_RE = re.compile(
-    r"""["']?(r20_pct|rs_63|atr_pct|day_pct|r1_pct|r20|rs63|atr)["']?\s*:\s*(-?\d+(?:\.\d+)?)""",
+    r"""["']?(r20_pct|rs_63|atr_pct|day_pct|r1_pct|r20|rs63|atr|chg_pct_1d)["']?\s*:\s*(-?\d+(?:\.\d+)?)""",
     re.I,
 )
 
@@ -483,7 +488,7 @@ def _read_js_object(text: str, open_idx: int, *, limit: int = 4000) -> str:
 def _parse_metrics_obj(blob: str) -> dict[str, float]:
     out: dict[str, float] = {}
     for match in _METRIC_NUM_RE.finditer(blob or ""):
-        key = match.group(1)
+        key = match.group(1).lower()
         try:
             out[key] = float(match.group(2))
         except (TypeError, ValueError):
@@ -505,6 +510,8 @@ def _parse_metrics_obj(blob: str) -> dict[str, float]:
         canon["day_pct"] = out["day_pct"]
     elif "r1_pct" in out:
         canon["day_pct"] = out["r1_pct"]
+    elif "chg_pct_1d" in out:
+        canon["day_pct"] = out["chg_pct_1d"] / 100.0
     return canon
 
 
@@ -1362,7 +1369,12 @@ def strip_js() -> str:
       if (v == null) v = fallback;
       return v;
     }}
-    row.day = takeMetric(m, ["day_pct","r1_pct","ret_1d","day"], takeMetric(row, ["day","Day","d1","ret_1d"], takeMetric(card, ["day","Day","d1"], computed.day)));
+    row.day = takeMetric(m, ["day_pct","r1_pct","ret_1d","day"], takeMetric(row, ["day","Day","d1","ret_1d"], takeMetric(card, ["day","Day","d1","ret_1d"], null)));
+    if (row.day == null) {{
+      var pts1 = takeMetric(m, ["CHG_PCT_1D","chg_pct_1d"], takeMetric(row, ["CHG_PCT_1D","chg_pct_1d"], takeMetric(card, ["CHG_PCT_1D","chg_pct_1d"], null)));
+      if (pts1 != null) row.day = pts1 / 100;
+    }}
+    if (row.day == null) row.day = computed.day;
     row.r20 = takeMetric(m, ["r20_pct","r20","R20"], takeMetric(row, ["r20","R20","ret_20d"], takeMetric(card, ["r20","R20","ret_20d"], computed.r20)));
     row.rs63 = takeMetric(m, ["rs_63","rs63","RS63"], takeMetric(row, ["rs63","RS63","rs_63"], takeMetric(card, ["rs63","RS63","rs_63"], computed.rs63)));
     row.atr_pct = takeMetric(m, ["atr_pct","atr"], takeMetric(row, ["atr_pct","atrs","ATR"], takeMetric(card, ["atr_pct","atrs","ATR"], computed.atr_pct)));

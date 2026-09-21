@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -211,6 +213,49 @@ class HtmlChipTests(unittest.TestCase):
         self.assertIn("<nav></nav>", out)
         again = gf.ensure_embedded(out, mapping)
         self.assertNotIn('id="gics-filter-strip"', again)
+
+    def test_strip_ui_does_not_blank_classlist_tokens(self) -> None:
+        baked = (
+            "<html><body>"
+            "<script>\n"
+            "function apply(){\n"
+            '  if (hide) el.classList.add("gics-hid");\n'
+            '  else el.classList.remove("gics-hid");\n'
+            '  el.classList.toggle("active", on);\n'
+            "}\n"
+            "</script>"
+            "<script>\n"
+            'if (hide) el.classList.add("");\n'
+            'else el.classList.remove("");\n'
+            "el.classList.add('', \"keep\");\n"
+            "</script>"
+            '<div class="card gics-hid" data-t="AMD">AMD</div>'
+            "</body></html>"
+        )
+        out = gf.strip_ui(baked)
+        self.assertIn('classList.add("gics-hid")', out)
+        self.assertIn('classList.remove("gics-hid")', out)
+        self.assertIn('classList.toggle("active", on)', out)
+        self.assertNotIn('classList.add("")', out)
+        self.assertNotIn("classList.add('')", out)
+        self.assertNotIn('classList.remove("")', out)
+        self.assertNotIn("classList.remove('')", out)
+        self.assertIn('classList.add("keep")', out)
+        self.assertIn("&& void 0", out)
+        self.assertNotIn("elvoid", out)
+        self.assertRegex(out, r'class="card"')
+        self.assertNotRegex(out, r'class="[^"]*\bgics-hid\b')
+        node = shutil.which("node")
+        if node:
+            scripts = "\n".join(re.findall(r"<script>(.*?)</script>", out, flags=re.S))
+            proc = subprocess.run(
+                [node, "--check", "-"],
+                input=scripts,
+                text=True,
+                capture_output=True,
+                timeout=15,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def test_span_host_removed(self) -> None:
         html = (
