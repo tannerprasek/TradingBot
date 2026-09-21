@@ -9,6 +9,13 @@ Intraday (default off)::
     GET  /refresh?intraday=1
     POST /refresh          JSON body {"intraday": 1}  or query string
 
+Portfolio (does not change Refresh)::
+
+    GET  /api/quote/{ticker}
+    POST /api/portfolio     JSON body {"csv": "position,ticker\\n100,AAPL"}
+    GET  /api/portfolio     last uploaded scorecard
+
+
 When ``intraday=1``, enrich also pulls session volume vs ADV. When off, enrich
 behavior is unchanged. Capacity (``BLOOMBERG_LIMIT``) skips enrich the same way
 options pulse degrades — Refresh still finishes.
@@ -34,6 +41,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import dapi_enrich  # noqa: E402
+import portfolio  # noqa: E402
 
 LOG = logging.getLogger("add_server")
 HOST = "127.0.0.1"
@@ -311,6 +319,12 @@ class DeskHandler(BaseHTTPRequestHandler):
         if path == "/refresh":
             self._start_refresh(query, None)
             return
+        if path.startswith("/api/quote") or path.startswith("/api/quotes"):
+            portfolio.handle_quote_request(self, parsed)
+            return
+        if path in ("/api/portfolio", "/api/portfolio/last"):
+            portfolio.handle_portfolio_get(self)
+            return
         self._json(404, {"ok": False, "error": "not_found", "path": path})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -320,6 +334,9 @@ class DeskHandler(BaseHTTPRequestHandler):
         body = _read_json_body(self)
         if path == "/refresh":
             self._start_refresh(query, body)
+            return
+        if path in ("/api/portfolio", "/api/portfolio/run"):
+            portfolio.handle_portfolio_run(self, body)
             return
         self._json(404, {"ok": False, "error": "not_found", "path": path})
 

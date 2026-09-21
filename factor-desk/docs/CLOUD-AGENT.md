@@ -30,6 +30,10 @@ See [DAPI-ENRICH.md](DAPI-ENRICH.md) for field candidates, chip thresholds, and 
 
 Never invent Bloomberg numbers. Null + reason. Capacity → skip enrich, continue Refresh.
 
+## Portfolio upload
+
+Dedicated **Portfolio** top-nav tab. CSV / paste `position,ticker` (signed shares). Gross-normalized signed weights. Reuse desk factor loadings + `mom_score` (not a new model, not `score_v2`). Missing names listed. Pointers only — not a trade. `portfolio.ensure_embedded` on every HTML write. Recopy `portfolio.py`; do not wholesale replace live `desk_dash.py`. Do not change the DAPI Refresh pipeline. See [PORTFOLIO.md](PORTFOLIO.md).
+
 ## Secrets and dumps
 
 No Bloomberg secrets. No csv/json dumps (`dapi_enrichment.json`, `options_abnormal.json`, …). Those paths are gitignored (see `factor-desk/.gitignore`).

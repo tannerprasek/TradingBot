@@ -7,8 +7,8 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | Module | Role |
 | --- | --- |
 | `dapi_enrich.py` | DAPI enrichment pack (9 layers, chips, JSON) |
-| `add_server.py` | Sidecar HTTP server on `:8765` (Refresh + `intraday=1`) |
-| `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills |
+| `add_server.py` | Sidecar HTTP on `:8765` (Refresh, `/api/quote`, `/api/portfolio`) |
+| `desk_dash.py` | Assemble Factor Desk dashboard + enrich pills + Portfolio embed |
 | `write_dash.py` | Write generated `factorbook.html` |
 | `pull_options_pulse.py` | Options pulse pull + score v2 + skew summary |
 | `momentum_screen.py` | Momentum screen + enrich attach |
@@ -16,6 +16,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `clean_ingest.py` | Clean ingest path |
 | `ingest_cov.py` | Covariance / coverage ingest |
 | `dapi_keepalive.py` | DAPI session keepalive |
+| `portfolio.py` | Portfolio upload tab + gross weights + scorecard |
 | `troughing.py` | Troughing / mean-reversion helpers |
 
 ## Docs
@@ -27,6 +28,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `docs/DAPI-ENRICH.md` | Field packs, chips, Refresh `intraday=1` |
 | `docs/OPTIONS-PULSE.md` | Options pulse notes |
 | `docs/DAILY-PIPE.md` | Daily pipeline notes |
+| `docs/PORTFOLIO.md` | Portfolio upload + weight definition |
 | `README-pull.md` | Pull / refresh notes |
 | `DEPLOY-HOOKS.md` | Minimal patches for live Desktop modules |
 
@@ -40,4 +42,4 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 
 ## Generated / local (gitignored)
 
-`factorbook.html`, `factorbook_desktop_latest.html`, `*.csv`, `*.xlsx`, `*.png`, `digest_db.json`, `options_abnormal.json`, `options_pulse*.json`, `dapi_enrichment.json`, `clean/*.csv`, `.dapi*`, `.venv/`.
+`factorbook.html`, `factorbook_desktop_latest.html`, `*.csv`, `*.xlsx`, `*.png`, `digest_db.json`, `options_abnormal.json`, `options_pulse*.json`, `dapi_enrichment.json`, `portfolio_last.json`, `clean/*.csv`, `.dapi*`, `.venv/`.
