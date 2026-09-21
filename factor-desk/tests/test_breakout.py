@@ -1830,6 +1830,18 @@ console.log(JSON.stringify({ empty: empty, cards: cards }));
       <span><b>0.17</b> RS63</span>
     </div>
   </div>
+  <div class="card" data-t="HIGH">
+    <header><h2>HIGH</h2><span class="sc">12</span></header>
+    <span data-mom-score-d10="6">+6</span>
+    <span class="badge" data-key="mom-streak">↑4d&gt;5</span>
+    <div class="stats"><span><b>0.20</b> RS63</span></div>
+  </div>
+  <div class="card" data-t="BAKED">
+    <header><h2>BAKED</h2><span class="sc">9</span></header>
+    <span data-mom-score-d10="5">+5</span>
+    <span class="badge" data-key="mom-streak">↑18d&gt;5</span>
+    <div class="stats"><span><b>0.11</b> RS63</span></div>
+  </div>
 </div></div>
 <div id="view-mom-down"></div>
 """
@@ -1860,11 +1872,57 @@ console.log(JSON.stringify({
         )
         self.assertEqual(report["tags"], ["DIV"])
         self.assertEqual(report["names"], ["MXL"])
+        self.assertNotIn("HIGH", report["names"])
+        self.assertNotIn("BAKED", report["names"])
         self.assertEqual(report["empty"], "")
         self.assertAlmostEqual(report["n"], 0.17)
         stamped = bo.stamp_dispersion_html(mom, book={})
         self.assertRegex(stamped, r'<div class="card" data-t="MXL"[^>]*data-dispersion="0\.17"')
         self.assertIn("<b>0.17</b> RS63", stamped)
+
+    def test_jsdom_div_card_band_miss_uses_passed_count(self) -> None:
+        """Score 12–13 div.cards stay out. Empty copy counts the universe."""
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        mom = """
+<div id="view-mom-up"><div id="mom-up-grid">
+  <div class="card" data-t="HI12">
+    <header><h2>HI12</h2><span class="sc">12</span></header>
+    <span data-mom-score-d10="6">+6</span>
+    <span class="badge" data-key="mom-streak">↑4d&gt;5</span>
+    <span><b>0.20</b> RS63</span>
+  </div>
+  <div class="card" data-t="HI13">
+    <header><h2>HI13</h2><span class="sc">13</span></header>
+    <span data-mom-score-d10="5">+5</span>
+    <span class="badge" data-key="mom-streak">↑20d&gt;5</span>
+    <span><b>0.08</b> RS63</span>
+  </div>
+</div></div>
+"""
+        html = (
+            "<!DOCTYPE html><body>"
+            + mom
+            + "<div id=\"view-breakout\"><div id=\"breakout-grid\"></div></div>"
+            "<div id=\"view-breakdown\"><div id=\"breakdown-grid\"></div></div>"
+            "<script>\n"
+            + bo.strip_js()
+            + "\n</script></body>"
+        )
+        report = _run_jsdom(
+            html,
+            r"""
+window.__FD_BB_SHOW__("breakout");
+const grid = document.getElementById("breakout-grid");
+console.log(JSON.stringify({
+  names: Array.from(grid.querySelectorAll(".card")).map(function (el) { return el.getAttribute("data-t"); }),
+  empty: (grid.querySelector(".fd-bb-empty") || {}).textContent || ""
+}));
+""",
+        )
+        self.assertEqual(report["names"], [])
+        self.assertEqual(report["empty"], "No early inflections (0 of 2 passed)")
+        self.assertNotIn("this Refresh", report["empty"])
 
 
 class PaperNavIgnoreTests(unittest.TestCase):
