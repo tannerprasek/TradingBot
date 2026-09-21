@@ -41,6 +41,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import dapi_enrich  # noqa: E402
+import desk_dash  # noqa: E402
 
 LOG = logging.getLogger("add_server")
 HOST = "127.0.0.1"
@@ -244,7 +245,57 @@ def run_dapi_enrich_stage(
         }
 
 
+def html_out(root: Path | None = None) -> Path | None:
+    """Desktop live desk Tanner opens, when this root is that layout.
+
+    ``<Desktop>/factorbook/`` is the package cwd. ``HTML_OUT`` is
+    ``<Desktop>/factorbook.html``. Returns None when no parent live file is
+    in play (unit-test temps, repo ``factor-desk/`` with no sibling HTML).
+    """
+    base = Path(root) if root is not None else HERE
+    parent = base.parent / desk_dash.HTML_NAME
+    if not parent.is_file():
+        return None
+    if base.name.lower() == "factorbook":
+        return parent
+    try:
+        size = parent.stat().st_size
+    except OSError:
+        return None
+    if size >= desk_dash.LIVE_MIN_BYTES:
+        return parent
+    text = desk_dash._read_html(parent)
+    if text and desk_dash.looks_like_live_desk(text):
+        return parent
+    return None
+
+
+def assert_html_out_live(root: Path | None = None) -> None:
+    """Fail the rebuild when Desktop ``factorbook.html`` is legacy-sized.
+
+    A ~188KB FLAGS/PAIRS shell is under ``LIVE_MIN_BYTES`` (1_000_000).
+    """
+    dest = html_out(root)
+    if dest is None:
+        return
+    size = dest.stat().st_size if dest.is_file() else 0
+    if size < desk_dash.LIVE_MIN_BYTES:
+        raise desk_dash.LiveDeskShrinkError(
+            f"HTML_OUT legacy-sized: {dest} ({size} bytes < {desk_dash.LIVE_MIN_BYTES})"
+        )
+
+
+def run_rebuild(progress_cb: Callable[[float, str], None] | None = None, root: Path | None = None) -> str | None:
+    """Add/Refresh rebuild. cwd is the factorbook package directory.
+
+    Calls this tree's ``write_dash.write`` (same dest rules as
+    ``python write_dash.py``). Never ``rebuild_bundle/write_dash.py``.
+    """
+    return run_rebuild_stage(progress_cb or _progress_cb, root=root)
+
+
 def run_rebuild_stage(progress_cb: Callable[[float, str], None], root: Path | None = None) -> str | None:
+    root = Path(root) if root is not None else HERE
     progress_cb(0.65, "rebuild")
     _, err_v0 = _try_call("run_v0", ("run", "main"), root=root)
     if err_v0 and not err_v0.startswith("run_v0_missing"):
@@ -255,13 +306,26 @@ def run_rebuild_stage(progress_cb: Callable[[float, str], None], root: Path | No
     if err_ss and not str(err_ss).startswith("s_score_missing"):
         LOG.warning("s_score panel: %s — continue", err_ss)
     progress_cb(0.80, "write_dash")
+    # In-package write_dash only. Do not shell out to rebuild_bundle/write_dash.py.
     _, err_wd = _try_call("write_dash", ("write", "main"), root=root)
     if err_wd:
         LOG.warning("write_dash: %s", err_wd)
+    try:
+        assert_html_out_live(root)
+    except desk_dash.LiveDeskShrinkError as exc:
+        LOG.error("%s", exc)
+        progress_cb(1.0, "failed")
+        return str(exc)
     progress_cb(0.90, "desk_dash")
     _, err_dd = _try_call("desk_dash", ("rebuild", "assemble_and_write", "main"), root=root)
     if err_dd and not str(err_dd).startswith("desk_dash"):
         LOG.warning("desk_dash: %s", err_dd)
+    try:
+        assert_html_out_live(root)
+    except desk_dash.LiveDeskShrinkError as exc:
+        LOG.error("%s", exc)
+        progress_cb(1.0, "failed")
+        return str(exc)
     progress_cb(1.0, "done")
     return err_wd or err_dd
 
@@ -307,6 +371,8 @@ def run_refresh(
     # GICS sector chips read gics_sector_name from the enrich file / gics_sectors.json
     # cache. Do NOT add a sectors Refresh stage here.
     rebuild_err = run_rebuild_stage(cb, root=root)
+    if rebuild_err and "legacy-sized" in str(rebuild_err):
+        raise desk_dash.LiveDeskShrinkError(rebuild_err)
     return {
         "ok": True,
         "kind": "refresh",
@@ -339,6 +405,8 @@ def run_options_refresh(
     cb(0.05, "options start")
     options_res, opt_err = run_options_stage(names, cb, root=root)
     rebuild_err = run_rebuild_stage(cb, root=root)
+    if rebuild_err and "legacy-sized" in str(rebuild_err):
+        raise desk_dash.LiveDeskShrinkError(rebuild_err)
     n = 0
     if isinstance(options_res, dict):
         names_map = options_res.get("names") or options_res

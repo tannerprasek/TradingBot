@@ -28,6 +28,7 @@ import breakout  # noqa: E402
 import book_delta  # noqa: E402
 import desk_hitch  # noqa: E402
 import paper_trade  # noqa: E402
+import portfolio  # noqa: E402
 import s_score  # noqa: E402
 
 LOG = logging.getLogger("desk_dash")
@@ -368,12 +369,133 @@ def _fmt(value: Any, digits: int = 2) -> str:
     return html.escape(str(value))
 
 
+class LiveDeskShrinkError(RuntimeError):
+    """Refused to replace a fat live factorbook.html with skinny HTML."""
+
+
 def looks_like_live_desk(html_text: str) -> bool:
     if not html_text:
         return False
     if all(marker in html_text for marker in LIVE_NAV_MARKERS):
         return True
     return len(html_text.encode("utf-8")) >= LIVE_MIN_BYTES
+
+
+def _read_html(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+    except OSError:
+        return ""
+
+
+def resolve_live_dest(root: Path, explicit: Path | str | None = None) -> Path:
+    """Pick the factorbook.html Add/Refresh must write.
+
+    An explicit path (``--out``) wins. Otherwise Tanner's layout is::
+
+        <Desktop>/factorbook.html          live desk he opens
+        <Desktop>/factorbook/write_dash.py this package (cwd)
+
+    Prefer ``<root>/../factorbook.html`` when that file already looks like the
+    live desk, including when the nested ``<root>/factorbook.html`` is skinny
+    or missing. Files-based only — there is no ``factor_payload=`` splice.
+    """
+    base = Path(root)
+    if explicit is not None and str(explicit) != "":
+        return Path(explicit)
+    nested = base / HTML_NAME
+    parent = base.parent / HTML_NAME
+    try:
+        if parent.resolve() == nested.resolve():
+            return nested
+    except OSError:
+        return nested
+    parent_text = _read_html(parent) if parent.is_file() else ""
+    nested_text = _read_html(nested) if nested.is_file() else ""
+    parent_live = bool(parent_text) and looks_like_live_desk(parent_text)
+    nested_live = bool(nested_text) and looks_like_live_desk(nested_text)
+    if parent_live and not nested_live:
+        LOG.info(
+            "live desk is %s (nested %s is skinny or missing)",
+            parent,
+            nested,
+        )
+        return parent
+    if parent_live:
+        LOG.info("live desk parent %s preferred over nested %s", parent, nested)
+        return parent
+    return nested
+
+
+# Top-nav data-view → assignment that must exist in the written desk.
+# A bare reference (setView calls __FD_PF_SHOW__) is not enough — the
+# function has to be assigned or the click no-ops.
+_NAV_SHOW_ASSIGN = {
+    "breakout": "window.__FD_BB_SHOW__",
+    "breakdown": "window.__FD_BB_SHOW__",
+    "experimental": "window.__FD_SS_SHOW__",
+    "portfolio": "window.__FD_PF_SHOW__",
+}
+_NAV_CHUNK_RE = re.compile(r"<nav\b[^>]*>.*?</nav>", re.I | re.S)
+_NAV_BTN_RE = re.compile(r"<button\b([^>]*)>", re.I)
+_NAV_VIEW_RE = re.compile(r"""data-view\s*=\s*["']([^"']+)["']""", re.I)
+
+
+def _assigned(html_text: str, window_name: str) -> bool:
+    """True when ``window.NAME =`` is an assignment, not a call or compare."""
+    return bool(re.search(rf"{re.escape(window_name)}\s*=(?!=)", html_text))
+
+
+def _top_nav_views(html_text: str) -> list[str]:
+    """data-view values on top-bar buttons. Panes and cards are ignored."""
+    regions = _NAV_CHUNK_RE.findall(html_text or "")
+    if not regions:
+        regions = [html_text or ""]
+    views: list[str] = []
+    seen: set[str] = set()
+    for region in regions:
+        for match in _NAV_BTN_RE.finditer(region):
+            attrs = match.group(1)
+            found = _NAV_VIEW_RE.search(attrs)
+            if not found:
+                continue
+            view = found.group(1).strip().lower()
+            if view and view not in seen:
+                seen.add(view)
+                views.append(view)
+    return views
+
+
+def assert_nav_integrity(html: str) -> None:
+    """Raise ``LiveDeskShrinkError`` when the top bar cannot be kept.
+
+    Fails closed when the document is under ``LIVE_MIN_BYTES``, when the
+    core labels are missing, or when a Breakout / Experimental / Portfolio
+    nav button has no ``window.__FD_*_SHOW__ =`` assignment. A call such as
+    ``__FD_PF_SHOW__()`` does not count.
+    """
+    text = html or ""
+    problems: list[str] = []
+    views = _top_nav_views(text)
+    for view in views:
+        if view == "paper":
+            continue
+        window_name = _NAV_SHOW_ASSIGN.get(view)
+        if window_name and not _assigned(text, window_name):
+            problems.append(f"{window_name} = missing for data-view={view}")
+    for label in ("Refresh", "Momentum Up", "Momentum Down", "Outliers", "Options"):
+        if label not in text:
+            problems.append(f"label missing: {label}")
+    size = len(text.encode("utf-8"))
+    if size < LIVE_MIN_BYTES:
+        problems.append(f"legacy-sized ({size} bytes < {LIVE_MIN_BYTES})")
+    if problems:
+        raise LiveDeskShrinkError("nav integrity: " + "; ".join(problems))
 
 
 def _gics_sector_db_json(
@@ -2419,6 +2541,7 @@ def render_html(
     html_text = desk_hitch.ensure_embedded(html_text, hitch_map)
     html_text = paper_trade.ensure_embedded(html_text, paper_marks)
     html_text = s_score.ensure_embedded(html_text, ss_ranked)
+    html_text = portfolio.ensure_embedded(html_text)
     return ensure_mom_status_filter(_ensure_options_refresh_ui(html_text))
 
 
@@ -2430,13 +2553,20 @@ def write_combined(
     book: Mapping[str, Any] | None = None,
     html: str | None = None,
 ) -> Path:
-    """Write ``factorbook.html``. Patch live fat chrome; never emit skinny grid.
+    """Write ``factorbook.html``. Patch live fat chrome; never shrink it.
 
     GICS sector-filter strip and book-delta strip are BINNED: leftover hosts
     are removed on every write. G1–G12 group chips stay.
+
+    Enrichment is files-based (``dapi_enrichment.json`` / ``book``). There is
+    no ``factor_payload=`` argument and no legacy ``__PAYLOAD__`` splice.
+
+    When ``path`` is omitted and ``<root>/factorbook.html`` is skinny or
+    missing while ``<root>/../factorbook.html`` is a fat live desk, the parent
+    file is patched (Tanner's Desktop layout).
     """
     base = Path(root) if root is not None else HERE
-    dest = Path(path) if path is not None else base / HTML_NAME
+    dest = resolve_live_dest(base, path)
     if book is None:
         book = load_enrichment(base)
     cache = dapi_enrich.load_gics_cache(root=base)
@@ -2456,16 +2586,22 @@ def write_combined(
     paper_marks = paper_trade.marks_db(cards, book=book)
     ss_ranked = s_score.rank_book(cards, root=base, write_panel_file=True)
 
-    existing = ""
-    if html is not None:
-        existing = html
-    elif dest.is_file():
-        existing = dest.read_text(encoding="utf-8")
-
-    if existing and looks_like_live_desk(existing):
-        text = existing
-        LOG.info("write_combined: patching live desk HTML (%s bytes)", len(existing.encode("utf-8")))
+    on_disk = _read_html(dest) if dest.is_file() else ""
+    prior_size = dest.stat().st_size if dest.is_file() else 0
+    # Fat chrome already on disk is always patched. A caller-supplied skinny
+    # ``html=`` string must not replace it with render_html.
+    if on_disk and looks_like_live_desk(on_disk):
+        text = on_disk
+        LOG.info("write_combined: patching live desk HTML (%s bytes)", prior_size or len(on_disk.encode("utf-8")))
+    elif html and looks_like_live_desk(html):
+        text = html
+        LOG.info("write_combined: patching supplied live desk HTML")
     else:
+        if prior_size >= LIVE_MIN_BYTES or (on_disk and looks_like_live_desk(on_disk)):
+            raise LiveDeskShrinkError(
+                f"refusing to shrink live desk {dest} ({prior_size} bytes) "
+                "by replacing it with render_html"
+            )
         text = render_html(
             cards,
             book=book,
@@ -2489,7 +2625,29 @@ def write_combined(
     text = desk_hitch.ensure_embedded(text, hitch_map)
     text = paper_trade.ensure_embedded(text, paper_marks)
     text = s_score.ensure_embedded(text, ss_ranked)
+    text = portfolio.ensure_embedded(text)
     text = ensure_mom_status_filter(text)
+    # Gate before any write. Binder/label failures never hit disk.
+    # A document under LIVE_MIN_BYTES always fails assert_nav_integrity.
+    # First-time shells (nothing fat on disk) are still written so a dev
+    # render can finish; write_dash.main exits 2 and a fat desk is never
+    # replaced by that shell.
+    try:
+        assert_nav_integrity(text)
+    except LiveDeskShrinkError as exc:
+        new_size = len(text.encode("utf-8"))
+        size_only = "legacy-sized" in str(exc) and "missing" not in str(exc)
+        replacing_fat = prior_size >= LIVE_MIN_BYTES or new_size >= LIVE_MIN_BYTES
+        if replacing_fat or not size_only:
+            raise
+        LOG.warning("%s", exc)
+    new_size = len(text.encode("utf-8"))
+    if prior_size >= LIVE_MIN_BYTES and new_size < LIVE_MIN_BYTES:
+        raise LiveDeskShrinkError(
+            f"refusing to shrink live desk {dest} from {prior_size} to {new_size} bytes "
+            "(legacy-sized output)"
+        )
+    dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(text, encoding="utf-8")
     try:
         book_delta.write_snapshot(snap, root=base)
@@ -2519,10 +2677,17 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     p = argparse.ArgumentParser(description="Assemble Factor Desk HTML")
     p.add_argument("--root", default="")
-    p.add_argument("--out", default="")
+    p.add_argument(
+        "--out",
+        default="",
+        help=(
+            "HTML dest. Default: <root>/../factorbook.html when that file is the "
+            "live desk (Desktop layout); otherwise <root>/factorbook.html."
+        ),
+    )
     args = p.parse_args(argv)
     root = Path(args.root) if args.root else HERE
-    out = Path(args.out) if args.out else root / HTML_NAME
+    out = Path(args.out) if args.out else None
     assemble_and_write(out, root=root)
     return 0
 
