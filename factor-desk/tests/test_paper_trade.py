@@ -35,6 +35,17 @@ class PnlSignTests(unittest.TestCase):
     def test_short_up_is_minus(self) -> None:
         self.assertAlmostEqual(pt.pnl_pct("short", 50.0, 55.0), -10.0)
 
+    def test_missing_or_zero_mark_is_none_not_minus_100(self) -> None:
+        self.assertIsNone(pt.pnl_pct("long", 13.63, None))
+        self.assertIsNone(pt.pnl_pct("long", 13.63, 0))
+        self.assertIsNone(pt.pnl_pct("long", 13.63, ""))
+        self.assertIsNone(pt.pnl_pct("short", 617.64, None))
+        self.assertIsNone(pt.pnl_pct("short", 617.64, 0))
+        self.assertIsNone(pt.pnl_pct("long", 100.0, -0.0035))
+        self.assertNotEqual(pt.fmt_pct(pt.pnl_pct("long", 13.63, 0)), "-100.00%")
+        self.assertNotEqual(pt.fmt_pct(pt.pnl_pct("short", 617.64, 0)), "+100.00%")
+        self.assertEqual(pt.fmt_pct(None), "—")
+
     def test_closed_short_keeps_sign(self) -> None:
         row = pt.close_position(
             {"ticker": "AAPL", "side": "short", "entry": 20.0, "opened_at": "2026-09-01"},
@@ -110,6 +121,21 @@ class MarkTests(unittest.TestCase):
         self.assertEqual(pt.mark_of({"prices": [{"px_last": 9.0}]}), 9.0)
         self.assertIsNone(pt.mark_of({"t": "AAPL"}))
         self.assertIsNone(pt.mark_of({"px_last": 0}))
+        self.assertIsNone(pt.mark_of({"t": "AAPL", "last": -0.0035}))
+        self.assertIsNone(pt.mark_of({"t": "AAPL", "last": 0.012}))
+        self.assertIsNone(pt.mark_of({"t": "AAPL", "px_last": 0.5}))
+        self.assertIsNone(pt.mark_of({"t": "AAPL", "px_last": 1.0}))
+        self.assertEqual(pt.mark_of({"t": "AAPL", "last": -0.0035, "px_last": 190.5}), 190.5)
+        self.assertEqual(pt.mark_of({"t": "AAPL", "quote": {"px_last": 190.5}}), 190.5)
+        self.assertEqual(
+            pt.mark_of({"t": "AAPL", "last": -0.0035, "prices_long": [{"adj_close": 189.0}, {"adj_close": 190.5}]}),
+            190.5,
+        )
+        self.assertNotIn("last", pt.MARK_KEYS)
+        self.assertIn("px_last", pt.MARK_KEYS)
+        self.assertIn("last_px", pt.MARK_KEYS)
+        self.assertIn("last_price", pt.MARK_KEYS)
+        self.assertIn("paper_mark", pt.MARK_KEYS)
         self.assertEqual(pt.fmt_px(13.63), "13.63")
         self.assertEqual(pt.fmt_px(None), "—")
 
@@ -120,6 +146,211 @@ class MarkTests(unittest.TestCase):
         )
         self.assertEqual(db["AAPL"], 12.0)
         self.assertEqual(db["MSFT"], 400.0)
+
+    def test_marks_db_ignores_residual_last(self) -> None:
+        db = pt.marks_db(
+            [{"t": "AAPL", "last": -0.0035, "px_last": 190.5}],
+            book={"names": {"MSFT US Equity": {"last": 0.01, "quote": {"PX_LAST": 400.0}}}},
+        )
+        self.assertEqual(db["AAPL"], 190.5)
+        self.assertEqual(db["MSFT"], 400.0)
+        self.assertNotEqual(db.get("AAPL"), -0.0035)
+
+    def test_harvest_html_repopulates_empty_marks_db(self) -> None:
+        html = """<!DOCTYPE html><html><body>
+<article class="card" data-t="CNH" data-px="13.63">CNH</article>
+<script>
+window.MOM = { cards: [
+  { t: "AAPL", last: -0.0035, px_last: 190.5 },
+  { t: "PWR", PX_LAST: 598.74, last: 0.01 },
+  { t: "MSFT", last: -0.02, quote: { paper_mark: 400.25 } }
+] };
+window.prices_long = [
+  { ticker: "IBM", adj_close: 301.1 },
+  { ticker: "IBM", adj_close: 305.5 }
+];
+</script>
+<script type="application/json" id="fd-paper-marks">{}</script>
+</body></html>"""
+        harvested = pt.harvest_html_marks(html)
+        self.assertEqual(harvested["CNH"], 13.63)
+        self.assertEqual(harvested["AAPL"], 190.5)
+        self.assertEqual(harvested["PWR"], 598.74)
+        self.assertEqual(harvested["MSFT"], 400.25)
+        self.assertEqual(harvested["IBM"], 305.5)
+        self.assertNotEqual(harvested.get("AAPL"), -0.0035)
+        out = pt.ensure_embedded(html, {})
+        blob = re.search(
+            r'<script\b[^>]*id=["\']fd-paper-marks["\'][^>]*>(.*?)</script>',
+            out,
+            re.I | re.S,
+        )
+        self.assertIsNotNone(blob)
+        db = json.loads(blob.group(1))
+        self.assertEqual(db["AAPL"], 190.5)
+        self.assertEqual(db["PWR"], 598.74)
+        self.assertEqual(db["MSFT"], 400.25)
+        self.assertEqual(db["IBM"], 305.5)
+        self.assertNotEqual(db, {})
+        js = pt.strip_js()
+        self.assertNotIn("entry = Number(entry); mark = Number(mark);", js)
+        self.assertIn("harvestAllMarks", js)
+        self.assertIn("Number(null)", js)
+
+    def test_open_rows_missing_mark_is_blank_not_minus_100(self) -> None:
+        book = pt.empty_book()
+        pt.apply_click(book, "AAPL", "buy", 100.0, when="2026-09-17T00:00:00Z")
+        rows = {r["ticker"]: r for r in pt.open_rows(book, {})}
+        self.assertIsNone(rows["AAPL"]["pnl_pct"])
+        html = pt.panes_html(book, {})
+        self.assertIn("—", html)
+        self.assertNotIn("-100.00%", html)
+        self.assertNotIn("−100", html)
+
+
+class JsPnlPctTests(unittest.TestCase):
+    def _extract_fn(self, js: str, name: str) -> str:
+        m = re.search(rf"function {name}\s*\(", js)
+        self.assertIsNotNone(m, name)
+        start = m.start()
+        i = js.find("{", start)
+        depth = 0
+        for j, ch in enumerate(js[i:], i):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return js[start : j + 1]
+        self.fail(f"unclosed {name}")
+
+    def test_js_number_null_does_not_yield_minus_100(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        js = pt.strip_js()
+        self.assertNotIn("entry = Number(entry); mark = Number(mark);", js)
+        num_fn = self._extract_fn(js, "num")
+        pnl_fn = self._extract_fn(js, "pnlPct")
+        runner = f"""
+{num_fn}
+{pnl_fn}
+const report = {{
+  numberNull: Number(null),
+  nullLong: pnlPct("long", 100, null),
+  undefLong: pnlPct("long", 100, undefined),
+  emptyLong: pnlPct("long", 100, ""),
+  zeroLong: pnlPct("long", 100, 0),
+  residualLong: pnlPct("long", 100, -0.0035),
+  longUp: pnlPct("long", 100, 110),
+  shortDown: pnlPct("short", 100, 90),
+  longDown: pnlPct("long", 50, 45),
+  shortUp: pnlPct("short", 50, 55)
+}};
+console.log(JSON.stringify(report));
+"""
+        proc = subprocess.run(
+            [node, "-e", runner],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if proc.returncode != 0:
+            self.fail(proc.stderr or proc.stdout)
+        report = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["numberNull"], 0)
+        self.assertIsNone(report["nullLong"])
+        self.assertIsNone(report["undefLong"])
+        self.assertIsNone(report["emptyLong"])
+        self.assertIsNone(report["zeroLong"])
+        self.assertIsNone(report["residualLong"])
+        self.assertAlmostEqual(report["longUp"], 10.0)
+        self.assertAlmostEqual(report["shortDown"], 10.0)
+        self.assertAlmostEqual(report["longDown"], -10.0)
+        self.assertAlmostEqual(report["shortUp"], -10.0)
+        self.assertNotEqual(report["nullLong"], -100)
+        self.assertNotEqual(report["zeroLong"], -100)
+
+    def test_js_markof_prefers_db_and_rejects_residual_last(self) -> None:
+        js = pt.strip_js()
+        body = js.split("function markOf")[1].split("function pnlPct")[0]
+        self.assertIn("marksDb()", body)
+        self.assertLess(body.find("marksDb()"), body.find("markFromCard(card)"))
+        self.assertIn("isDollarPx", body)
+        self.assertNotIn("card.last", body)
+        keys_blob = js.split("function markFromCard")[1].split("function harvestPxBy")[0].replace(" ", "")
+        self.assertNotIn(',"last",', keys_blob)
+        self.assertNotIn(',"last"]', keys_blob)
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        jsdom_root = Path("/tmp/fd-jsdom")
+        jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+        if not jsdom_mod.is_dir():
+            jsdom_root.mkdir(parents=True, exist_ok=True)
+            npm = shutil.which("npm")
+            if not npm:
+                self.skipTest("npm not installed")
+            subprocess.run(
+                [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        html = pt.ensure_embedded(
+            """<!DOCTYPE html><html><head></head><body>
+<nav><button data-view="home">Home</button></nav>
+<script>
+window.MOM = { cards: [{ t: "AAPL", last: -0.0035 }] };
+window.prices_long = [{ ticker: "AAPL", adj_close: 190.5 }];
+</script>
+</body></html>""",
+            {},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            runner = Path(tmp) / "run.js"
+            page.write_text(html, encoding="utf-8")
+            runner.write_text(
+                f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+const html = fs.readFileSync({json.dumps(str(page))}, "utf8");
+const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1/factorbook.html" }});
+const markOf = dom.window.__FD_PAPER_MARK__;
+const pnl = dom.window.__FD_PAPER_PNL__;
+const dbEl = dom.window.document.getElementById("fd-paper-marks");
+const db = JSON.parse((dbEl && dbEl.textContent) || "{{}}");
+const residualCard = {{ t: "AAPL", last: -0.0035 }};
+const fromCardFirst = markOf("AAPL", null, residualCard);
+const report = {{
+  dbAapl: db.AAPL,
+  fromResidualCard: fromCardFirst,
+  nullPnl: pnl("long", 100, null),
+  residualPnl: pnl("long", 100, residualCard.last),
+  dollarPnl: pnl("long", 100, 110)
+}};
+console.log(JSON.stringify(report));
+""",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [node, str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        if proc.returncode != 0:
+            self.fail(proc.stderr or proc.stdout)
+        report = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["dbAapl"], 190.5)
+        self.assertEqual(report["fromResidualCard"], 190.5)
+        self.assertIsNone(report["nullPnl"])
+        self.assertIsNone(report["residualPnl"])
+        self.assertAlmostEqual(report["dollarPnl"], 10.0)
 
 
 class WeekScorecardTests(unittest.TestCase):
