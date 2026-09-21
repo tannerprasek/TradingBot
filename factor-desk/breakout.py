@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import sys
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 HERE = __import__("pathlib").Path(__file__).resolve().parent
@@ -52,10 +53,12 @@ STREAK_FRESH_MAX = 15
 STREAK_PEAK_LO = 5
 STREAK_PEAK_HI = 12
 
-# Dispersion. Prefer enrich ``residual_20d`` (r_20d − β × r_mkt_20d). If that
-# field is absent, interim gate is RS63 > 0 / < 0 (card ``rs_63`` / ``rs63``,
-# or 63d return minus SPY when both series exist). Do not invent a residual.
-# A present residual of 0 does **not** fall through to RS63.
+# Dispersion. Prefer a true factor residual (residual panel / residual_last),
+# then enrich ``residual_20d``, then ``vs_group``. A present 0 does **not**
+# fall through. If none of those exist, the portable filter reads RS63 off the
+# live Mom card (labeled stat, ``data-rs63``, or ``metrics.rs_63``). Embed
+# stamps that number onto ``data-dispersion`` so the next Refresh keeps it.
+# A name with no residual and no RS63 is skipped — missing is not a pass.
 DISPERSION_KEYS: tuple[str, ...] = (
     "residual_20d",
     "factor_residual",
@@ -100,8 +103,17 @@ PX_SERIES_KEYS: tuple[str, ...] = (
 )
 
 DB_SCRIPT_ID = "fd-breakout-db"
+DISP_DB_ID = "fd-dispersion-db"
+MOM_CACHE_ID = "fd-bb-mom-cache"
+MOM_DB_ID = "fd-bb-mom-db"
 JS_SCRIPT_ID = "fd-breakout-js"
-JS_VER = "pr21-ignore-paper"
+JS_VER = "pr32-mom-cache"
+_MOM_PANE_IDS: tuple[str, ...] = (
+    "view-mom-up",
+    "view-mom-down",
+    "mom-up-grid",
+    "mom-down-grid",
+)
 CSS_STYLE_ID = "fd-breakout-css"
 PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
@@ -1208,7 +1220,7 @@ def embed_db(
 def strip_css() -> str:
     return f"""
 /* Legacy stub panes must never paint — dense cards live in #view-breakout / #view-breakdown. */
-#fd-bb-breakout, #fd-bb-breakdown, .fd-bb-pane,
+#fd-bb-breakout, #fd-bb-breakdown, #fd-bb-mom-cache, .fd-bb-pane,
 article.fd-bb-card, .fd-bb-card {{
   display: none !important;
 }}
@@ -1254,8 +1266,10 @@ article.fd-bb-card, .fd-bb-card {{
   font-size: 12px;
   margin: 8px 0;
 }}
-#breakout-grid article.card .stats,
-#breakdown-grid article.card .stats {{
+#breakout-grid .card .stats,
+#breakout-grid .fd-card .stats,
+#breakdown-grid .card .stats,
+#breakdown-grid .fd-card .stats {{
   display: flex !important;
   flex-wrap: wrap;
   gap: 6px 12px;
@@ -1263,8 +1277,10 @@ article.fd-bb-card, .fd-bb-card {{
   color: #d1d5db;
   margin-top: 6px;
 }}
-#breakout-grid article.card .stats span,
-#breakdown-grid article.card .stats span {{
+#breakout-grid .card .stats span,
+#breakout-grid .fd-card .stats span,
+#breakdown-grid .card .stats span,
+#breakdown-grid .fd-card .stats span {{
   white-space: nowrap;
 }}
 .nav-btn[data-view="breakout"].is-on,
@@ -1285,13 +1301,18 @@ article.fd-bb-card, .fd-bb-card {{
 
 
 def strip_js() -> str:
-    """Fill #breakout-grid / #breakdown-grid via live ``cardHTML(momCard)``.
+    """Filter the live Momentum Up/Down cards into the Breakout panes.
 
-    Look up the Momentum card by ticker and pass that object unchanged into
-    the same ``cardHTML`` Momentum Up/Down uses. Do **not** paint the skinny
-    dense substitute as the primary path. Capture-phase click on nav still
-    stops the live topnav listener; card clicks call ``selectTicker``.
-    ``show`` is ``window.__FD_BB_SHOW__``.
+    Membership is the mom-up / mom-down cards, the hidden ``#fd-bb-mom-cache``
+    snapshot (Mom panes are emptied when Breakout is showing), or the ``MOM``
+    card objects behind them — not ``#fd-breakout-db``. Matching cards are
+    cloned so the pane keeps the same ``cardHTML`` chrome, ``data-t``, and
+    filter attributes.
+    A missing gate field skips that card. The empty line is used only when the
+    live universe has zero matches. ``window.__FD_BB_SHOW__`` is assigned after
+    ``show`` exists; ``__FD_BB_BOUND__`` is stamped only then, so a throw cannot
+    lock the binder. Capture-phase click on nav still stops the live topnav
+    listener; card clicks call ``selectTicker``.
 
     Paper is not a BB view: ``kindOf`` returns ``""`` for ``data-view=paper`` /
     ``#fd-nav-paper`` / ``data-fd-paper-nav`` so capture never ``show("")``.
@@ -1301,11 +1322,13 @@ def strip_js() -> str:
     return rf"""
 (function () {{
   var BB_VER = "{JS_VER}";
-  if (window.__FD_BB_BOUND__ === BB_VER) return;
-  window.__FD_BB_BOUND__ = BB_VER;
+  if (window.__FD_BB_BOUND__ === BB_VER && typeof window.__FD_BB_SHOW__ === "function") return;
   window.__FD_BB_CARDHTML__ = true;
+  window.__FD_BB_MOM_FILTER__ = true;
   window.__FD_BB_IGNORE_PAPER__ = true;
   var DB_ID = "fd-breakout-db";
+  var MOM_CACHE_ID = "fd-bb-mom-cache";
+  var MOM_DB_ID = "fd-bb-mom-db";
   var VIEW_BO = "view-breakout";
   var VIEW_BD = "view-breakdown";
   var GRID_BO = "breakout-grid";
@@ -1316,6 +1339,15 @@ def strip_js() -> str:
   var TAG_CATALOG = ["MA FAN","CLOSE HI","52W HI","HM/HL","V.EMA","ABOVE 50","ABOVE 200","MOM+","TREND↑","SQUEEZE","RS+","BREAKOUT"];
   var TAG_SET = {{}};
   for (var ti = 0; ti < TAG_CATALOG.length; ti++) TAG_SET[TAG_CATALOG[ti]] = true;
+  var BO_MIN = {BREAKOUT_SCORE_MIN};
+  var BO_MAX = {BREAKOUT_SCORE_MAX};
+  var BD_MIN = {BREAKDOWN_SCORE_MIN};
+  var BD_MAX = {BREAKDOWN_SCORE_MAX};
+  var BO_D10 = {D10_BREAKOUT_MIN};
+  var BD_D10 = {D10_BREAKDOWN_MAX};
+  var STREAK_LO = {STREAK_JUST_CROSSED};
+  var STREAK_HI = {STREAK_FRESH_MAX};
+  var RANK_CAP_N = {RANK_CAP};
 
   function $(id) {{ return document.getElementById(id); }}
   function db() {{
@@ -1640,9 +1672,640 @@ def strip_js() -> str:
     for (var i = 0; i < rows.length; i++) {{
       var row = rows[i] || {{}};
       if (!shortOf(row.t || row.ticker || row.d || "")) continue;
-      var node = renderRow(row);
+      var node = null;
+      try {{ node = renderRow(row); }} catch (eRow) {{ node = null; }}
       if (node) grid.appendChild(node);
     }}
+  }}
+  function numOf(v) {{
+    if (v == null || v === "" || v === true || v === false) return null;
+    if (typeof v === "number" && isFinite(v)) return v;
+    var s = String(v).trim().replace(/\u2212/g, "-").replace(/,/g, "");
+    if (!s || s === "—" || s === "-" || s === "–") return null;
+    var n = parseFloat(s.replace("%", ""));
+    return isFinite(n) ? n : null;
+  }}
+  function presentNum(obj, key) {{
+    if (!obj || typeof obj !== "object") return null;
+    if (!Object.prototype.hasOwnProperty.call(obj, key)) return null;
+    var raw = obj[key];
+    if (raw == null || raw === "") return null;
+    return numOf(raw);
+  }}
+  function firstOwn(obj, keys) {{
+    if (!obj || typeof obj !== "object") return null;
+    for (var i = 0; i < keys.length; i++) {{
+      var n = presentNum(obj, keys[i]);
+      if (n != null) return n;
+    }}
+    return null;
+  }}
+  function tickerOfNode(node) {{
+    if (!node || !node.getAttribute) return "";
+    var t = node.getAttribute("data-t") || node.getAttribute("data-ticker") || node.getAttribute("data-name") || "";
+    if (!t) {{
+      var h = node.querySelector ? node.querySelector("h2, h3, .tkr, .ticker, .sym") : null;
+      t = h ? h.textContent : "";
+    }}
+    return shortOf(t);
+  }}
+  function pushBag(list, src) {{
+    if (!src) return;
+    if (Array.isArray(src)) {{
+      for (var i = 0; i < src.length; i++) {{
+        if (src[i] && typeof src[i] === "object") list.push(src[i]);
+      }}
+      return;
+    }}
+    if (typeof src !== "object") return;
+    if (src.t || src.ticker || src.d || src.mom_score != null || src.score != null) {{
+      list.push(src);
+      return;
+    }}
+    var keys = Object.keys(src);
+    for (var k = 0; k < keys.length; k++) {{
+      var v = src[keys[k]];
+      if (v && typeof v === "object" && (v.t || v.ticker || v.d || v.mom_score != null || v.score != null)) list.push(v);
+    }}
+  }}
+  var MOM_CARD_SEL = "article.card, article.fd-card, div.card, .card[data-t], .fd-card";
+  function momArticles() {{
+    var ids = ["view-mom-up", "view-mom-down", "mom-up-grid", "mom-down-grid"];
+    var nodes = [];
+    var seen = [];
+    function take(root) {{
+      if (!root || !root.querySelectorAll) return;
+      var found = root.querySelectorAll(MOM_CARD_SEL);
+      for (var i = 0; i < found.length; i++) {{
+        var node = found[i];
+        if (node.closest && node.closest("#view-breakout, #view-breakdown, #breakout-grid, #breakdown-grid, #fd-bb-breakout, #fd-bb-breakdown, #fd-bb-mom-cache")) continue;
+        if (node.parentElement && node.parentElement.closest && node.parentElement.closest(MOM_CARD_SEL)) continue;
+        if (seen.indexOf(node) >= 0) continue;
+        seen.push(node);
+        nodes.push(node);
+      }}
+    }}
+    for (var i = 0; i < ids.length; i++) take($(ids[i]));
+    return nodes;
+  }}
+  function cacheArticles() {{
+    var root = $(MOM_CACHE_ID);
+    if (!root || !root.querySelectorAll) return [];
+    var found = root.querySelectorAll(MOM_CARD_SEL);
+    var nodes = [];
+    for (var i = 0; i < found.length; i++) {{
+      var node = found[i];
+      if (node.parentElement && node.parentElement.closest && node.parentElement.closest(MOM_CARD_SEL)) continue;
+      nodes.push(node);
+    }}
+    return nodes;
+  }}
+  function ensureMomCache() {{
+    var el = $(MOM_CACHE_ID);
+    if (el) return el;
+    if (!document.body) return null;
+    el = document.createElement("div");
+    el.id = MOM_CACHE_ID;
+    el.setAttribute("hidden", "hidden");
+    el.setAttribute("aria-hidden", "true");
+    el.style.display = "none";
+    document.body.appendChild(el);
+    return el;
+  }}
+  function snapshotMom() {{
+    var live = momArticles();
+    if (!live.length) return;
+    var cache = ensureMomCache();
+    var seen = {{}};
+    var entries = [];
+    if (cache) cache.textContent = "";
+    for (var i = 0; i < live.length; i++) {{
+      var node = live[i];
+      var t = tickerOfNode(node);
+      if (!t || seen[t]) continue;
+      seen[t] = true;
+      var copy = node.cloneNode(true);
+      if (copy.removeAttribute) copy.removeAttribute("id");
+      if (copy.classList) copy.classList.remove("hide", "fd-bb-hid", "gics-hid");
+      if (cache) cache.appendChild(copy);
+      entries.push({{ t: t, node: copy }});
+    }}
+    if (entries.length) window.__FD_BB_MOM_CACHE__ = entries;
+  }}
+  function hydrateCacheFromDom() {{
+    var mem = window.__FD_BB_MOM_CACHE__;
+    if (mem && mem.length) return;
+    var nodes = cacheArticles();
+    if (!nodes.length) return;
+    var entries = [];
+    var seen = {{}};
+    for (var i = 0; i < nodes.length; i++) {{
+      var t = tickerOfNode(nodes[i]);
+      if (!t || seen[t]) continue;
+      seen[t] = true;
+      entries.push({{ t: t, node: nodes[i] }});
+    }}
+    if (entries.length) window.__FD_BB_MOM_CACHE__ = entries;
+  }}
+  function momDbCards() {{
+    var el = $(MOM_DB_ID);
+    if (!el) return [];
+    var parsed = null;
+    try {{ parsed = JSON.parse(el.textContent || "[]"); }} catch (eDb) {{ return []; }}
+    if (Array.isArray(parsed)) return parsed;
+    if (!parsed || typeof parsed !== "object") return [];
+    var list = [];
+    var keys = Object.keys(parsed);
+    for (var i = 0; i < keys.length; i++) {{
+      var rec = parsed[keys[i]];
+      if (!rec || typeof rec !== "object") continue;
+      if (!rec.t && !rec.ticker) rec.t = keys[i];
+      list.push(rec);
+    }}
+    return list;
+  }}
+  function streakCards() {{
+    var el = $("mom-streak-db");
+    if (!el) return [];
+    var db = null;
+    try {{ db = JSON.parse(el.textContent || "{{}}") || {{}}; }} catch (eSt) {{ return []; }}
+    var seen = {{}};
+    var out = [];
+    var keys = Object.keys(db);
+    for (var i = 0; i < keys.length; i++) {{
+      var rec = db[keys[i]];
+      if (!rec || typeof rec !== "object" || !rec.label) continue;
+      var t = shortOf(rec.t || rec.ticker || keys[i]);
+      if (!t || seen[t]) continue;
+      seen[t] = true;
+      var card = {{
+        t: t,
+        d: t,
+        ticker: rec.ticker || keys[i],
+        score: rec.score,
+        mom_score: rec.score,
+        mom_score_d10: rec.mom_score_d10,
+        mom_streak: rec.streak,
+        mom_streak_side: rec.side
+      }};
+      var disp = dispersionRec(t);
+      if (disp && disp.v != null && disp.v !== "") {{
+        var n = parseStatNum(disp.v);
+        if (n != null) {{
+          if (disp.f && disp.f !== "rs63") card[disp.f] = n;
+          else card.rs63 = n;
+        }}
+      }}
+      out.push(card);
+    }}
+    return out;
+  }}
+  function momUniverse() {{
+    try {{ hydrateCacheFromDom(); }} catch (eHydrate) {{}}
+    var byT = {{}};
+    function slot(t) {{
+      t = shortOf(t);
+      if (!t) return null;
+      if (!byT[t]) byT[t] = {{ t: t, card: null, node: null }};
+      return byT[t];
+    }}
+    function takeNode(node) {{
+      var s = slot(tickerOfNode(node));
+      if (s && !s.node) s.node = node;
+    }}
+    function takeCard(c) {{
+      if (!c || typeof c !== "object" || c.nodeType) return;
+      var s = slot(c.t || c.ticker || c.d || c.name || "");
+      if (s && !s.card) s.card = c;
+    }}
+    function takeMem(item) {{
+      if (!item) return;
+      if (item.nodeType === 1) {{ takeNode(item); return; }}
+      if (item.node && item.node.nodeType === 1) takeNode(item.node);
+      if (item.card && typeof item.card === "object") takeCard(item.card);
+      else if (!item.node && (item.t || item.ticker || item.score != null || item.mom_score != null)) takeCard(item);
+    }}
+    var mem = window.__FD_BB_MOM_CACHE__;
+    if (Array.isArray(mem)) {{
+      for (var m = 0; m < mem.length; m++) takeMem(mem[m]);
+    }}
+    var cached = cacheArticles();
+    for (var c = 0; c < cached.length; c++) takeNode(cached[c]);
+    var fromDb = momDbCards();
+    for (var d = 0; d < fromDb.length; d++) takeCard(fromDb[d]);
+    var fromStreak = streakCards();
+    for (var s = 0; s < fromStreak.length; s++) takeCard(fromStreak[s]);
+    var live = momArticles();
+    for (var n = 0; n < live.length; n++) takeNode(live[n]);
+    var cards = [];
+    var mom = window.MOM || {{}};
+    pushBag(cards, mom.up);
+    pushBag(cards, mom.down);
+    if (!cards.length) {{
+      pushBag(cards, mom.cards);
+      pushBag(cards, mom.all);
+      pushBag(cards, window.CARDS);
+      pushBag(cards, window.MOM_CARDS);
+    }}
+    pushBag(cards, window.MOMUP);
+    pushBag(cards, window.MOMDOWN);
+    pushBag(cards, window.BOOK);
+    pushBag(cards, window.NAMES);
+    for (var k = 0; k < cards.length; k++) takeCard(cards[k]);
+    var out = [];
+    var names = Object.keys(byT);
+    for (var j = 0; j < names.length; j++) out.push(byT[names[j]]);
+    return out;
+  }}
+  function streakRec(t) {{
+    var el = $("mom-streak-db");
+    if (!el || !t) return null;
+    var db = null;
+    try {{ db = JSON.parse(el.textContent || "{{}}") || {{}}; }} catch (e) {{ return null; }}
+    if (db[t]) return db[t];
+    var keys = Object.keys(db);
+    for (var i = 0; i < keys.length; i++) {{
+      if (shortOf(keys[i]) === t) return db[keys[i]];
+    }}
+    return null;
+  }}
+  function scoreFromNode(node) {{
+    if (!node || !node.querySelector) return null;
+    var attr = node.getAttribute("data-score") || node.getAttribute("data-mom-score");
+    if (attr != null && attr !== "") {{
+      var fromAttr = numOf(attr);
+      if (fromAttr != null) return fromAttr;
+    }}
+    var el = node.querySelector(".score, .sc");
+    if (!el) return null;
+    var own = "";
+    for (var n = el.firstChild; n; n = n.nextSibling) {{
+      if (n.nodeType === 3) own += n.textContent;
+    }}
+    var m = String(own || el.textContent || "").match(/-?\d+(?:\.\d+)?/);
+    return m ? numOf(m[0]) : null;
+  }}
+  function parseStreakLabel(text) {{
+    var s = String(text || "").replace(/\s+/g, "").replace(/\u2212/g, "-");
+    var up = s.match(/(\d+)d?>5/);
+    if (up) return {{ streak: parseInt(up[1], 10), side: "above" }};
+    var down = s.match(/(\d+)d?<5/);
+    if (down) return {{ streak: parseInt(down[1], 10), side: "below" }};
+    if (s === "=5" || s.indexOf("=5") >= 0) return {{ streak: 0, side: "at" }};
+    return null;
+  }}
+  function streakFromNode(node) {{
+    if (!node || !node.querySelector) return null;
+    var pill = node.querySelector("[data-key='mom-streak'], .mom-streak-up, .mom-streak-down, .mom-streak-at");
+    var parsed = parseStreakLabel(pill ? pill.textContent : "");
+    if (!parsed) parsed = parseStreakLabel(node.textContent || "");
+    return parsed;
+  }}
+  function d10FromNode(node) {{
+    if (!node || !node.querySelector) return null;
+    var el = node.querySelector("[data-mom-score-d10]");
+    if (!el) return null;
+    return numOf(el.getAttribute("data-mom-score-d10"));
+  }}
+  function dispersionDb() {{
+    var el = $("fd-dispersion-db");
+    if (!el) return {{}};
+    try {{ return JSON.parse(el.textContent || "{{}}") || {{}}; }} catch (e) {{ return {{}}; }}
+  }}
+  function dispersionRec(t) {{
+    var db = dispersionDb();
+    if (!t) return null;
+    if (db[t]) return db[t];
+    var keys = Object.keys(db);
+    for (var i = 0; i < keys.length; i++) {{
+      if (shortOf(keys[i]) === t) return db[keys[i]];
+    }}
+    return null;
+  }}
+  function isRs63Label(text) {{
+    var s = String(text || "").replace(/[\s_\-]+/g, "").toUpperCase();
+    return s === "RS63";
+  }}
+  function otherStatLabel(text) {{
+    var u = String(text || "").toUpperCase();
+    return /\bDAY\b/.test(u) || /\bR20\b/.test(u) || /\bATR\b/.test(u);
+  }}
+  function parseStatNum(text) {{
+    var s = String(text || "").replace(/\u2212/g, "-").replace(/\u2013/g, "-").replace(/\u2014/g, "-").replace(/,/g, "").trim();
+    if (!s || s === "—" || s === "-" || s === "–" || s === "−") return null;
+    var m = s.match(/(-?\d+(?:\.\d+)?|\.\d+)\s*(%)?/);
+    if (!m) return null;
+    var n = parseFloat(m[1]);
+    if (!isFinite(n)) return null;
+    if (m[2]) n = n / 100;
+    return n;
+  }}
+  function closestStatNum(left, right) {{
+    var re = /(-?\d+(?:\.\d+)?|\.\d+)\s*(%)?/g;
+    var m, last = null;
+    while ((m = re.exec(left || ""))) last = m;
+    var rightRe = /(-?\d+(?:\.\d+)?|\.\d+)\s*(%)?/;
+    var first = rightRe.exec(right || "");
+    function distLeft(match) {{
+      return (left || "").length - (match.index + match[0].length);
+    }}
+    function valueOf(match) {{
+      var n = parseFloat(match[1]);
+      if (!isFinite(n)) return null;
+      if (match[2]) n = n / 100;
+      return n;
+    }}
+    if (last && first) {{
+      var dl = distLeft(last);
+      var dr = first.index;
+      if (dr < dl) return valueOf(first);
+      if (dl < dr) return valueOf(last);
+      return valueOf(first);
+    }}
+    if (first) return valueOf(first);
+    if (last) return valueOf(last);
+    return null;
+  }}
+  function cellAroundRs(text) {{
+    var s = String(text || "").replace(/\u2212/g, "-").replace(/\u2013/g, "-").replace(/\u2014/g, "-");
+    s = s.replace(/\d+\s*d\s*[<>]\s*5/gi, " ");
+    var re = /RS[\s_\-]*63/ig;
+    var m, found = null;
+    while ((m = re.exec(s))) found = m;
+    if (!found) return null;
+    var left = s.slice(0, found.index);
+    var right = s.slice(found.index + found[0].length);
+    var leftParts = left.split(/\b(?:DAY|R20|ATR%?)\b/i);
+    var rightParts = right.split(/\b(?:DAY|R20|ATR%?)\b/i);
+    return closestStatNum(leftParts[leftParts.length - 1], rightParts[0]);
+  }}
+  function ownText(el) {{
+    var t = "";
+    if (!el || !el.firstChild) return "";
+    for (var n = el.firstChild; n; n = n.nextSibling) {{
+      if (n.nodeType === 3) t += n.textContent;
+    }}
+    return t;
+  }}
+  function attrNum(el, name) {{
+    if (!el || !el.getAttribute) return null;
+    var raw = el.getAttribute(name);
+    if (raw == null || raw === "") return null;
+    return parseStatNum(raw);
+  }}
+  function rs63FromNode(node) {{
+    if (!node || !node.querySelectorAll) return null;
+    var direct = attrNum(node, "data-rs63");
+    if (direct == null) direct = attrNum(node, "data-rs-63");
+    if (direct == null) direct = attrNum(node, "data-rs_63");
+    if (direct != null) return direct;
+    var els = node.querySelectorAll("[data-k],[data-stat],[data-field],[data-label],[data-rs63],[data-rs-63],span,div,b,i,small,em,dt,dd,td,label");
+    var i, el, attrLabel, own, full, n;
+    for (i = 0; i < els.length; i++) {{
+      el = els[i];
+      if (el === node) continue;
+      attrLabel = el.getAttribute("data-k") || el.getAttribute("data-stat") || el.getAttribute("data-field") || el.getAttribute("data-label") || el.getAttribute("title") || el.getAttribute("aria-label") || "";
+      own = ownText(el);
+      full = String(el.textContent || "");
+      if (isRs63Label(attrLabel)) {{
+        n = attrNum(el, "data-v");
+        if (n == null) n = attrNum(el, "data-val");
+        if (n == null) n = attrNum(el, "data-value");
+        if (n == null) n = attrNum(el, "data-n");
+        if (n == null) n = attrNum(el, "data-rs63");
+        if (n == null) n = attrNum(el, "data-rs-63");
+        if (n == null && !otherStatLabel(full)) n = parseStatNum(full);
+        if (n == null && el.nextElementSibling && !otherStatLabel(el.nextElementSibling.textContent || "")) n = parseStatNum(el.nextElementSibling.textContent);
+        if (n == null && el.previousElementSibling && !otherStatLabel(el.previousElementSibling.textContent || "")) n = parseStatNum(el.previousElementSibling.textContent);
+        if (n != null) return n;
+        continue;
+      }}
+      if (otherStatLabel(full) && !isRs63Label(own) && !isRs63Label(String(full).replace(/\s+/g, ""))) continue;
+      if (isRs63Label(own) || isRs63Label(String(full).replace(/\s+/g, " ").trim())) {{
+        if (!otherStatLabel(full)) {{
+          n = parseStatNum(full);
+          if (n != null) return n;
+        }}
+        if (el.nextElementSibling && !otherStatLabel(el.nextElementSibling.textContent || "")) {{
+          n = parseStatNum(el.nextElementSibling.textContent);
+          if (n != null) return n;
+        }}
+        if (el.previousElementSibling && !otherStatLabel(el.previousElementSibling.textContent || "")) {{
+          n = parseStatNum(el.previousElementSibling.textContent);
+          if (n != null) return n;
+        }}
+        if (el.parentElement && el.parentElement !== node) {{
+          var parentText = String(el.parentElement.textContent || "");
+          if (!otherStatLabel(parentText.replace(/RS[\s_\-]*63/ig, " "))) {{
+            n = parseStatNum(parentText);
+            if (n != null) return n;
+          }}
+        }}
+        continue;
+      }}
+      if (/RS[\s_\-]*63/i.test(full) && !otherStatLabel(full) && (!el.children || el.children.length <= 6)) {{
+        n = cellAroundRs(full);
+        if (n != null) return n;
+      }}
+    }}
+    return cellAroundRs(node.textContent || "");
+  }}
+  function residualFrom(card) {{
+    var metrics = (card && card.metrics && typeof card.metrics === "object") ? card.metrics : null;
+    var keys = ["residual_20d", "factor_residual", "factor_resid", "vs_group", "vs_sleeve"];
+    var blobs = [card, metrics];
+    var b, i, n;
+    for (b = 0; b < blobs.length; b++) {{
+      if (!blobs[b]) continue;
+      for (i = 0; i < keys.length; i++) {{
+        n = presentNum(blobs[b], keys[i]);
+        if (n != null) return n;
+      }}
+    }}
+    return null;
+  }}
+  function rsFromCard(card) {{
+    var metrics = (card && card.metrics && typeof card.metrics === "object") ? card.metrics : null;
+    var rsKeys = ["rs_63", "rs63", "RS63", "rs_63d"];
+    var blobs = [card, metrics];
+    var b, i, n;
+    for (b = 0; b < blobs.length; b++) {{
+      if (!blobs[b]) continue;
+      for (i = 0; i < rsKeys.length; i++) {{
+        n = presentNum(blobs[b], rsKeys[i]);
+        if (n != null) return n;
+      }}
+    }}
+    return null;
+  }}
+  function residualField(name) {{
+    var f = String(name || "");
+    return f === "residual_20d" || f === "factor_residual" || f === "factor_resid" || f === "vs_group" || f === "vs_sleeve";
+  }}
+  function dispersionOf(card, node) {{
+    var residual = residualFrom(card);
+    if (residual != null) return residual;
+    var field = node && node.getAttribute ? (node.getAttribute("data-dispersion-field") || "") : "";
+    if (node && residualField(field)) {{
+      var stampedResidual = attrNum(node, "data-dispersion");
+      if (stampedResidual != null) return stampedResidual;
+    }}
+    if (node) {{
+      var rAttr = attrNum(node, "data-residual-20d");
+      if (rAttr == null) rAttr = attrNum(node, "data-residual_20d");
+      if (rAttr == null) rAttr = attrNum(node, "data-factor-residual");
+      if (rAttr == null) rAttr = attrNum(node, "data-factor_residual");
+      if (rAttr == null) rAttr = attrNum(node, "data-vs-group");
+      if (rAttr == null) rAttr = attrNum(node, "data-vs-sleeve");
+      if (rAttr != null) return rAttr;
+    }}
+    var dbResidual = dispersionRec(shortOf((card && (card.t || card.ticker || card.d)) || (node ? tickerOfNode(node) : "")));
+    if (dbResidual && residualField(dbResidual.f) && dbResidual.v != null && dbResidual.v !== "") {{
+      var dbN = parseStatNum(dbResidual.v);
+      if (dbN != null) return dbN;
+    }}
+    var rs = rsFromCard(card);
+    if (rs != null) return rs;
+    var fromNode = rs63FromNode(node);
+    if (fromNode != null) return fromNode;
+    if (node && !residualField(field)) {{
+      var stamped = attrNum(node, "data-dispersion");
+      if (stamped != null) return stamped;
+    }}
+    if (dbResidual && dbResidual.v != null && dbResidual.v !== "") {{
+      var dbRs = parseStatNum(dbResidual.v);
+      if (dbRs != null) return dbRs;
+    }}
+    return null;
+  }}
+  function readFields(item) {{
+    var card = item.card || {{}};
+    var node = item.node;
+    var rec = streakRec(item.t) || {{}};
+    var score = firstOwn(card, ["mom_score", "momentum_score", "mom_rank", "trend_rank", "score"]);
+    if (score == null) score = numOf(rec.score);
+    if (score == null) score = scoreFromNode(node);
+    var d10 = null;
+    if (card.mom_score_d10 != null && card.mom_score_d10 !== "") d10 = numOf(card.mom_score_d10);
+    if (d10 == null && rec.mom_score_d10 != null && rec.mom_score_d10 !== "") d10 = numOf(rec.mom_score_d10);
+    if (d10 == null) d10 = d10FromNode(node);
+    var streak = null;
+    var side = null;
+    var streakRaw = (card.mom_streak != null && card.mom_streak !== "") ? card.mom_streak : card.streak;
+    var sideRaw = card.mom_streak_side || card.side || "";
+    if (streakRaw != null && streakRaw !== "" && sideRaw) {{
+      streak = parseInt(streakRaw, 10);
+      side = String(sideRaw);
+    }}
+    if ((streak == null || !isFinite(streak) || !side) && rec.streak != null && rec.streak !== "" && rec.side) {{
+      streak = parseInt(rec.streak, 10);
+      side = String(rec.side);
+    }}
+    if (streak == null || !isFinite(streak) || !side) {{
+      var parsed = streakFromNode(node);
+      if (parsed) {{ streak = parsed.streak; side = parsed.side; }}
+    }}
+    return {{
+      score: score,
+      d10: d10,
+      streak: (streak != null && isFinite(streak)) ? streak : null,
+      side: side || "",
+      dispersion: dispersionOf(card, node)
+    }};
+  }}
+  function passes(kind, f) {{
+    if (!f || f.score == null || f.d10 == null || f.streak == null || !f.side || f.dispersion == null) return false;
+    if (kind === "breakout") {{
+      if (f.score < BO_MIN || f.score > BO_MAX) return false;
+      if (f.d10 <= BO_D10) return false;
+      if (f.side !== "above") return false;
+      if (f.streak < STREAK_LO || f.streak > STREAK_HI) return false;
+      if (f.dispersion <= 0) return false;
+      return true;
+    }}
+    if (kind === "breakdown") {{
+      if (f.score < BD_MIN || f.score > BD_MAX) return false;
+      if (f.d10 >= BD_D10) return false;
+      if (f.side !== "below") return false;
+      if (f.streak < STREAK_LO || f.streak > STREAK_HI) return false;
+      if (f.dispersion >= 0) return false;
+      return true;
+    }}
+    return false;
+  }}
+  function inflectionOf(kind, f) {{
+    var span = kind === "breakout" ? Math.max(BO_MAX - BO_MIN, 0.01) : Math.max(BD_MAX - BD_MIN, 0.01);
+    var band = kind === "breakout"
+      ? (1 - 0.45 * (f.score - BO_MIN) / span)
+      : (1 - 0.45 * (BD_MAX - f.score) / span);
+    var n = f.streak;
+    var fresh = 0;
+    if (n >= 5 && n <= 12) fresh = 1;
+    else if (n < 5) fresh = 0.35 + 0.65 * (n - 1) / 4;
+    else fresh = 1 - 0.35 * (n - 12) / 3;
+    var mag = 3 * band + 1.6 * (Math.min(Math.abs(f.d10), 8) / 8) + 2 * fresh + 1.4 * (Math.min(Math.abs(f.dispersion), 0.15) / 0.15);
+    return kind === "breakout" ? mag : -mag;
+  }}
+  function filterUniverse(universe, kind) {{
+    var matches = [];
+    for (var i = 0; i < universe.length; i++) {{
+      try {{
+        var fields = readFields(universe[i]);
+        if (!passes(kind, fields)) continue;
+        universe[i].fields = fields;
+        universe[i].inflection = inflectionOf(kind, fields);
+        matches.push(universe[i]);
+      }} catch (eOne) {{}}
+    }}
+    matches.sort(function (a, b) {{
+      if (kind === "breakdown") return (a.inflection || 0) - (b.inflection || 0);
+      return (b.inflection || 0) - (a.inflection || 0);
+    }});
+    if (matches.length > RANK_CAP_N) matches = matches.slice(0, RANK_CAP_N);
+    return matches;
+  }}
+  function materialize(item) {{
+    var card = item.card || {{ t: item.t, d: item.t, ticker: item.t }};
+    var row = {{
+      t: item.t,
+      ticker: card.ticker || item.t,
+      card: card,
+      score: card.score != null ? card.score : card.mom_score
+    }};
+    if (item.node && item.node.cloneNode) {{
+      var copy = item.node.cloneNode(true);
+      if (copy.classList) copy.classList.remove("hide", "fd-bb-hid", "gics-hid");
+      if (copy.removeAttribute) copy.removeAttribute("id");
+      if (!copy.getAttribute("data-t") && item.t) copy.setAttribute("data-t", item.t);
+      copy.setAttribute("data-fd-bb-clone", "1");
+      return bindSelect(copy, row, card);
+    }}
+    return renderRow(row);
+  }}
+  function emptyLine(universeN) {{
+    var empty = document.createElement("p");
+    empty.className = "fd-bb-empty";
+    var n = universeN || 0;
+    empty.textContent = n > 0
+      ? ("No early inflections (0 of " + n + " passed)")
+      : "No early inflections this Refresh.";
+    return empty;
+  }}
+  function paintFiltered(grid, matches, universeN) {{
+    if (!grid) return 0;
+    var nodes = [];
+    for (var i = 0; i < matches.length; i++) {{
+      var node = null;
+      try {{ node = materialize(matches[i]); }} catch (eMat) {{ node = null; }}
+      if (node) nodes.push(node);
+    }}
+    grid.innerHTML = "";
+    if (!matches.length) {{
+      grid.appendChild(emptyLine(universeN));
+      return 0;
+    }}
+    for (var j = 0; j < nodes.length; j++) grid.appendChild(nodes[j]);
+    return nodes.length;
   }}
   function hideLegacy() {{
     var a = $(LEGACY_BO), b = $(LEGACY_BD);
@@ -1666,7 +2329,7 @@ def strip_js() -> str:
   }}
   function oursOf(b, kind) {{
     if (!b || !b.getAttribute) return false;
-    if (b.closest && b.closest("article.card, #breakout-grid, #breakdown-grid, #view-breakout, #view-breakdown") && !(b.closest("#topnav, nav, .topnav"))) return false;
+    if (b.closest && b.closest(MOM_CARD_SEL + ", #breakout-grid, #breakdown-grid, #view-breakout, #view-breakdown") && !(b.closest("#topnav, nav, .topnav"))) return false;
     var view = (b.getAttribute("data-view") || "");
     return view === kind || (kind === "breakout" && (b.getAttribute("data-fd-breakout") === "1" || b.id === "fd-nav-breakout")) ||
       (kind === "breakdown" && (b.getAttribute("data-fd-breakdown") === "1" || b.id === "fd-nav-breakdown"));
@@ -1680,23 +2343,36 @@ def strip_js() -> str:
     }}
   }}
   function show(kind) {{
-    hideNativeViews();
-    hideLegacy();
-    var data = db();
-    if (kind === "breakout" || kind === "breakdown") {{
-      var pane = $(kind === "breakout" ? VIEW_BO : VIEW_BD);
-      var grid = $(kind === "breakout" ? GRID_BO : GRID_BD);
-      if (pane) pane.classList.remove("hide");
-      fillGrid(grid, data[kind] || []);
-      document.body.setAttribute("data-view", kind);
-      document.body.setAttribute("data-fd-bb", kind);
-      syncNav(kind);
-      return;
-    }}
-    document.body.removeAttribute("data-fd-bb");
-    syncNav("");
+    try {{
+      try {{ snapshotMom(); }} catch (eSnap) {{}}
+      hideNativeViews();
+      hideLegacy();
+      if (kind === "breakout" || kind === "breakdown") {{
+        var pane = $(kind === "breakout" ? VIEW_BO : VIEW_BD);
+        var grid = $(kind === "breakout" ? GRID_BO : GRID_BD);
+        if (pane) pane.classList.remove("hide");
+        var universe = [];
+        try {{ universe = momUniverse(); }} catch (eU) {{ universe = []; }}
+        if (universe.length) {{
+          paintFiltered(grid, filterUniverse(universe, kind), universe.length);
+        }} else {{
+          var data = {{ breakout: [], breakdown: [] }};
+          try {{ data = db(); }} catch (eD) {{ data = {{ breakout: [], breakdown: [] }}; }}
+          fillGrid(grid, (data && data[kind]) || []);
+        }}
+        if (document.body) {{
+          document.body.setAttribute("data-view", kind);
+          document.body.setAttribute("data-fd-bb", kind);
+        }}
+        syncNav(kind);
+        return;
+      }}
+      if (document.body) document.body.removeAttribute("data-fd-bb");
+      syncNav("");
+    }} catch (eShow) {{}}
   }}
   window.__FD_BB_SHOW__ = show;
+  window.__FD_BB_DISPERSION_OF__ = dispersionOf;
   window.__FD_BB_SYNC_NAV__ = syncNav;
   window.__FD_BB_RENDER_ROW__ = renderRow;
   function isNavControl(el) {{
@@ -1771,8 +2447,34 @@ def strip_js() -> str:
     wrapped.__fdBbOrig = orig.__fdBbOrig || orig;
     window.setView = wrapped;
   }}
+  function watchMomPanes() {{
+    if (typeof MutationObserver !== "function" || window.__FD_BB_MOM_OBS__) return;
+    var ids = ["view-mom-up", "view-mom-down", "mom-up-grid", "mom-down-grid"];
+    var obs = new MutationObserver(function () {{
+      try {{ snapshotMom(); }} catch (eObs) {{}}
+    }});
+    var hooked = 0;
+    for (var i = 0; i < ids.length; i++) {{
+      var el = $(ids[i]);
+      if (!el) continue;
+      obs.observe(el, {{ childList: true, subtree: true }});
+      hooked++;
+    }}
+    if (hooked) window.__FD_BB_MOM_OBS__ = obs;
+  }}
+  function bootMomCache() {{
+    try {{ snapshotMom(); }} catch (eBoot) {{}}
+    try {{ hydrateCacheFromDom(); }} catch (eHydrate) {{}}
+    try {{ watchMomPanes(); }} catch (eWatch) {{}}
+  }}
   installSetViewBridge();
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", installSetViewBridge);
+  bootMomCache();
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () {{
+    installSetViewBridge();
+    bootMomCache();
+  }});
+  window.__FD_BB_SNAPSHOT_MOM__ = snapshotMom;
+  window.__FD_BB_BOUND__ = BB_VER;
 }})();
 """.strip()
 
@@ -1865,6 +2567,27 @@ def _ensure_css(html_text: str) -> str:
     if "</head>" in html_text:
         return html_text.replace("</head>", css + "</head>", 1)
     return css + html_text
+
+
+_SHOW_ASSIGN_RE = re.compile(r"window\.__FD_BB_SHOW__\s*=")
+
+
+def show_binder_assigned(html_text: str) -> bool:
+    """PR #31 nav integrity: Breakout/Breakdown nav needs ``window.__FD_BB_SHOW__ =``.
+
+    A call such as ``if(window.__FD_BB_SHOW__)window.__FD_BB_SHOW__(v)`` does not count.
+    Pages without those nav buttons are not gated.
+    """
+    text = html_text or ""
+    has_bo = _has_nav_button(
+        text, view="breakout", data_attr="data-fd-breakout", btn_id=NAV_BREAKOUT_ID
+    )
+    has_bd = _has_nav_button(
+        text, view="breakdown", data_attr="data-fd-breakdown", btn_id=NAV_BREAKDOWN_ID
+    )
+    if not has_bo and not has_bd:
+        return True
+    return _SHOW_ASSIGN_RE.search(text) is not None
 
 
 def _has_nav_button(html_text: str, *, view: str, data_attr: str, btn_id: str) -> bool:
@@ -2137,6 +2860,406 @@ def _enrich_existing_db(html_text: str, live_map: Mapping[str, Any] | None) -> s
     return html_text[: match.start()] + tag + html_text[match.end() :]
 
 
+_SCRIPT_MASK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
+_ARTICLE_BLOCK_RE = re.compile(r"<article\b([^>]*)>(.*?)</article>", re.I | re.S)
+_CARD_OPEN_RE = re.compile(
+    r"<(article|div)\b([^>]*\bclass\s*=\s*[\"'][^\"']*\b(?:card|fd-card)\b[^\"']*[\"'][^>]*)>",
+    re.I,
+)
+_NEST_TAG_RE = re.compile(r"<(/?)(article|div)\b([^>]*)>", re.I)
+_RS_LABEL_RE = re.compile(r"RS[\s_\-]*63", re.I)
+_STAT_NUM_RE = re.compile(r"(-?\d+(?:\.\d+)?|\.\d+)\s*(%)?")
+_OTHER_STAT_RE = re.compile(r"\b(?:DAY|R20|ATR%?)\b", re.I)
+_STREAK_TOKEN_RE = re.compile(r"\d+\s*d\s*[<>]\s*5", re.I)
+_RESIDUAL_STAMP_FIELDS = frozenset(
+    {"residual_20d", "factor_residual", "factor_resid", "vs_group", "vs_sleeve"}
+)
+
+
+def _fmt_disp(value: float) -> str:
+    return f"{float(value):.8g}"
+
+
+def _norm_disp_text(text: str) -> str:
+    return (
+        (text or "")
+        .replace("\u2212", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace(",", "")
+    )
+
+
+def _parse_stat_num(text: str) -> float | None:
+    raw = _norm_disp_text(text).strip()
+    if not raw or raw in {"—", "-", "–", "−"}:
+        return None
+    match = _STAT_NUM_RE.search(raw)
+    if not match:
+        return None
+    try:
+        number = float(match.group(1))
+    except ValueError:
+        return None
+    if match.group(2):
+        number = number / 100.0
+    return number
+
+
+def _closest_stat_num(left: str, right: str) -> float | None:
+    last = None
+    for match in _STAT_NUM_RE.finditer(left or ""):
+        last = match
+    first = _STAT_NUM_RE.search(right or "")
+
+    def value_of(match: re.Match[str]) -> float | None:
+        try:
+            number = float(match.group(1))
+        except ValueError:
+            return None
+        if match.group(2):
+            number = number / 100.0
+        return number
+
+    if last is not None and first is not None:
+        dist_left = len(left or "") - last.end()
+        dist_right = first.start()
+        if dist_right < dist_left:
+            return value_of(first)
+        if dist_left < dist_right:
+            return value_of(last)
+        return value_of(first)
+    if first is not None:
+        return value_of(first)
+    if last is not None:
+        return value_of(last)
+    return None
+
+
+def _cell_around_rs(text: str) -> float | None:
+    """Number closest to an RS63 label, staying inside that stat cell."""
+    blob = _STREAK_TOKEN_RE.sub(" ", _norm_disp_text(text))
+    found = None
+    for match in _RS_LABEL_RE.finditer(blob):
+        found = match
+    if found is None:
+        return None
+    left = blob[: found.start()]
+    right = blob[found.end() :]
+    left_parts = _OTHER_STAT_RE.split(left)
+    right_parts = _OTHER_STAT_RE.split(right)
+    return _closest_stat_num(
+        left_parts[-1] if left_parts else "",
+        right_parts[0] if right_parts else "",
+    )
+
+
+def _strip_tags(fragment: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", fragment or "")
+    return re.sub(r"\s+", " ", html.unescape(text))
+
+
+def rs63_from_fragment(fragment: str) -> float | None:
+    """Read RS63 from live Mom-card HTML.
+
+    Dense cards often render the number *before* the ``RS63`` / ``RS 63``
+    label, or keep the label only on ``data-k`` / ``data-stat``. A trailing
+    ``%`` is percent (``4.0%`` → 0.04). A bare ``0.17`` stays ``0.17``.
+    """
+    src = fragment or ""
+    attr = re.search(r"""data-rs[-_]?63\s*=\s*["']([^"']+)["']""", src, re.I)
+    if attr:
+        number = _parse_stat_num(attr.group(1))
+        if number is not None:
+            return number
+    labeled = re.compile(
+        r"""<([a-z0-9]+)\b([^>]*?\b(?:data-k|data-stat|data-field|data-label|title|aria-label)\s*=\s*["']([^"']+)["'][^>]*)>(.*?)</\1>""",
+        re.I | re.S,
+    )
+    for match in labeled.finditer(src):
+        label = re.sub(r"[\s_\-]+", "", match.group(3) or "").upper()
+        if label != "RS63":
+            continue
+        attrs = match.group(2) or ""
+        for key in ("data-v", "data-val", "data-value", "data-n", "data-rs63", "data-rs-63"):
+            got = re.search(rf"""{re.escape(key)}\s*=\s*["']([^"']+)["']""", attrs, re.I)
+            if not got:
+                continue
+            number = _parse_stat_num(got.group(1))
+            if number is not None:
+                return number
+        inner = _strip_tags(match.group(4) or "")
+        if _OTHER_STAT_RE.search(inner):
+            continue
+        number = _parse_stat_num(inner)
+        if number is not None:
+            return number
+        number = _cell_around_rs(inner)
+        if number is not None:
+            return number
+    return _cell_around_rs(_strip_tags(src))
+
+
+def load_dispersion_book(root: Any = None) -> dict[str, tuple[float, str]]:
+    """Ticker → ``(value, field)``. Factor residual wins over ``residual_20d``.
+
+    Reads the residual panel / ``residual_last`` already on disk, then enrich
+    ``residual_20d``. Does not compute a new residual. A present 0 is kept.
+    """
+    base = Path(root) if root is not None else HERE
+    out: dict[str, tuple[float, str]] = {}
+
+    def put(ticker: str, value: float, field: str, *, override: bool = False) -> None:
+        short = _short(ticker)
+        for key in (short, str(ticker).strip()):
+            if not key:
+                continue
+            if key in out and not override:
+                continue
+            out[key] = (float(value), field)
+
+    try:
+        import s_score
+
+        panel = s_score.discover_residual_panel(base)
+        names = panel.get("names") if isinstance(panel, Mapping) else None
+        series = s_score._series_map(names if isinstance(names, Mapping) else None)
+        for ticker, points in series.items():
+            if points:
+                put(str(ticker), float(points[-1][1]), "factor_residual", override=True)
+        if not any(field == "factor_residual" for _value, field in out.values()):
+            last, _asof, _src = s_score._residual_last_snapshot(base)
+            for ticker, value in (last or {}).items():
+                put(str(ticker), float(value), "factor_residual", override=True)
+    except Exception as exc:
+        LOG.warning("dispersion book: residual panel unreadable: %s", exc)
+
+    try:
+        book = dapi_enrich.load_enrichment(base / dapi_enrich.ENRICH_FILENAME)
+    except Exception as exc:
+        LOG.warning("dispersion book: enrich unreadable: %s", exc)
+        book = None
+    names = book.get("names") if isinstance(book, Mapping) else None
+    if isinstance(names, Mapping):
+        for ticker, rec in names.items():
+            if not isinstance(rec, Mapping):
+                continue
+            value = dapi_enrich.as_float(rec.get("residual_20d"))
+            if value is None:
+                continue
+            short = _short(str(ticker))
+            prev = out.get(short) or out.get(str(ticker))
+            if prev is not None and prev[1] == "factor_residual":
+                continue
+            put(str(ticker), float(value), "residual_20d", override=False)
+    return out
+
+
+def _is_mom_card_attrs(attrs: str) -> bool:
+    match = re.search(r"""class\s*=\s*["']([^"']+)["']""", attrs or "", re.I)
+    if not match:
+        return False
+    classes = set(match.group(1).split())
+    if "fd-bb-card" in classes:
+        return False
+    return "card" in classes or "fd-card" in classes
+
+
+def _ticker_from_article(attrs: str, inner: str) -> str:
+    match = re.search(
+        r"""data-(?:t|ticker|name)\s*=\s*["']([^"']+)["']""",
+        attrs or "",
+        re.I,
+    )
+    if match and match.group(1).strip():
+        return match.group(1).strip()
+    heading = re.search(r"<h[23]\b[^>]*>(.*?)</h[23]>", inner or "", re.I | re.S)
+    if not heading:
+        return ""
+    return re.sub(r"<[^>]+>", "", heading.group(1)).strip()
+
+
+def _upsert_attr(open_tag: str, name: str, value: str) -> str:
+    escaped = html.escape(str(value), quote=True)
+    pattern = re.compile(
+        rf"""(\s{re.escape(name)}\s*=\s*)(["'])(?:(?!\2).)*\2""",
+        re.I | re.S,
+    )
+    if pattern.search(open_tag):
+        return pattern.sub(
+            lambda match: f"{match.group(1)}{match.group(2)}{escaped}{match.group(2)}",
+            open_tag,
+            count=1,
+        )
+    if open_tag.endswith("/>"):
+        return open_tag[:-2] + f' {name}="{escaped}"/>'
+    return open_tag[:-1] + f' {name}="{escaped}">'
+
+
+def _mask_scripts(text: str) -> tuple[str, list[str]]:
+    blocks: list[str] = []
+
+    def repl(match: re.Match[str]) -> str:
+        blocks.append(match.group(0))
+        return f"\x00FD_SCRIPT_{len(blocks) - 1}\x00"
+
+    return _SCRIPT_MASK_RE.sub(repl, text or ""), blocks
+
+
+def _unmask_scripts(text: str, blocks: list[str]) -> str:
+    for index, block in enumerate(blocks):
+        text = text.replace(f"\x00FD_SCRIPT_{index}\x00", block)
+    return text
+
+
+def _lookup_book(
+    book: Mapping[str, Any] | None,
+    ticker: str,
+) -> tuple[float, str] | None:
+    if not book or not ticker:
+        return None
+    short = _short(ticker)
+    rec = book.get(ticker) or book.get(short)
+    if not isinstance(rec, tuple):
+        for key, val in book.items():
+            if _short(str(key)) == short and isinstance(val, tuple):
+                rec = val
+                break
+    if not isinstance(rec, tuple) or len(rec) != 2 or rec[0] is None:
+        return None
+    try:
+        return float(rec[0]), str(rec[1] or "")
+    except (TypeError, ValueError):
+        return None
+
+
+def dispersion_for_card(
+    ticker: str,
+    fragment: str,
+    book: Mapping[str, Any] | None = None,
+) -> tuple[float, str] | None:
+    """Residual from the book, else ``vs_group``, else RS63 parsed off the card."""
+    chosen = _lookup_book(book, ticker)
+    if chosen is not None and chosen[1] in _RESIDUAL_STAMP_FIELDS:
+        return chosen
+    vs_group = re.search(
+        r"""data-vs-group\s*=\s*["']([^"']+)["']""",
+        fragment or "",
+        re.I,
+    )
+    if vs_group:
+        number = _parse_stat_num(vs_group.group(1))
+        if number is not None:
+            return number, "vs_group"
+    rs63 = rs63_from_fragment(fragment or "")
+    if rs63 is None:
+        return chosen
+    return rs63, "rs63"
+
+
+def _embed_dispersion_db(html_text: str, db: Mapping[str, Any]) -> str:
+    blob = json.dumps(dict(db or {}), separators=(",", ":"), ensure_ascii=True)
+    tag = f'<script type="application/json" id="{DISP_DB_ID}">{_script_json(blob)}</script>\n'
+    text = re.sub(
+        rf'<script\b[^>]*\bid=["\']{DISP_DB_ID}["\'][^>]*>.*?</script>\s*',
+        "",
+        html_text or "",
+        flags=re.I | re.S,
+    )
+    if "</body>" in text:
+        return text.replace("</body>", tag + "</body>", 1)
+    return text + tag
+
+
+def _matching_close(html: str, open_end: int, tag: str) -> tuple[int, int] | None:
+    """``(close_start, close_end)`` for the ``tag`` opened just before ``open_end``."""
+    depth = 1
+    for match in _NEST_TAG_RE.finditer(html, open_end):
+        name = match.group(2).lower()
+        if name != tag:
+            continue
+        closing = bool(match.group(1))
+        self_close = (not closing) and match.group(3).rstrip().endswith("/")
+        if closing:
+            depth -= 1
+            if depth == 0:
+                return match.start(), match.end()
+        elif not self_close:
+            depth += 1
+    return None
+
+
+def _card_spans(html: str) -> list[tuple[int, int, int, int]]:
+    """``(open_start, open_end, close_start, close_end)`` for Mom card nodes."""
+    spans: list[tuple[int, int, int, int]] = []
+    pos = 0
+    while True:
+        match = _CARD_OPEN_RE.search(html, pos)
+        if not match:
+            break
+        attrs = match.group(2)
+        if not _is_mom_card_attrs(attrs):
+            pos = match.end()
+            continue
+        closed = _matching_close(html, match.end(), match.group(1).lower())
+        if closed is None:
+            pos = match.end()
+            continue
+        close_start, close_end = closed
+        spans.append((match.start(), match.end(), close_start, close_end))
+        pos = match.end()
+    return spans
+
+
+def stamp_dispersion_html(
+    html_text: str,
+    root: Any = None,
+    book: Mapping[str, Any] | None = None,
+) -> str:
+    """Write ``data-dispersion`` onto Mom ``article.card`` / ``div.card`` nodes.
+
+    Preference per name: factor residual, then enrich ``residual_20d``, then
+    ``data-vs-group``, then RS63 read from that card. Names with none of those
+    are left unstamped so the portable filter skips them. Script blocks are
+    masked so a ``cardHTML`` template is not rewritten.
+    """
+    if book is None:
+        book = load_dispersion_book(root)
+    masked, blocks = _mask_scripts(html_text or "")
+    db: dict[str, dict[str, Any]] = {}
+    pieces: list[tuple[int, int, str]] = []
+    for open_start, open_end, close_start, close_end in _card_spans(masked):
+        open_tag = masked[open_start:open_end]
+        inner = masked[open_end:close_start]
+        attrs = open_tag.split(">", 1)[0]
+        attrs = re.sub(r"^<\s*(?:article|div)\b", "", attrs, count=1, flags=re.I)
+        ticker = _ticker_from_article(attrs, inner)
+        if not ticker:
+            continue
+        chosen = dispersion_for_card(ticker, open_tag + inner, book)
+        if chosen is None:
+            continue
+        value, field = chosen
+        short = _short(ticker) or ticker
+        db[short] = {"v": float(value), "f": field}
+        stamped_open = _upsert_attr(open_tag, "data-dispersion", _fmt_disp(value))
+        stamped_open = _upsert_attr(stamped_open, "data-dispersion-field", field)
+        pieces.append((open_start, open_end, stamped_open))
+    stamped = masked
+    for open_start, open_end, stamped_open in reversed(pieces):
+        stamped = stamped[:open_start] + stamped_open + stamped[open_end:]
+    if isinstance(book, Mapping):
+        for key, rec in book.items():
+            if not isinstance(rec, tuple) or len(rec) != 2 or rec[0] is None:
+                continue
+            short = _short(str(key))
+            if not short or short in db:
+                continue
+            db[short] = {"v": float(rec[0]), "f": str(rec[1] or "")}
+    stamped = _embed_dispersion_db(stamped, db)
+    return _unmask_scripts(stamped, blocks)
+
+
 def _replace_id_script(html_text: str, script_id: str, script: str) -> str:
     """Drop every copy of ``script_id`` then inject ``script`` before ``</body>``.
 
@@ -2160,14 +3283,260 @@ def _ensure_js(html_text: str) -> str:
     return _replace_id_script(html_text, JS_SCRIPT_ID, script)
 
 
-def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> str:
+def _json_script(html_text: str, script_id: str) -> Any:
+    match = re.search(
+        rf'<script\b[^>]*\bid=["\']{re.escape(script_id)}["\'][^>]*>(.*?)</script>',
+        html_text or "",
+        re.I | re.S,
+    )
+    if not match or not match.group(1).strip():
+        return None
+    try:
+        return json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+
+
+def _ranges_for(html_text: str, ids: tuple[str, ...]) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for elem_id in ids:
+        span = _find_tag_span(html_text, elem_id)
+        if span:
+            ranges.append(span)
+    return ranges
+
+
+def _pos_inside(pos: int, ranges: Sequence[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in ranges)
+
+
+def _mom_card_fragments(masked: str) -> list[str]:
+    """Outer HTML of Mom-pane cards. Skips Breakout panes and the cache itself."""
+    panes = _ranges_for(masked, _MOM_PANE_IDS)
+    if not panes:
+        return []
+    skip = _ranges_for(
+        masked,
+        (
+            "view-breakout",
+            "view-breakdown",
+            "breakout-grid",
+            "breakdown-grid",
+            PANE_BREAKOUT_ID,
+            PANE_BREAKDOWN_ID,
+            MOM_CACHE_ID,
+        ),
+    )
+    spans = _card_spans(masked)
+    fragments: list[str] = []
+    seen: set[str] = set()
+    for open_start, _open_end, _close_start, close_end in spans:
+        if _pos_inside(open_start, skip) or not _pos_inside(open_start, panes):
+            continue
+        if any(other_open < open_start and other_close >= close_end for other_open, _oe, _cs, other_close in spans):
+            continue
+        outer = masked[open_start:close_end]
+        ticker = _short(_ticker_from_article(outer.split(">", 1)[0], outer))
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        fragments.append(outer)
+    return fragments
+
+
+def _cache_has_cards(html_text: str) -> bool:
+    span = _find_tag_span(html_text, MOM_CACHE_ID)
+    if not span:
+        return False
+    return bool(_card_spans(html_text[span[0] : span[1]]))
+
+
+def _disp_lookup(
+    disp_db: Mapping[str, Any] | None,
+    metrics: Mapping[str, Any] | None,
+    ticker: str,
+) -> tuple[float, str] | None:
+    rec = None
+    if isinstance(disp_db, Mapping):
+        rec = disp_db.get(ticker) or disp_db.get(_short(ticker))
+        if not isinstance(rec, Mapping):
+            for key, val in disp_db.items():
+                if _short(str(key)) == _short(ticker) and isinstance(val, Mapping):
+                    rec = val
+                    break
+    if isinstance(rec, Mapping) and rec.get("v") is not None and rec.get("v") != "":
+        try:
+            return float(rec["v"]), str(rec.get("f") or "rs63")
+        except (TypeError, ValueError):
+            pass
+    rs = lookup_live_metrics(metrics, ticker).get("rs_63")
+    if rs is None:
+        return None
+    return float(rs), "rs63"
+
+
+def _records_from_streak(
+    streak: Mapping[str, Any] | None,
+    disp_db: Mapping[str, Any] | None,
+    metrics: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(streak, Mapping):
+        return []
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for key, rec in streak.items():
+        if not isinstance(rec, Mapping) or not rec.get("label"):
+            continue
+        ticker = _short(str(rec.get("t") or rec.get("ticker") or key))
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        row: dict[str, Any] = {
+            "t": ticker,
+            "ticker": str(rec.get("ticker") or key),
+            "score": rec.get("score"),
+            "mom_score": rec.get("score"),
+            "mom_score_d10": rec.get("mom_score_d10"),
+            "mom_streak": rec.get("streak"),
+            "mom_streak_side": rec.get("side"),
+            "label": rec.get("label"),
+        }
+        disp = _disp_lookup(disp_db, metrics, ticker)
+        if disp is not None:
+            value, field = disp
+            if field in _RESIDUAL_STAMP_FIELDS:
+                row[field] = value
+            else:
+                row["rs63"] = value
+        out.append({k: v for k, v in row.items() if v is not None and v != ""})
+    return out
+
+
+def _synth_card(ticker: str, rec: Mapping[str, Any], disp: tuple[float, str] | None) -> str:
+    """Minimal Mom card so Breakout can clone gates without the live pane."""
+    score = rec.get("score")
+    if score is None:
+        score = rec.get("mom_score")
+    d10 = rec.get("mom_score_d10")
+    side = str(rec.get("mom_streak_side") or rec.get("side") or "")
+    streak = rec.get("mom_streak")
+    if streak is None:
+        streak = rec.get("streak")
+    label = str(rec.get("label") or "")
+    if not label and streak is not None and side == "above":
+        label = f"↑{int(streak)}d>5"
+    elif not label and streak is not None and side == "below":
+        label = f"↓{int(streak)}d<5"
+    attrs = [f'class="card"', f'data-t="{html.escape(ticker, quote=True)}"']
+    if score is not None and score != "":
+        attrs.append(f'data-score="{html.escape(str(score), quote=True)}"')
+    if disp is not None:
+        value, field = disp
+        attrs.append(f'data-dispersion="{_fmt_disp(value)}"')
+        attrs.append(f'data-dispersion-field="{html.escape(field or "rs63", quote=True)}"')
+        if not field or field == "rs63":
+            attrs.append(f'data-rs63="{_fmt_disp(value)}"')
+    parts = [f'<div {" ".join(attrs)}>']
+    shown = html.escape(ticker)
+    if score is not None and score != "":
+        parts.append(f'<header><h2>{shown}</h2><span class="sc">{html.escape(str(score))}</span></header>')
+    else:
+        parts.append(f"<header><h2>{shown}</h2></header>")
+    if d10 is not None and d10 != "":
+        parts.append(
+            f'<span data-mom-score-d10="{html.escape(str(d10), quote=True)}">{html.escape(str(d10))}</span>'
+        )
+    if label:
+        parts.append(f'<span class="badge" data-key="mom-streak">{html.escape(label)}</span>')
+    if disp is not None and (not disp[1] or disp[1] == "rs63"):
+        parts.append(f"<span><b>{html.escape(_fmt_disp(disp[0]))}</b> RS63</span>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _insert_before_breakout_js(html_text: str, tag: str) -> str:
+    """Keep the cache in the document before ``#fd-breakout-js`` runs."""
+    text = html_text or ""
+    match = re.search(rf'<script\b[^>]*\bid=["\']{re.escape(JS_SCRIPT_ID)}["\']', text, re.I)
+    if match:
+        return text[: match.start()] + tag + text[match.start() :]
+    if "</body>" in text:
+        return text.replace("</body>", tag + "</body>", 1)
+    return text + tag
+
+
+def _embed_mom_cache(html_text: str, fragments: Sequence[str]) -> str:
+    if not fragments:
+        return html_text
+    tag = (
+        f'<div id="{MOM_CACHE_ID}" hidden aria-hidden="true" style="display:none">'
+        + "".join(fragments)
+        + "</div>\n"
+    )
+    text = html_text or ""
+    span = _find_tag_span(text, MOM_CACHE_ID)
+    if span:
+        text = text[: span[0]] + text[span[1] :]
+    return _insert_before_breakout_js(text, tag)
+
+
+def _embed_mom_db(html_text: str, rows: Sequence[Mapping[str, Any]]) -> str:
+    if not rows:
+        return html_text
+    blob = json.dumps(list(rows), separators=(",", ":"), ensure_ascii=True)
+    tag = f'<script type="application/json" id="{MOM_DB_ID}">{_script_json(blob)}</script>\n'
+    text = re.sub(
+        rf'<script\b[^>]*\bid=["\']{re.escape(MOM_DB_ID)}["\'][^>]*>.*?</script>\s*',
+        "",
+        html_text or "",
+        flags=re.I | re.S,
+    )
+    return _insert_before_breakout_js(text, tag)
+
+
+def persist_mom_universe(
+    html_text: str,
+    metrics: Mapping[str, Any] | None = None,
+) -> str:
+    """Snapshot Mom into ``#fd-bb-mom-cache`` so Breakout survives an empty Mom pane.
+
+    Live Mom grids are copied when they still hold cards. When they do not
+    (Breakout is the saved view), cards are built from ``#mom-streak-db`` plus
+    dispersion / RS63. An empty source does not wipe a cache already on the page.
+    """
+    text = html_text or ""
+    masked, blocks = _mask_scripts(text)
+    fragments = [_unmask_scripts(frag, blocks) for frag in _mom_card_fragments(masked)]
+    streak = _json_script(text, "mom-streak-db")
+    disp_db = _json_script(text, DISP_DB_ID)
+    if not isinstance(disp_db, Mapping):
+        disp_db = {}
+    rows = _records_from_streak(streak if isinstance(streak, Mapping) else None, disp_db, metrics or {})
+    if not fragments and rows and not _cache_has_cards(text):
+        fragments = [
+            _synth_card(str(row.get("t") or ""), row, _disp_lookup(disp_db, metrics or {}, str(row.get("t") or "")))
+            for row in rows
+            if row.get("t")
+        ]
+    text = _embed_mom_cache(text, fragments)
+    return _embed_mom_db(text, rows)
+
+
+def ensure_embedded(
+    html_text: str,
+    ranked: Mapping[str, Any] | None = None,
+    root: Any = None,
+) -> str:
     """Nav buttons + view shells + filled db + JS. Safe on live ~2.7–4.8MB HTML.
 
     ``ranked=None`` must not wipe ``#fd-breakout-db``. View shells stay; legacy
     ``#fd-bb-*`` are emptied. JS is **always** replaced (never skipped when
     ``ranked is None``) so a recopy refreshes ``renderRow``. Live MOM card
     ``metrics.*`` are scraped from the HTML (no ``fd-mom-db``) and stamped
-    onto BB rows at embed time.
+    onto BB rows at embed time. Mom cards also get ``data-dispersion`` from
+    the residual panel / enrich book, else the RS63 already on the card.
+    The same pass copies Mom cards into ``#fd-bb-mom-cache`` (or rebuilds that
+    cache from ``#mom-streak-db`` when the Mom panes are empty).
     """
     text = html_text or ""
     live_map = extract_live_metrics_map(text)
@@ -2188,4 +3557,7 @@ def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> 
     text = _ensure_side_note(text, VIEW_BREAKOUT_ID, GRID_BREAKOUT_ID)
     text = _ensure_side_note(text, VIEW_BREAKDOWN_ID, GRID_BREAKDOWN_ID)
     text = _ensure_js(text)
-    return text
+    if not show_binder_assigned(text):
+        text = _ensure_js(text)
+    text = stamp_dispersion_html(text, root=root)
+    return persist_mom_universe(text, metrics=live_map)
