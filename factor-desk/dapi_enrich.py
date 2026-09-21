@@ -54,6 +54,18 @@ RESIDUAL_LAST_RELS: tuple[str, ...] = (
     "v0_residual_last.json",
     "last_residual.csv",
 )
+# Full residual panel. ``run_v0`` can land a name here (TSEM) without a
+# residual_last snapshot and without a live MOM card.
+BOOK_PANEL_RELS: tuple[str, ...] = (
+    "v0_residuals.csv",
+    "v0/residuals.csv",
+    "v0/v0_residuals.csv",
+    "residuals.csv",
+    "residual_panel.csv",
+    "residual_panel.json",
+    "v0/residual_panel.json",
+    "clean/v0_residuals.csv",
+)
 _RESIDUAL_SKIP_HEADERS = {
     "date",
     "asof",
@@ -552,8 +564,11 @@ def search_symbols(query: str, universe: Any) -> list[dict[str, Any]]:
             continue
         name = _company_label(row, ticker, short)
         yellow = ticker.upper()
+        # ``TSEM``, ``TSEM US``, and ``TSEM UW Equity`` all mean the short symbol.
+        # A stored exchange (UW vs US) must not hide the name.
+        q_first = q_upper.split(" ")[0]
         score: int | None
-        if short == q_upper or yellow == q_upper:
+        if short == q_upper or yellow == q_upper or (q_first and short == q_first):
             score = 0
         elif short.startswith(q_upper) or yellow.startswith(q_upper):
             score = 1
@@ -1988,14 +2003,51 @@ def residual_last_tickers(root: Path | None = None) -> list[str]:
     return _dedupe_tickers(found)
 
 
+def _ticker_names_tickers(root: Path) -> list[str]:
+    """Tickers recorded by Add in ``ticker_names.json``."""
+    path = root / TICKER_NAMES_FILENAME
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        LOG.warning("ticker names %s: %s", path, exc)
+        return []
+    found: list[str] = []
+    if isinstance(data, dict) and isinstance(data.get("names"), dict):
+        items = data["names"].items()
+    elif isinstance(data, dict):
+        items = ((k, v) for k, v in data.items() if not str(k).startswith("_"))
+    elif isinstance(data, list):
+        return [str(item) for item in data if str(item).strip()]
+    else:
+        return []
+    for key, rec in items:
+        if isinstance(rec, Mapping) and rec.get("ticker"):
+            found.append(str(rec.get("ticker")))
+        elif str(key).strip():
+            found.append(str(key))
+    return found
+
+
 def book_extra_tickers(root: Path | None = None) -> list[str]:
-    """Union of ``universe_extra.txt`` and residual-last snapshots."""
+    """Union of extras, residual snapshots, the residual panel, and ticker names.
+
+    A symbol Add pushed into the factor files (TSEM in ``universe_extra.txt``,
+    ``v0/residual_last.csv``, or ``v0_residuals.csv``) stays searchable even
+    when ``dapi_enrichment.json`` and the live MOM card list never received it.
+    """
     base = Path(root) if root is not None else HERE
     found: list[str] = []
     extra = base / UNIVERSE_EXTRA_FILENAME
     if extra.is_file():
         found.extend(_read_universe(extra))
     found.extend(residual_last_tickers(base))
+    for rel in BOOK_PANEL_RELS:
+        path = base / rel
+        if path.is_file():
+            found.extend(_residual_tickers_in_file(path))
+    found.extend(_ticker_names_tickers(base))
     return _dedupe_tickers(found)
 
 
