@@ -166,6 +166,24 @@ class HtmlChipTests(unittest.TestCase):
         self.assertIn("gics-hid", html)
         self.assertNotIn('data-tab="sectors"', html)
         self.assertNotIn("tab-sectors", html)
+        self.assertIn(f'id="{gf.CSS_STYLE_ID}"', html)
+        self.assertIn("gap: 6px", html)
+
+    def test_css_style_id_replaces_even_when_gchip_already_present(self) -> None:
+        seed = (
+            "<html><head><style>.gchip { gap: 99px; } .gics-hid { display: none; }</style>"
+            "</head><body></body></html>"
+        )
+        first = gf.ensure_embedded(seed, {})
+        self.assertIn(f'id="{gf.CSS_STYLE_ID}"', first)
+        self.assertIn("gap: 6px", first)
+        stale = first.replace("gap: 6px", "gap: 99px")
+        again = gf.ensure_embedded(stale, {})
+        self.assertEqual(again.count(f'id="{gf.CSS_STYLE_ID}"'), 1)
+        self.assertIn("gap: 6px", again)
+        # dedicated style id is rewritten; leftover 99px may remain in the old blob
+        id_block = again.split(f'id="{gf.CSS_STYLE_ID}"', 1)[1]
+        self.assertIn("gap: 6px", id_block.split("</style>", 1)[0])
 
     def test_refresh_html_has_no_sectors_stage_copy(self) -> None:
         html = desk_dash.render_html(cards=[], book=None)

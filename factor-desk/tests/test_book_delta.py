@@ -68,6 +68,10 @@ class DiffTests(unittest.TestCase):
         self.assertIn("NVDA", labels)
         self.assertIn("WATCH", labels)
         self.assertIn("OUT", labels)
+        stk = next(c["label"] for c in diff["chips"] if c["label"].startswith("stk AAPL"))
+        self.assertEqual(stk, "stk AAPL ↑ 20d>5 → ↓ 1d<5")
+        self.assertNotIn("→↓", stk)
+        self.assertNotIn("↑20", stk)
 
     def test_roundtrip_snapshot_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,6 +92,28 @@ class DiffTests(unittest.TestCase):
         self.assertIn('id="fd-book-delta"', html)
         self.assertIn("baseline set", html)
         self.assertIn("fd-book-delta-db", html)
+        self.assertIn(f'id="{bd.CSS_STYLE_ID}"', html)
+        self.assertIn("gap: 6px", html)
+
+    def test_css_style_id_replaces_on_resync(self) -> None:
+        diff = bd.diff_snapshots(None, {"names": {}, "flags": [], "watch": [], "outliers": []})
+        html = bd.ensure_embedded("<html><head></head><body></body></html>", diff)
+        stale = html.replace("gap: 6px", "gap: 99px", 1)
+        self.assertIn("gap: 99px", stale)
+        again = bd.ensure_embedded(stale, diff)
+        self.assertEqual(again.count(f'id="{bd.CSS_STYLE_ID}"'), 1)
+        self.assertIn("gap: 6px", again)
+        self.assertNotIn("gap: 99px", again)
+
+    def test_streak_fragment_spacing(self) -> None:
+        self.assertEqual(bd.format_streak_fragment("↓1d<5"), "↓ 1d<5")
+        self.assertEqual(bd.format_streak_fragment("↑57d>5"), "↑ 57d>5")
+        self.assertEqual(bd.format_streak_fragment("↓ 1d<5"), "↓ 1d<5")
+        self.assertEqual(bd.format_streak_fragment("=5"), "=5")
+        self.assertEqual(
+            bd.format_streak_chip_label("MANH", "↓1d<5", "↑57d>5"),
+            "stk MANH ↓ 1d<5 → ↑ 57d>5",
+        )
 
 
 if __name__ == "__main__":

@@ -159,26 +159,44 @@ def strip_css() -> str:
     """Dark-desk G-chip language. Safe to paste into live factorbook.html."""
     return """
 .filter-strip, .gics-chips {
-  display: inline-flex;
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
-  margin: 0 0 10px;
-  vertical-align: middle;
+  gap: 6px;
+  margin: 0;
+  min-height: 20px;
+}
+#gics-filter-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  flex: 0 0 100%;
+  margin: 0;
+  padding: 0 0 8px;
 }
 .filter-chip, .gchip {
-  display: inline-block;
-  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.04em;
-  padding: 2px 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 20px;
+  padding: 2px 8px;
   margin: 0;
   border-radius: 3px;
   border: 1px solid #6b7280;
   color: #d1d5db;
   background: #111827;
+  font: 650 10px/1 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
   text-transform: none;
-  vertical-align: middle;
   cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
 }
 .filter-chip:hover, .gchip:hover { border-color: #9ca3af; color: #f3f4f6; }
 .filter-chip.active, .gchip.active {
@@ -369,6 +387,7 @@ def render_strip(sectors: Sequence[str] | None) -> str:
 GICS_SECTOR_DB_PLACEHOLDER = "__GICS_SECTOR_DB__"
 DB_SCRIPT_ID = "gics-sector-db"
 STRIP_HOST_ID = "gics-filter-strip"
+CSS_STYLE_ID = "gics-filter-css"
 
 
 def sector_db_json(mapping: Mapping[str, str] | None) -> str:
@@ -420,15 +439,19 @@ def markup_attr(sector: str | None) -> str:
 
 
 def _ensure_css(html_text: str) -> str:
-    if ".gics-hid" in html_text and ".gchip" in html_text:
-        return html_text
-    css = strip_css()
-    if "</style>" in html_text:
-        idx = html_text.rfind("</style>")
-        return html_text[:idx] + css + "\n" + html_text[idx:]
+    css = f'<style id="{CSS_STYLE_ID}">\n{strip_css()}\n</style>\n'
+    text, n = re.subn(
+        rf'<style\b[^>]*\bid=["\']{CSS_STYLE_ID}["\'][^>]*>.*?</style>\s*',
+        lambda _m: css,
+        html_text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    if n:
+        return text
     if "</head>" in html_text:
-        return html_text.replace("</head>", f"<style>\n{css}\n</style>\n</head>", 1)
-    return f"<style>\n{css}\n</style>\n" + html_text
+        return html_text.replace("</head>", css + "</head>", 1)
+    return css + html_text
 
 
 def _ensure_host(html_text: str) -> str:
