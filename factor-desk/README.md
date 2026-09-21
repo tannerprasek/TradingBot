@@ -61,3 +61,5 @@ Paper Buy/Sell on dense MOM cards plus a Home open-book / week-scorecard strip (
 Experimental residual S-score (Avellaneda–Lee layer on existing SparsePCA residuals; pointers only, own top-nav tab): [docs/S-SCORE.md](docs/S-SCORE.md).
 
 Desktop copies `dapi_enrich.py` into `C:\Users\MLP\Desktop\factorbook` and merges the thin hooks. Remaining ingest/troughing modules stay Desktop-owned until synced.
+
+Add-to-book (`POST /api/add`) stubs or enriches the new ticker into `dapi_enrichment.json`, and `write_combined` unions `universe_extra.txt` plus `v0/residual_last.csv` into the search/book payload (`#fd-search-book`) so a short-history name is searchable even when DAPI never filled. Copy `add_server.py`, `dapi_enrich.py`, and `desk_dash.py` after this change. See [DEPLOY-HOOKS.md](DEPLOY-HOOKS.md) §13. The live-desk size guard stays; do not restore a skinny `__PAYLOAD__` writer.

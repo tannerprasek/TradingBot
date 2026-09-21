@@ -23,6 +23,7 @@ Output: ``dapi_enrichment.json`` next to ``options_abnormal.json``.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import math
@@ -38,6 +39,45 @@ LOG = logging.getLogger("dapi_enrich")
 ENRICH_FILENAME = "dapi_enrichment.json"
 OPTIONS_ABNORMAL_FILENAME = "options_abnormal.json"
 GICS_CACHE_FILENAME = "gics_sectors.json"
+UNIVERSE_EXTRA_FILENAME = "universe_extra.txt"
+TICKER_NAMES_FILENAME = "ticker_names.json"
+
+# Snapshot files that prove a name is in the factor book even when enrich
+# never saw it (Add-to-book: residual/factor can land before DAPI).
+RESIDUAL_LAST_RELS: tuple[str, ...] = (
+    "v0/residual_last.csv",
+    "v0/residual_last.json",
+    "residual_last.csv",
+    "residual_last.json",
+    "v0_residual_last.csv",
+    "v0_residual_last.json",
+    "last_residual.csv",
+)
+_RESIDUAL_SKIP_HEADERS = {
+    "date",
+    "asof",
+    "as_of",
+    "day",
+    "dt",
+    "value",
+    "residual",
+    "resid",
+    "eps",
+    "epsilon",
+    "v0",
+    "meta",
+    "kind",
+    "version",
+    "names",
+    "last",
+    "ticker",
+    "name",
+    "symbol",
+    "yellow",
+    "bbg",
+    "t",
+}
+_NON_DAPI_SOURCES = {"prices", "prices_ctx", "stub"}
 
 # ---------------------------------------------------------------------------
 # Thresholds (document in docs/DAPI-ENRICH.md). Pointers only — not signals.
@@ -178,6 +218,10 @@ FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     # GICS sector name for home filter chips. NOT in EQUITY_PACK_KEYS — Refresh
     # must not pull this on every run. One-shot: fill_gics_sectors / --gics-once.
     "gics_sector_name": ("GICS_SECTOR_NAME", "GICS_SECTOR"),
+    # Identity. Not in EQUITY_PACK_KEYS — Add requests these once per new name.
+    # Refresh stays on the existing pack so a full-book pull does not grow.
+    "security_name": ("NAME", "SECURITY_NAME", "LONG_COMP_NAME"),
+    "short_name": ("SHORT_NAME", "ID_EXCH_SYMBOL"),
 }
 
 # Equity-only packs pulled on the name. Option-contract fields stay separate.
@@ -418,6 +462,24 @@ def normalize_ticker(ticker: str, default_yellow: str = "US Equity") -> str:
 
 def name_key(ticker: str) -> str:
     return normalize_ticker(ticker)
+
+
+def short_symbol(ticker: str) -> str:
+    """Desk search token. ``TSEM US Equity`` → ``TSEM``."""
+    text = (ticker or "").strip()
+    if not text:
+        return ""
+    return text.split()[0].upper()
+
+
+def canonical_ticker(ticker: str) -> str:
+    """Yellow key with an uppercased symbol. ``tsem`` → ``TSEM US Equity``."""
+    text = (ticker or "").strip()
+    if not text:
+        return ""
+    parts = text.split()
+    parts[0] = parts[0].upper()
+    return name_key(" ".join(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -1620,6 +1682,429 @@ def lookup_name(book: Mapping[str, Any] | None, ticker: str) -> dict[str, Any] |
     return names.get(ticker) or names.get(name_key(ticker))
 
 
+def dapi_fields_resolved(rec: Mapping[str, Any] | None) -> bool:
+    """True when a DAPI mnemonic landed. Price-file / stub sources do not count."""
+    if not isinstance(rec, Mapping):
+        return False
+    used = rec.get("fields_used")
+    if not isinstance(used, dict):
+        return False
+    for src in used.values():
+        if src and str(src) not in _NON_DAPI_SOURCES:
+            return True
+    return False
+
+
+def overlay_identity_fields(rec: MutableMapping[str, Any], raw: Mapping[str, Any] | None) -> None:
+    """Copy name / short_name / GICS / px when the row actually has them."""
+    if not raw:
+        return
+    used = rec.get("fields_used")
+    if not isinstance(used, dict):
+        used = {}
+        rec["fields_used"] = used
+    name, field, _reason = first_success(raw, "security_name", as_type="str")
+    if name:
+        rec["name"] = name
+        if field:
+            used["security_name"] = field
+    short, sfield, _sreason = first_success(raw, "short_name", as_type="str")
+    if short:
+        rec["short_name"] = short
+        if sfield:
+            used["short_name"] = sfield
+    gics, gfield, _greason = first_success(raw, "gics_sector_name", as_type="str")
+    gname, _extra = parse_gics_sector_name(gics)
+    if gname:
+        rec["gics_sector_name"] = gname
+        if gfield:
+            used["gics_sector_name"] = gfield
+    if rec.get("px_last") is None:
+        px, pfield, _preason = first_success(raw, "px_last")
+        if px is not None:
+            rec["px_last"] = px
+            if pfield:
+                used["px_last"] = pfield
+    rec["enrich_pills"] = build_enrich_pills(rec)
+
+
+def _apply_px_from_maps(
+    rec: MutableMapping[str, Any],
+    ticker: str,
+    prices_ctx: Mapping[str, Any] | None,
+    px_by_ticker: Mapping[str, Any] | None,
+) -> None:
+    if rec.get("px_last") is not None:
+        return
+    px = None
+    source = None
+    key = name_key(ticker)
+    short = short_symbol(ticker)
+    for bag, label in ((prices_ctx, "prices_ctx"), (px_by_ticker, "prices")):
+        if not isinstance(bag, Mapping):
+            continue
+        row = bag.get(ticker) or bag.get(key) or bag.get(short)
+        if isinstance(row, Mapping):
+            px = as_float(row.get("px_last") or row.get("PX_LAST") or row.get("close") or row.get("adj_close"))
+        else:
+            px = as_float(row)
+        if px is None:
+            for raw_key, raw_val in bag.items():
+                if short_symbol(str(raw_key)) != short:
+                    continue
+                if isinstance(raw_val, Mapping):
+                    px = as_float(
+                        raw_val.get("px_last") or raw_val.get("PX_LAST") or raw_val.get("close") or raw_val.get("adj_close")
+                    )
+                else:
+                    px = as_float(raw_val)
+                if px is not None:
+                    break
+        if px is not None:
+            source = label
+            break
+    if px is None:
+        return
+    rec["px_last"] = px
+    used = rec.get("fields_used")
+    if not isinstance(used, dict):
+        used = {}
+        rec["fields_used"] = used
+    used["px_last"] = source or "prices"
+
+
+def last_prices(root: Path | None = None) -> dict[str, float]:
+    """Last close per ticker from ``prices_long.csv`` / ``prices.csv``. Empty if unread."""
+    try:
+        import mom_streak
+    except ImportError:
+        return {}
+    panel, _rel = mom_streak.load_price_panel(root)
+    out: dict[str, float] = {}
+    for ticker, series in panel.items():
+        if not series:
+            continue
+        px = series[-1][1]
+        out[str(ticker)] = px
+        out.setdefault(short_symbol(str(ticker)), px)
+    return out
+
+
+def _residual_tickers_in_file(path: Path) -> list[str]:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            LOG.warning("residual tickers %s: %s", path, exc)
+            return []
+        return _tickers_from_residual_json(blob)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        LOG.warning("residual tickers %s: %s", path, exc)
+        return []
+    return _tickers_from_residual_csv(text)
+
+
+def _tickers_from_residual_json(blob: Any) -> list[str]:
+    out: list[str] = []
+    if isinstance(blob, list):
+        for item in blob:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip())
+            elif isinstance(item, Mapping):
+                raw = item.get("ticker") or item.get("name") or item.get("symbol") or item.get("t")
+                if raw:
+                    out.append(str(raw).strip())
+        return out
+    if not isinstance(blob, Mapping):
+        return out
+    names: Any = blob.get("names") or blob.get("residuals") or blob.get("last") or blob
+    if isinstance(names, list):
+        return _tickers_from_residual_json(names)
+    if isinstance(names, Mapping):
+        for key, rec in names.items():
+            if str(key).lower() in _RESIDUAL_SKIP_HEADERS:
+                continue
+            if isinstance(rec, Mapping):
+                raw = rec.get("ticker") or rec.get("name") or rec.get("symbol") or key
+                if raw:
+                    out.append(str(raw).strip())
+            else:
+                out.append(str(key).strip())
+    return out
+
+
+def _tickers_from_residual_csv(text: str) -> list[str]:
+    rows = list(csv.DictReader(text.splitlines()))
+    if not rows:
+        return []
+    header = [h for h in (rows[0].keys() if rows else []) if h]
+    lower = {str(h).strip().lower(): h for h in header}
+    ticker_col = None
+    for name in ("ticker", "name", "symbol", "yellow", "bbg", "t"):
+        if name in lower:
+            ticker_col = lower[name]
+            break
+    out: list[str] = []
+    if ticker_col:
+        for row in rows:
+            raw = str(row.get(ticker_col) or "").strip()
+            if raw:
+                out.append(raw)
+        return out
+    for h in header:
+        token = str(h).strip()
+        if token and token.lower() not in _RESIDUAL_SKIP_HEADERS:
+            out.append(token)
+    return out
+
+
+def residual_last_tickers(root: Path | None = None) -> list[str]:
+    """Tickers present in ``v0/residual_last.csv`` (or the same snapshot names)."""
+    base = Path(root) if root is not None else HERE
+    found: list[str] = []
+    for rel in RESIDUAL_LAST_RELS:
+        path = base / rel
+        if path.is_file():
+            found.extend(_residual_tickers_in_file(path))
+    return _dedupe_tickers(found)
+
+
+def book_extra_tickers(root: Path | None = None) -> list[str]:
+    """Union of ``universe_extra.txt`` and residual-last snapshots."""
+    base = Path(root) if root is not None else HERE
+    found: list[str] = []
+    extra = base / UNIVERSE_EXTRA_FILENAME
+    if extra.is_file():
+        found.extend(_read_universe(extra))
+    found.extend(residual_last_tickers(base))
+    return _dedupe_tickers(found)
+
+
+def _dedupe_tickers(tickers: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in tickers:
+        key = name_key(str(raw))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def append_universe_extra(root: Path | None, ticker: str) -> Path:
+    """Append ``ticker`` to ``universe_extra.txt`` once. Keeps existing comments."""
+    base = Path(root) if root is not None else HERE
+    path = base / UNIVERSE_EXTRA_FILENAME
+    key = name_key(ticker)
+    lines: list[str] = []
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines()
+    have = {name_key(line.split("#", 1)[0]) for line in lines if line.split("#", 1)[0].strip()}
+    if key and key not in have:
+        lines.append(key)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    elif not path.is_file():
+        path.write_text("", encoding="utf-8")
+    return path
+
+
+def merge_ticker_names(
+    root: Path | None,
+    ticker: str,
+    *,
+    name: str | None = None,
+    short_name: str | None = None,
+) -> Path:
+    """Record the added name in ``ticker_names.json`` without dropping other keys.
+
+    A ``{"names": {...}}`` book, a flat ticker→string map, and a list are all
+    updated in place. A missing file is created as a names book.
+    """
+    base = Path(root) if root is not None else HERE
+    path = base / TICKER_NAMES_FILENAME
+    key = name_key(ticker)
+    short = short_symbol(ticker)
+    entry = {
+        "ticker": key,
+        "name": name or short,
+        "short_name": short_name or short,
+    }
+    data: Any
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {"names": {}}
+    else:
+        data = {"names": {}}
+    if isinstance(data, dict) and isinstance(data.get("names"), dict):
+        data["names"][key] = entry
+        data["names"].setdefault(short, entry)
+    elif isinstance(data, dict):
+        sample = next((v for v in data.values() if not str(v).startswith("__")), None)
+        if sample is None or isinstance(sample, str):
+            data[key] = entry["name"]
+            data.setdefault(short, entry["short_name"])
+        else:
+            data[key] = entry
+            data.setdefault(short, entry)
+    elif isinstance(data, list):
+        have = {str(item) for item in data}
+        if key not in have and short not in have:
+            data.append(key)
+    else:
+        data = {"names": {key: entry}}
+    path.write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")
+    return path
+
+
+def _identity_rows(session: Any | None, tickers: Sequence[str]) -> dict[str, dict[str, Any]]:
+    wrapped = wrap_session(session)
+    if wrapped is None or isinstance(wrapped, NullSession) or not tickers:
+        return {}
+    fields = flatten_candidates(("security_name", "short_name", "gics_sector_name", "px_last"))
+    try:
+        rows, _skips, _cap = batch_refdata(wrapped, list(tickers), fields)
+    except CapacityError as exc:
+        LOG.warning("add identity skipped (capacity): %s", exc.reason)
+        return {}
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("add identity skipped: %s", exc)
+        return {}
+    return rows
+
+
+def upsert_add_names(
+    tickers: Sequence[str],
+    *,
+    root: Path | None = None,
+    session: Any | None = None,
+    prices_ctx: Mapping[str, Any] | None = None,
+    px_by_ticker: Mapping[str, Any] | None = None,
+    open_session: bool = True,
+) -> dict[str, Any]:
+    """Merge new tickers into ``dapi_enrichment.json``.
+
+    Tries one DAPI enrich for the new names. On capacity, a dead session, or
+    no resolved fields, still writes a ``names[ticker]`` stub (short name, px
+    and GICS when a source has them) so the desk card universe includes them.
+    Existing names are kept. A failed enrich does not replace a resolved row
+    with nulls.
+    """
+    base = Path(root) if root is not None else HERE
+    dest = default_out_path(base)
+    loaded = load_enrichment(dest)
+    working: dict[str, Any] = {
+        "asof": (loaded or {}).get("asof") or _now_iso(),
+        "names": {},
+        "meta": dict((loaded or {}).get("meta") or {}) if isinstance((loaded or {}).get("meta"), Mapping) else {},
+    }
+    prev = (loaded or {}).get("names") if isinstance(loaded, Mapping) else None
+    if isinstance(prev, dict):
+        for key, rec in prev.items():
+            working["names"][key] = dict(rec) if isinstance(rec, Mapping) else {"ticker": key}
+
+    ordered = _dedupe_tickers(tickers)
+    if px_by_ticker is None:
+        px_by_ticker = last_prices(base)
+
+    enrich_error: str | None = None
+    partial_names: dict[str, Any] = {}
+    sess = session
+    if ordered and sess is None and open_session:
+        try:
+            sess = open_dapi_session()
+        except CapacityError as exc:
+            enrich_error = f"capacity:{exc.reason}"
+            sess = None
+        except Exception as exc:  # noqa: BLE001
+            enrich_error = str(exc)
+            sess = None
+    if ordered:
+        try:
+            partial = enrich_book(
+                ordered,
+                sess if sess is not None else NullSession(),
+                prices_ctx=prices_ctx,
+                write=False,
+                root=base,
+            )
+            raw_names = partial.get("names") if isinstance(partial, Mapping) else None
+            if isinstance(raw_names, dict):
+                partial_names = raw_names
+            meta = partial.get("meta") if isinstance(partial, Mapping) else None
+            if isinstance(meta, Mapping) and meta.get("capacity_skipped") and not enrich_error:
+                enrich_error = "capacity_skipped"
+            skips = list(meta.get("skips") or []) if isinstance(meta, Mapping) else []
+            if any(str(s).startswith("chunk:") for s in skips) and not enrich_error:
+                enrich_error = "enrich_chunk_failed"
+        except Exception as exc:  # noqa: BLE001
+            enrich_error = str(exc)
+            LOG.warning("add enrich failed (stub remains): %s", exc)
+            partial_names = {}
+
+    identity = _identity_rows(sess, ordered)
+
+    names: dict[str, Any] = working["names"]
+    per_name: dict[str, Any] = {}
+    for key in ordered:
+        fresh = partial_names.get(key) or partial_names.get(name_key(key))
+        if not isinstance(fresh, dict):
+            fresh = build_name_record(key, {}, prices_ctx=prices_ctx)
+        else:
+            fresh = dict(fresh)
+        raw_id = identity.get(key) or identity.get(name_key(key)) or {}
+        overlay_identity_fields(fresh, raw_id if isinstance(raw_id, Mapping) else {})
+        short = short_symbol(key)
+        if not fresh.get("name"):
+            fresh["name"] = short
+        if not fresh.get("short_name"):
+            fresh["short_name"] = short
+        fresh["ticker"] = key
+        _apply_px_from_maps(fresh, key, prices_ctx, px_by_ticker)
+        resolved = dapi_fields_resolved(fresh)
+        fresh["limited_history"] = not resolved
+        fresh["enrich_stub"] = not resolved
+        prior = names.get(key)
+        if isinstance(prior, Mapping) and dapi_fields_resolved(prior) and not resolved:
+            kept = dict(prior)
+            for field in ("name", "short_name", "px_last", "gics_sector_name"):
+                if not kept.get(field) and fresh.get(field):
+                    kept[field] = fresh[field]
+            if kept.get("px_last") is None:
+                _apply_px_from_maps(kept, key, prices_ctx, px_by_ticker)
+            names[key] = kept
+            resolved = True
+        else:
+            names[key] = fresh
+        per_name[key] = {"enrich_ok": resolved, "stubbed": not resolved}
+        merge_ticker_names(
+            base,
+            key,
+            name=str(names[key].get("name") or short),
+            short_name=str(names[key].get("short_name") or short),
+        )
+
+    meta = working.setdefault("meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
+        working["meta"] = meta
+    if enrich_error:
+        skips = list(meta.get("skips") or [])
+        skips.append(f"add_enrich:{enrich_error}")
+        meta["skips"] = skips
+        meta["add_enrich_error"] = enrich_error
+    meta["add_names"] = per_name
+    working["asof"] = _now_iso()
+    write_enrichment(working, dest)
+    working["meta"] = meta
+    return working
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1648,6 +2133,9 @@ def discover_tickers(root: Path | None = None, extra: Sequence[str] | None = Non
         if candidate.is_file():
             found.extend(_read_universe(candidate))
             break
+    extra_path = base / UNIVERSE_EXTRA_FILENAME
+    if extra_path.is_file():
+        found.extend(_read_universe(extra_path))
     if not found:
         for json_name in (OPTIONS_ABNORMAL_FILENAME, ENRICH_FILENAME):
             p = base / json_name

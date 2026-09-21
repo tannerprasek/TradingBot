@@ -676,4 +676,36 @@ python -c "from pathlib import Path; import breakout, paper_trade, s_score; p=Pa
 
 `ensure_embedded` order matches live `write_combined`: Breakout, then Paper, then Experimental. Live HTML is the **sibling** `C:\Users\MLP\Desktop\factorbook.html`, not `Desktop\factorbook\factorbook.html`. Hard-reload (Ctrl+F5). Confirm Paper stays on Paper (`#view-paper.fd-paper-on`, `#home` stays hidden) and Breakout card click still opens name-drill.
 
+---
+
+## 13) Add-to-book — new symbols must land in the live desk HTML
+
+Symptom (2026-09-21, TSEM): `universe_extra.txt` and `v0/residual_last.csv` had the name, `run_v0` wrote a residual, `write_combined` rewrote the ~MB `factorbook.html`, and the HTML still had **zero** copies of the short symbol. `dapi_enrichment.json` / `ticker_names.json` never received it. `cards_from_enrichment` only walked enrich `names`, so search/cards stayed empty.
+
+Source of truth is this folder. Copy the Python files below into the live tree. Do **not** treat a one-off edit of `C:\Users\MLP\Desktop\factorbook.html` as the fix, and do **not** bring back a skinny `__PAYLOAD__` `write_dash`. The live-desk size guard (refuse to replace a ≥1MB desk with a legacy shell) stays.
+
+### What the copy does
+
+1. `POST /api/add` → `add_server.do_add`: history (if `pull_blpapi_live.pull_history` / `pull_hist` / `fetch_history` / `add_history` exists) → price merge (if `pull_blpapi_live.merge_prices` or `clean_ingest.merge_prices` exists) → append `universe_extra.txt` → merge the ticker into `dapi_enrichment.json` (name / short_name / GICS / pills / px when DAPI or the price file has them; otherwise a stub `names[ticker]`) → `run_rebuild`.
+2. A missing Bloomberg helper is skipped. A DAPI failure still leaves the name in the book. The status says so (`TSEM is in the book. … still searchable.`) and does not report Add failed.
+3. `desk_dash.cards_from_enrichment` unions enrich names with `universe_extra.txt` and `v0/residual_last.csv` (same snapshot names as `residual_last.csv`). Limited-history cards are fine.
+4. `write_combined` embeds `#fd-search-book` (short symbol `t`, yellow `ticker`) and a boot script that merges those rows into `window.BOOK` / `window.NAMES` / `window.MOM.search`. Fat chrome is patched, not replaced.
+
+`discover_tickers` also reads `universe_extra.txt`, so the next Refresh re-enriches added names instead of dropping the stub.
+
+### Copy into `C:\Users\MLP\Desktop\factorbook`
+
+| File | Notes |
+| --- | --- |
+| `add_server.py` | **recopy** — `do_add` + `POST /api/add`. History/merge call Desktop modules when those entry points exist. |
+| `dapi_enrich.py` | **recopy** — `upsert_add_names`, `universe_extra.txt`, `ticker_names.json`, residual-last ticker scan |
+| `desk_dash.py` | **recopy** — card-universe union + `#fd-search-book`. This file already includes the live-desk size guard. |
+
+Do **not** copy `factorbook.html`, `dapi_enrichment.json`, or `ticker_names.json` from git. After the copy, restart the sidecar and Add once (or run `python write_dash.py` from `C:\Users\MLP\Desktop\factorbook`). Confirm:
+
+1. `dapi_enrichment.json` `names` contains the new yellow key (`TSEM US Equity`), even when DAPI fields are null.
+2. Parent `C:\Users\MLP\Desktop\factorbook.html` `#fd-search-book` contains the short symbol `TSEM`.
+3. The file stays ≥ 1MB and still has Refresh / Momentum Up / Momentum Down / Outliers / Options.
+4. If enrich does not fill, the Add status still says the name is in the book.
+
 

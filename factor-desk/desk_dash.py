@@ -332,33 +332,230 @@ def pills_html(pills: Any) -> str:
     return "".join(bits)
 
 
-def cards_from_enrichment(book: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+def _card_from_name(ticker: str, rec: Mapping[str, Any] | None) -> dict[str, Any]:
+    row = rec if isinstance(rec, Mapping) else {}
+    short = dapi_enrich.short_symbol(str(ticker))
+    return {
+        "ticker": ticker,
+        "name": row.get("name") or ticker,
+        "t": short,
+        "d": short,
+        "short_name": row.get("short_name") or short,
+        "limited_history": bool(row.get("limited_history")),
+        "si_ratio": row.get("si_ratio"),
+        "vol_regime": row.get("vol_regime"),
+        "liq": row.get("liq"),
+        "inst_pct": row.get("inst_pct"),
+        "event_days": row.get("event_days"),
+        "beta": row.get("beta"),
+        "credit": row.get("credit"),
+        "enrich_pills": list(row.get("enrich_pills") or []),
+        "gics_sector_name": row.get("gics_sector_name"),
+        "mom_score": row.get("mom_score"),
+        "tag_triggers": row.get("tag_triggers") or row.get("tags"),
+        "px_last": row.get("px_last"),
+        "px_series": row.get("px_series") or row.get("prices") or row.get("closes"),
+    }
+
+
+def cards_from_enrichment(
+    book: Mapping[str, Any] | None,
+    root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Card universe = enrich names ∪ ``universe_extra.txt`` ∪ residual-last tickers.
+
+    A name that Add merged into prices / ``v0/residual_last.csv`` still gets a
+    limited-history card when ``dapi_enrichment.json`` never saw it. Search
+    uses the short symbol (``TSEM``), not only the yellow key.
+    """
     cards: list[dict[str, Any]] = []
+    seen: set[str] = set()
     names = (book or {}).get("names") if isinstance(book, Mapping) else None
-    if not isinstance(names, dict):
+    if isinstance(names, dict):
+        for ticker, rec in names.items():
+            card = _card_from_name(str(ticker), rec if isinstance(rec, Mapping) else {})
+            cards.append(card)
+            seen.add(dapi_enrich.name_key(str(ticker)))
+            short = dapi_enrich.short_symbol(str(ticker))
+            if short:
+                seen.add(short)
+    if root is None:
         return cards
-    for ticker, rec in names.items():
-        if not isinstance(rec, Mapping):
-            rec = {}
-        card: dict[str, Any] = {
-            "ticker": ticker,
-            "name": ticker,
-            "si_ratio": rec.get("si_ratio"),
-            "vol_regime": rec.get("vol_regime"),
-            "liq": rec.get("liq"),
-            "inst_pct": rec.get("inst_pct"),
-            "event_days": rec.get("event_days"),
-            "beta": rec.get("beta"),
-            "credit": rec.get("credit"),
-            "enrich_pills": list(rec.get("enrich_pills") or []),
-            "gics_sector_name": rec.get("gics_sector_name"),
-            "mom_score": rec.get("mom_score"),
-            "tag_triggers": rec.get("tag_triggers") or rec.get("tags"),
-            "px_last": rec.get("px_last"),
-            "px_series": rec.get("px_series") or rec.get("prices") or rec.get("closes"),
-        }
+    for ticker in dapi_enrich.book_extra_tickers(root):
+        key = dapi_enrich.name_key(ticker)
+        short = dapi_enrich.short_symbol(key)
+        if not key or key in seen or (short and short in seen):
+            continue
+        card = _card_from_name(
+            key,
+            {
+                "name": short or key,
+                "short_name": short or key,
+                "limited_history": True,
+                "enrich_stub": True,
+            },
+        )
         cards.append(card)
+        seen.add(key)
+        if short:
+            seen.add(short)
     return cards
+
+
+SEARCH_BOOK_ID = "fd-search-book"
+SEARCH_BOOK_JS_ID = "fd-search-book-js"
+
+_SEARCH_BOOK_JS = r"""
+(function () {
+  var el = document.getElementById("fd-search-book");
+  if (!el || window.__FD_SEARCH_BOOK_BOUND__) return;
+  window.__FD_SEARCH_BOOK_BOUND__ = true;
+  function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
+  function read() {
+    try { return JSON.parse(el.textContent || "{}") || {}; }
+    catch (e) { return {}; }
+  }
+  function rowsOf(payload) {
+    var names = (payload && payload.names) || {};
+    var out = [];
+    var seen = {};
+    Object.keys(names).forEach(function (k) {
+      var rec = names[k] || {};
+      var t = shortOf(rec.t || rec.short_name || k);
+      if (!t || seen[t]) return;
+      seen[t] = true;
+      out.push({
+        t: t,
+        d: rec.d || t,
+        ticker: rec.ticker || k,
+        name: rec.name || rec.short_name || t,
+        short_name: rec.short_name || t,
+        px_last: rec.px_last,
+        gics_sector_name: rec.gics_sector_name,
+        limited_history: !!rec.limited_history
+      });
+    });
+    return out;
+  }
+  function listed(bag, t) {
+    if (!bag) return false;
+    if (Array.isArray(bag)) {
+      for (var i = 0; i < bag.length; i++) {
+        var c = bag[i] || {};
+        if (shortOf(c.t || c.ticker || c.d || c.name || c.symbol) === t) return true;
+      }
+      return false;
+    }
+    if (typeof bag === "object") {
+      if (bag[t]) return true;
+      var keys = Object.keys(bag);
+      for (var j = 0; j < keys.length; j++) if (shortOf(keys[j]) === t) return true;
+    }
+    return false;
+  }
+  function pushArr(arr, row) {
+    if (!Array.isArray(arr)) return;
+    if (!listed(arr, row.t)) arr.push(row);
+  }
+  function putMap(map, row) {
+    if (!map || typeof map !== "object" || Array.isArray(map)) return;
+    if (!map[row.t]) map[row.t] = row;
+    if (row.ticker && !map[row.ticker]) map[row.ticker] = row;
+  }
+  function merge() {
+    var payload = read();
+    var rows = rowsOf(payload);
+    window.BOOK = window.BOOK || {};
+    if (!window.BOOK.names || typeof window.BOOK.names !== "object" || Array.isArray(window.BOOK.names)) {
+      window.BOOK.names = {};
+    }
+    window.NAMES = window.NAMES || {};
+    window.MOM = window.MOM || {};
+    if (!Array.isArray(window.MOM.cards)) window.MOM.cards = [];
+    if (!Array.isArray(window.MOM.search)) window.MOM.search = [];
+    if (!Array.isArray(window.MOM.all)) window.MOM.all = [];
+    if (!Array.isArray(window.CARDS)) window.CARDS = [];
+    if (!Array.isArray(window.MOM_CARDS)) window.MOM_CARDS = [];
+    rows.forEach(function (row) {
+      putMap(window.BOOK.names, row);
+      putMap(window.NAMES, row);
+      putMap(window.BOOK, row);
+      pushArr(window.MOM.cards, row);
+      pushArr(window.MOM.search, row);
+      pushArr(window.MOM.all, row);
+      pushArr(window.CARDS, row);
+      pushArr(window.MOM_CARDS, row);
+    });
+    window.__FD_SEARCH_BOOK__ = payload;
+  }
+  merge();
+  document.addEventListener("input", function (ev) {
+    var node = ev.target;
+    if (!node) return;
+    var blob = String(node.id || "") + " " + String(node.className || "") + " " +
+      String((node.getAttribute && node.getAttribute("placeholder")) || "");
+    if (/search|ticker|symbol/i.test(blob)) merge();
+  }, true);
+})();
+""".strip()
+
+
+def search_book_payload(cards: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
+    """Short-symbol search/book map written into the live desk HTML."""
+    names: dict[str, Any] = {}
+    for card in cards or []:
+        if not isinstance(card, Mapping):
+            continue
+        ticker = str(card.get("ticker") or card.get("name") or "").strip()
+        short = dapi_enrich.short_symbol(str(card.get("t") or card.get("short_name") or ticker))
+        if not short:
+            continue
+        entry = {
+            "t": short,
+            "d": short,
+            "ticker": ticker or short,
+            "name": card.get("name") or card.get("short_name") or short,
+            "short_name": card.get("short_name") or short,
+            "px_last": card.get("px_last"),
+            "gics_sector_name": card.get("gics_sector_name"),
+            "limited_history": bool(card.get("limited_history")),
+        }
+        names[short] = entry
+        if ticker and ticker != short:
+            names[ticker] = entry
+    return {"names": names}
+
+
+def ensure_search_book(html_text: str, cards: Iterable[Mapping[str, Any]] | None = None) -> str:
+    """Embed ``#fd-search-book`` and merge those names into BOOK / NAMES / MOM search.
+
+    Live ``write_combined`` patches fat chrome and does not rebuild the
+    desktop card array. Without this payload a residual-only Add never
+    appears in search. Not a ``__PAYLOAD__`` splice.
+    """
+    payload = search_book_payload(cards)
+    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=True, default=str).replace("</", "<\\/")
+    tag = f'<script type="application/json" id="{SEARCH_BOOK_ID}">{blob}</script>'
+    script = f'<script id="{SEARCH_BOOK_JS_ID}">\n{_SEARCH_BOOK_JS}\n</script>'
+    text = html_text or ""
+    text = re.sub(
+        rf'<script\b[^>]*\bid=["\']{re.escape(SEARCH_BOOK_ID)}["\'][^>]*>.*?</script>\s*',
+        "",
+        text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    text = re.sub(
+        rf'<script\b[^>]*\bid=["\']{re.escape(SEARCH_BOOK_JS_ID)}["\'][^>]*>.*?</script>\s*',
+        "",
+        text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    block = tag + "\n" + script + "\n"
+    if "</body>" in text:
+        return text.replace("</body>", block + "</body>", 1)
+    return text + block
 
 
 def _fmt(value: Any, digits: int = 2) -> str:
@@ -2417,7 +2614,7 @@ def render_html(
     if cache is None:
         cache = dapi_enrich.load_gics_cache()
     if cards is None:
-        cards = cards_from_enrichment(book)
+        cards = cards_from_enrichment(book, root=root)
     cards = attach_all(
         list(cards),
         book,
@@ -2542,6 +2739,7 @@ def render_html(
     html_text = paper_trade.ensure_embedded(html_text, paper_marks)
     html_text = s_score.ensure_embedded(html_text, ss_ranked)
     html_text = portfolio.ensure_embedded(html_text)
+    html_text = ensure_search_book(html_text, cards)
     return ensure_mom_status_filter(_ensure_options_refresh_ui(html_text))
 
 
@@ -2558,7 +2756,9 @@ def write_combined(
     GICS sector-filter strip and book-delta strip are BINNED: leftover hosts
     are removed on every write. G1–G12 group chips stay.
 
-    Enrichment is files-based (``dapi_enrichment.json`` / ``book``). There is
+    Enrichment is files-based (``dapi_enrichment.json`` / ``book``). The card
+    universe also includes ``universe_extra.txt`` and ``v0/residual_last.csv``
+    so an Add that never landed in enrich is still searchable. There is
     no ``factor_payload=`` argument and no legacy ``__PAYLOAD__`` splice.
 
     When ``path`` is omitted and ``<root>/factorbook.html`` is skinny or
@@ -2571,7 +2771,7 @@ def write_combined(
         book = load_enrichment(base)
     cache = dapi_enrich.load_gics_cache(root=base)
     if cards is None:
-        cards = cards_from_enrichment(book)
+        cards = cards_from_enrichment(book, root=base)
     cards = [dict(c) for c in cards]
     hist = mom_streak.rebuild_hist_for_cards(cards, root=base, write=True)
     series, _src = mom_streak.discover_score_series(base, hist=hist)
@@ -2626,6 +2826,7 @@ def write_combined(
     text = paper_trade.ensure_embedded(text, paper_marks)
     text = s_score.ensure_embedded(text, ss_ranked)
     text = portfolio.ensure_embedded(text)
+    text = ensure_search_book(text, cards)
     text = ensure_mom_status_filter(text)
     # Gate before any write. Binder/label failures never hit disk.
     # A document under LIVE_MIN_BYTES always fails assert_nav_integrity.
