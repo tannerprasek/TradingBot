@@ -86,52 +86,38 @@ class DiffTests(unittest.TestCase):
             self.assertEqual(loaded["flags"], ["DT US Equity"])
             self.assertEqual(loaded["names"]["DT US Equity"]["score"], 8)
 
-    def test_ensure_embedded_host(self) -> None:
+    def test_ensure_embedded_removes_host(self) -> None:
         diff = bd.diff_snapshots(None, {"names": {}, "flags": [], "watch": [], "outliers": []})
-        html = bd.ensure_embedded("<html><body><nav></nav></body></html>", diff)
-        self.assertIn('id="fd-book-delta"', html)
-        self.assertIn("baseline set", html)
-        self.assertIn("fd-book-delta-db", html)
-        self.assertIn(f'id="{bd.CSS_STYLE_ID}"', html)
-        self.assertIn("gap: 6px", html)
-        self.assertIn("fd-book-delta-kicker", html)
+        html = bd.ensure_embedded(
+            "<html><body><nav></nav>"
+            '<div id="fd-book-delta" class="fd-book-delta">'
+            '<span class="fd-book-delta-kicker">since last Refresh</span>'
+            '<div class="fd-book-delta-extra is-on"><span class="fd-dchip">x</span></div>'
+            "</div>"
+            f'<style id="{bd.CSS_STYLE_ID}">#{bd.HOST_ID}{{}}</style>'
+            f'<script type="application/json" id="{bd.DB_SCRIPT_ID}">{{}}</script>'
+            f'<script id="{bd.JS_SCRIPT_ID}">var HOST = "fd-book-delta";</script>'
+            "</body></html>",
+            diff,
+        )
+        self.assertNotIn('id="fd-book-delta"', html)
+        self.assertNotIn("baseline set", html)
+        self.assertNotIn("fd-book-delta-db", html)
+        self.assertNotIn(f'id="{bd.CSS_STYLE_ID}"', html)
+        self.assertNotIn("fd-book-delta-kicker", html)
+        self.assertIn("<nav></nav>", html)
 
+    @unittest.skip("Book-delta strip UI BINNED — kicker is not embedded")
     def test_kicker_own_row_readable_not_crowded(self) -> None:
-        diff = {
-            "baseline": False,
-            "chips": [
-                {"label": "OUT +DKS +GTLB", "cls": "delta-out", "title": "New outliers"},
-                {"label": "CRWD +2", "cls": "delta-jump", "title": "CRWD"},
-            ],
-            "extra": [{"label": "extra", "cls": "delta-jump", "title": "x"}],
-        }
+        diff = {"baseline": False, "chips": [], "extra": []}
         html = bd.ensure_embedded("<html><head></head><body><nav></nav></body></html>", diff)
-        self.assertIn("since last Refresh", html)
-        self.assertIn('class="fd-book-delta-kicker">since last Refresh</span>', html)
-        kicker_at = html.index("fd-book-delta-kicker")
-        pills_at = html.index("OUT +DKS")
-        self.assertLess(kicker_at, pills_at)
-        css = bd.strip_css()
-        block = css.split(".fd-book-delta-kicker", 1)[1].split(".fd-dchip", 1)[0]
-        self.assertIn("flex: 0 0 100%", block)
-        self.assertIn("#9ca3af", block)
-        self.assertNotIn("uppercase", block)
-        self.assertNotIn("#6b7280", block)
-        js = bd.strip_js()
-        self.assertIn('kicker.textContent = data.baseline ? "book" : "since last Refresh"', js)
-        again = bd.ensure_embedded(html.replace("since last Refresh", "gone", 1), diff)
-        self.assertIn("since last Refresh", again)
-        self.assertEqual(again.count('id="fd-book-delta"'), 1)
+        self.assertNotIn("since last Refresh", html)
 
+    @unittest.skip("Book-delta strip UI BINNED — CSS is not re-injected")
     def test_css_style_id_replaces_on_resync(self) -> None:
         diff = bd.diff_snapshots(None, {"names": {}, "flags": [], "watch": [], "outliers": []})
         html = bd.ensure_embedded("<html><head></head><body></body></html>", diff)
-        stale = html.replace("gap: 6px", "gap: 99px", 1)
-        self.assertIn("gap: 99px", stale)
-        again = bd.ensure_embedded(stale, diff)
-        self.assertEqual(again.count(f'id="{bd.CSS_STYLE_ID}"'), 1)
-        self.assertIn("gap: 6px", again)
-        self.assertNotIn("gap: 99px", again)
+        self.assertNotIn(f'id="{bd.CSS_STYLE_ID}"', html)
 
     def test_streak_fragment_spacing(self) -> None:
         self.assertEqual(bd.format_streak_fragment("↓1d<5"), "↓ 1d<5")

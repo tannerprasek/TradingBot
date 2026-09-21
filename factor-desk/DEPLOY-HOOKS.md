@@ -4,6 +4,8 @@ Copy `dapi_enrich.py` next to the live `add_server.py` at `C:\Users\MLP\Desktop\
 
 Writes `dapi_enrichment.json` beside `options_abnormal.json`. Missing file is fine. Capacity (`BLOOMBERG_LIMIT`) must not abort Refresh.
 
+**GICS sector-filter strip and book-delta (since-last-Refresh) strip are BINNED** (Tanner request): `gics_filter.ensure_embedded` / `book_delta.ensure_embedded` **remove** leftover `#gics-filter-strip` / `#fd-book-delta` on Refresh. Do **not** paste those hosts, their CSS, or their JS. G1–G12 group chips stay. Card `overlay_sector` / `data-gics-sector` may remain.
+
 ---
 
 ## 1) `add_server.py`
@@ -173,87 +175,41 @@ Function used: `dapi_enrich.summarize_skew`.
 
 ---
 
-## 5) GICS sector chips (filter strip only)
+## 5) GICS names on cards (filter strip BINNED)
 
-**Do not** add a Sectors tab, `sectors.py`, `sectors.json`, or a Refresh stage. Copy `gics_filter.py` next to live `dapi_enrich.py`. Copy the updated `dapi_enrich.py` (GICS parse / `--gics-once` / cache). Paste the blocks below into live `desk_dash.py` / `factorbook.html`.
+**Do not** add a Sectors tab, `sectors.py`, `sectors.json`, or a Refresh stage. **Do not** paste `#gics-filter-strip` / GICS chip CSS/JS — the sector **filter strip is BINNED** (removed, not polished). G1–G12 group chips stay. Copy `gics_filter.py` so Refresh **deletes** leftover strip hosts.
 
 ### `desk_dash.py`
 
 ```python
 import gics_filter
 
-# after attach_card_fields(card, _rec)
+# after attach_card_fields(card, _rec) — data only, no strip UI
 gics_filter.overlay_sector(card, _rec, cache=dapi_enrich.load_gics_cache())
 ```
 
-When emitting each card/row, set `data-t` **and** `data-ticker` (already present) and `data-gics-sector`:
+When emitting each card/row, `data-gics-sector` may stay (not a filter strip):
 
 ```python
 sector = card.get("gics_sector_name") or ""
 # <article class="card" data-t="..." data-ticker="..." data-gics-sector="{sector}">
 ```
 
-In the **existing top filter strip** (next to G1–G12 / tags), add an empty host — JS fills chips:
-
-```html
-<span id="gics-filter-strip" class="filter-strip gics-chips" role="toolbar" aria-label="GICS sector filter"></span>
-```
-
-**Every HTML write** (end of live `write_combined` / `write_dash`) must re-embed a **filled** map + strip JS. Host/CSS surviving is not enough — `#gics-sector-db` and `STRIP_ID` were getting wiped.
+**Every HTML write** (end of live `write_combined` / `write_dash`) must **remove** leftover strip UI. Recopy `gics_filter.py`.
 
 ```python
 # after the combined HTML string exists, BEFORE dest.write_text
-db = json.loads(desk_dash._gics_sector_db_json(book=book, cards=cards, cache=dapi_enrich.load_gics_cache(), root=root))
-# or: db = gics_filter.filled_sector_db(cards, cache=..., book=book)
-if "__GICS_SECTOR_DB__" in html:
-    html = html.replace("__GICS_SECTOR_DB__", json.dumps(db, separators=(",", ":")))
-html = gics_filter.ensure_embedded(html, db)
+# ensure_embedded is a strip-remover (BINNED). Do not bake chips.
+html = gics_filter.ensure_embedded(html, None)
 ```
 
 If live `factorbook.html` is already ~2.7MB with Refresh / Momentum Up / Momentum Down / Outliers / Options, **patch that file**. Do not replace it with the cloud skinny grid.
 
-Functions used: `gics_filter.overlay_sector`, `gics_filter.filled_sector_db`, `gics_filter.ensure_embedded`, `gics_filter.strip_css`, `gics_filter.strip_js`, `desk_dash._gics_sector_db_json`, `desk_dash.write_combined`.
+Functions used: `gics_filter.overlay_sector`, `gics_filter.ensure_embedded` (now removes `#gics-filter-strip`).
 
-### live `factorbook.html` — CSS (paste with other G-chip rules)
+### live `factorbook.html`
 
-```css
-.filter-strip, .gics-chips {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  margin: 0 0 10px;
-  vertical-align: middle;
-}
-.filter-chip, .gchip {
-  display: inline-block;
-  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.04em;
-  padding: 2px 7px;
-  margin: 0;
-  border-radius: 3px;
-  border: 1px solid #6b7280;
-  color: #d1d5db;
-  background: #111827;
-  text-transform: none;
-  vertical-align: middle;
-  cursor: pointer;
-}
-.filter-chip:hover, .gchip:hover { border-color: #9ca3af; color: #f3f4f6; }
-.filter-chip.active, .gchip.active {
-  color: #93c5fd;
-  border-color: #60a5fa;
-  background: #1e3a5f;
-}
-.filter-chip[data-gics-chip=""] { letter-spacing: 0.06em; }
-.gics-hid { display: none !important; }
-```
-
-### live `factorbook.html` — JS
-
-Paste `gics_filter.strip_js()` before `</body>` (or copy `gics_filter.py` and emit it from `desk_dash`). The script only toggles `.gics-hid` on cards/rows. It does not change Momentum Up/Down, Outliers, Options, Refresh, or FLAGS/WATCH selection.
-
-Host: `#gics-filter-strip` inside the existing filter row. Map: `<script type="application/json" id="gics-sector-db">{...}</script>` ticker → `gics_sector_name`.
+Do **not** paste a GICS filter host, `#gics-filter-css`, `#gics-filter-js`, or `#gics-sector-db`. Recopy `gics_filter.py` and Refresh once; leftover strip markup is deleted. Keep the existing G1–G12 / `.gchip` row.
 
 ### Optional one-shot DAPI (not Refresh)
 
@@ -302,26 +258,26 @@ Score is the home UP/DOWN rank (`mom_score` first, then card `score` in 0–20).
 Same tail as GICS — always re-embed, and **never clobber** a ~2.7MB live file:
 
 ```python
-html = gics_filter.ensure_embedded(html, db)
+html = gics_filter.ensure_embedded(html, None)  # BINNED: removes leftover GICS strip
 html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
 # then write factorbook.html
 ```
 
-Cards should keep `data-t` (and `data-ticker`) so both GICS chips and streak tags resolve after a Refresh write.
+Cards should keep `data-t` (and `data-ticker`) so streak tags resolve after a Refresh write.
 
 ### CoS deploy checklist (Desktop `C:\Users\MLP\Desktop\factorbook`)
 
 | Copy into Desktop | Notes |
 | --- | --- |
 | `mom_streak.py` | new |
-| `gics_filter.py` | replace with this version (`ensure_embedded`, `data-t`) |
+| `gics_filter.py` | replace with this version (`ensure_embedded` **removes** leftover GICS strip) |
 | `desk_dash.py` hooks | `write_combined` tail + `_gics_sector_db_json`; do not replace FLAGS/WATCH/MOM |
 | `write_dash.py` | `write()` → `desk_dash.write_combined` |
 | `momentum_screen.py` hook | `mom_streak.attach_card(row)` after enrich attach |
 | `dapi_enrich.py` | already has `gics_sector_name` parse / cache |
 | `docs/MOM-STREAK.md`, `docs/GICS-FILTER.md` | optional, for the desk |
 
-Do **not** copy generated `factorbook.html`, `dapi_enrichment.json`, `gics_sectors.json`, `mom_score_hist.json`. After drop-in, run Refresh once and confirm GICS chips + streak tags are still in the HTML source (`#gics-sector-db` filled, `STRIP_ID` present, `↑`/`↓`/`=5` pills).
+Do **not** copy generated `factorbook.html`, `dapi_enrichment.json`, `gics_sectors.json`, `mom_score_hist.json`. After drop-in, run Refresh once and confirm streak tags are still in the HTML source (`↑`/`↓`/`=5` pills) and the GICS filter strip is **gone**.
 
 Empty / thin `mom_score_hist.json` (missing, median series length < 5, or only today’s asof) **auto-backfills** from `prices_long.csv` using `trend_window_score` over the last ~120 trading days on `write_combined` / Refresh. Copy updated `mom_streak.py`. Do not commit the hist file.
 
@@ -390,7 +346,7 @@ Copy `chart_marks.py` next to live `desk_dash.py`. End of live `write_combined`:
 ```python
 import chart_marks
 
-html = gics_filter.ensure_embedded(html, db)
+html = gics_filter.ensure_embedded(html, None)  # BINNED: removes leftover GICS strip
 html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
 html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
 # _ensure_options_refresh_ui(html)  # keep Options Refresh on Refresh rewrites
@@ -402,7 +358,7 @@ Also copy `mom_streak.py` (now has `streak_span` / `mom_streak_start` / `mom_str
 
 ---
 
-## 9) Breakout / Breakdown tabs + book-delta strip + Desk Analyst hitch
+## 9) Breakout / Breakdown tabs + Desk Analyst hitch (book-delta strip BINNED)
 
 Copy `card_render.py`, `breakout.py`, `book_delta.py`, `desk_hitch.py` next to live `desk_dash.py`. **Do not** reintroduce a Sectors tab. **Do not** add a DAPI stage. **Recopy `card_render.py` and `breakout.py`** after this hot-fix; **do not wholesale replace** live `desk_dash.py` (paste the `write_combined` tail below if that hook is not already there).
 
@@ -425,12 +381,12 @@ ranked = breakout.rank_book(cards, hist=hist)
 snap = book_delta.snapshot_from_cards(cards, asof=str((hist or {}).get("asof") or ""))
 delta = book_delta.diff_snapshots(book_delta.load_snapshot(root=PATHS["fb_root"]), snap)
 
-html = gics_filter.ensure_embedded(html, db)
+html = gics_filter.ensure_embedded(html, None)  # BINNED: removes leftover GICS strip
 html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
 html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
 html = card_render.ensure_embedded(html)           # wrap live cardHTML; portable chip CSS
 html = breakout.ensure_embedded(html, ranked)      # Breakout/Breakdown nav + view shells + #fd-breakout-db
-html = book_delta.ensure_embedded(html, delta)      # #fd-book-delta strip
+html = book_delta.ensure_embedded(html, None)  # BINNED: removes leftover #fd-book-delta
 html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
 # dest.write_text(html)
 book_delta.write_snapshot(snap, root=PATHS["fb_root"])  # gitignored desk_snapshot.json
@@ -516,13 +472,13 @@ Pills (`DA·A` / `DA·B` / `DA·C` / `DA`) appear when a recent `YYYY-MM-DD-*.md
 | --- | --- |
 | `card_render.py` | **recopy** — wrap live `cardHTML`; portable chip CSS; `__FD_RENDER_CARD__` / `__FD_RENDER_ROW__`; Day/R20/RS63/ATR% aliases |
 | `breakout.py` | **recopy** — `renderRow` = find MOM card by ticker → `cardHTML(card)` (full Mom chrome); scrape live HTML `"metrics":{r20_pct,rs_63,atr_pct}` onto `#fd-breakout-db`; capture click on BB cards → `selectTicker` (not `show(breakdown)`); `fmtAtr` does not `*100` when `abs(atr_pct)>=1` |
-| `book_delta.py` | new — since-last-Refresh strip |
+| `book_delta.py` | recopy — `ensure_embedded` **removes** leftover `#fd-book-delta` (strip BINNED) |
 | `desk_hitch.py` | new — DA hitch pills |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
 | `docs/BREAKOUT-BREAKDOWN.md` | optional, for the desk |
 | gitignore `desk_snapshot.json` | local, like `mom_score_hist.json` |
 
-Do **not** copy generated `factorbook.html`, `desk_snapshot.json`, `mom_score_hist.json`, or the ideas markdown. After drop-in, call `card_render.ensure_embedded` then `breakout.ensure_embedded(html, ranked)` on the **live ~4.8MB** `factorbook.html` only — never replace it with skinny `desk_dash` generator HTML (~190KB). Refresh once and confirm: Breakout / Breakdown sit beside Momentum Down; cards are dense MOM chrome (no gray digest matrix); Day/R20/RS63/ATR% are numbers; **clicking a card opens the company name-drill** (`selectTicker`) and does **not** jump to the Breakdown tab; `#fd-card-js` + `#fd-breakout-db` are filled; Paper (`#fd-paper-marks`) and Experimental stay; `#fd-book-delta` shows `baseline set` on the first write. No CoS Desktop hot-patches — recopy the modules.
+Do **not** copy generated `factorbook.html`, `desk_snapshot.json`, `mom_score_hist.json`, or the ideas markdown. After drop-in, call `card_render.ensure_embedded` then `breakout.ensure_embedded(html, ranked)` on the **live ~4.8MB** `factorbook.html` only — never replace it with skinny `desk_dash` generator HTML (~190KB). Refresh once and confirm: Breakout / Breakdown sit beside Momentum Down; cards are dense MOM chrome (no gray digest matrix); Day/R20/RS63/ATR% are numbers; **clicking a card opens the company name-drill** (`selectTicker`) and does **not** jump to the Breakdown tab; `#fd-card-js` + `#fd-breakout-db` are filled; Paper (`#fd-paper-marks`) and Experimental stay; `#fd-book-delta` and `#gics-filter-strip` are **gone**. No CoS Desktop hot-patches — recopy the modules.
 
 Suggested Desktop sync paths:
 
@@ -559,12 +515,12 @@ import paper_trade
 # cards already attached (enrich + mom_streak). Marks come from card px / PX_LAST / last Refresh print.
 paper_marks = paper_trade.marks_db(cards, book=book)
 
-html = gics_filter.ensure_embedded(html, db)
+html = gics_filter.ensure_embedded(html, None)  # BINNED: removes leftover GICS strip
 html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
 html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
 html = card_render.ensure_embedded(html)           # wrap live cardHTML; portable chips
 html = breakout.ensure_embedded(html, ranked)
-html = book_delta.ensure_embedded(html, delta)
+html = book_delta.ensure_embedded(html, None)  # BINNED: removes leftover #fd-book-delta
 html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
 html = paper_trade.ensure_embedded(html, paper_marks)  # wraps cardHTML + Paper tab; localStorage fd-paper-book
 # dest.write_text(html)
@@ -635,11 +591,11 @@ import s_score
 # Experimental-only. Materializes residual_panel.json when history is thin.
 ss_ranked = s_score.rank_book(cards, root=PATHS["fb_root"], write_panel_file=True)
 
-html = gics_filter.ensure_embedded(html, db)
+html = gics_filter.ensure_embedded(html, None)  # BINNED: removes leftover GICS strip
 html = mom_streak.ensure_embedded(html, mom_streak.streak_db(cards))
 html = chart_marks.ensure_embedded(html, chart_marks.chart_db(cards))
 html = breakout.ensure_embedded(html, ranked)
-html = book_delta.ensure_embedded(html, delta)
+html = book_delta.ensure_embedded(html, None)  # BINNED: removes leftover #fd-book-delta
 html = desk_hitch.ensure_embedded(html, desk_hitch.hitch_db(cards, hitch_index))
 html = paper_trade.ensure_embedded(html, paper_marks)
 html = s_score.ensure_embedded(html, ss_ranked)  # Experimental tab; does not wrap cardHTML

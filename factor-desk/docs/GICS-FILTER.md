@@ -1,6 +1,6 @@
-# GICS sector filter chips
+# GICS sector names (filter strip BINNED)
 
-Light **top filter strip** chips for main GICS sectors present in the book. Tapping a sector shows the same FLAGS / WATCH / MOM / OUTLIERS / OPTIONS cards, filtered to names in that sector. This is **not** the Sectors tab (scrapped as too DAPI-heavy). There is **no** `sectors.json` Refresh stage and **no** second full-book GICS pull on Refresh.
+Card `gics_sector_name` / `data-gics-sector` may stay. The **top GICS filter strip** (`#gics-filter-strip`, All / EN / IT / …) is **BINNED** — removed, not polished (Tanner request). G1–G12 group chips are a separate host and stay. This is **not** the Sectors tab. There is **no** `sectors.json` Refresh stage and **no** second full-book GICS pull on Refresh.
 
 ## Data
 
@@ -22,19 +22,14 @@ That path pulls `GICS_SECTOR_NAME` then `GICS_SECTOR` (first success), writes gi
 
 ## UI
 
-Chips sit in the existing top filter row (G1–G12 / tags language: `.filter-chip` / `.gchip`, dark desk). **All** clears the filter. Short labels (IT, FIN, …) with the official GICS name as `title`. Client JS adds `.gics-hid` only — Momentum Up/Down, Outliers, Options, Refresh, FLAGS/WATCH behavior is unchanged.
+**No GICS filter strip.** Recopy `gics_filter.py`; `ensure_embedded` **deletes** leftover `#gics-filter-strip` / `#gics-filter-css` / `#gics-filter-js` / `#gics-sector-db` and unhides `.gics-hid` so a prior filter cannot stick. Do not paste a new host.
 
-Cards need `data-gics-sector` **and** `data-t` / `data-ticker` (or a ticker the `#gics-sector-db` map can resolve). Unclassified names stay visible on All and hide when a sector is selected.
+G1–G12 group chips (FLAGS/PAIRS/WATCH) stay.
+
+Cards may keep `data-gics-sector` **and** `data-t` / `data-ticker`. Unclassified names are not hidden by a sector filter (there isn't one).
 
 ## Survive `write_dash` / `write_combined`
 
-Every HTML write **must** leave all four of:
-
-1. `#gics-filter-strip` host
-2. CSS for `.gics-hid` / `.gchip`
-3. **filled** `#gics-sector-db` JSON from enrich / `gics_sectors.json` (placeholder `__GICS_SECTOR_DB__` is replaced by `_gics_sector_db_json()`)
-4. strip JS with `STRIP_ID = "gics-filter-strip"` that filters on `data-gics-sector` / ticker lookup including **`data-t`**
-
-Call `gics_filter.ensure_embedded(html, mapping)` at the **end** of `desk_dash.write_combined` (this is the function `write_dash.write` uses). If a live ~2.7MB `factorbook.html` already has Refresh / Momentum Up / Momentum Down / Outliers / Options, **patch it** — do not replace it with the skinny enrich-only grid.
+Every HTML write must **leave no GICS filter strip**. Call `gics_filter.ensure_embedded(html)` at the **end** of `desk_dash.write_combined` (strip-remover). If a live ~2.7MB `factorbook.html` already has Refresh / Momentum Up / Momentum Down / Outliers / Options, **patch it** — do not replace it with the skinny enrich-only grid.
 
 See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §5–6.

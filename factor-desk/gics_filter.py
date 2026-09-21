@@ -1,8 +1,10 @@
-"""GICS sector filter chips for the Factor Desk top filter strip.
+"""GICS sector names on cards — filter strip UI is BINNED.
 
 Reads ``gics_sector_name`` from enrichment (or the optional one-shot cache).
 Does not invent a ticker→sector map. Does not add a Sectors tab or a Refresh
-stage. Chip UI matches the dark-desk G1–G12 / tag language (``.gchip``).
+stage. ``ensure_embedded`` **removes** leftover ``#gics-filter-strip`` UI
+(Tanner: BINNED, not polished). G1–G12 group chips are a separate host and
+are not touched.
 """
 
 from __future__ import annotations
@@ -389,20 +391,8 @@ def strip_js() -> str:
 
 
 def render_strip(sectors: Sequence[str] | None) -> str:
-    bits = [
-        '<div id="gics-filter-strip" class="filter-strip gics-chips" role="toolbar" aria-label="GICS sector filter">'
-    ]
-    bits.append(
-        '<button type="button" class="filter-chip gchip active" data-gics-chip="" title="All sectors">All</button>'
-    )
-    for name in sectors or []:
-        label = html.escape(chip_label(name))
-        full = html.escape(name)
-        bits.append(
-            f'<button type="button" class="filter-chip gchip" data-gics-chip="{full}" title="{full}">{label}</button>'
-        )
-    bits.append("</div>")
-    return "".join(bits)
+    """No-op. GICS filter strip UI is BINNED — do not emit a host."""
+    return ""
 
 
 GICS_SECTOR_DB_PLACEHOLDER = "__GICS_SECTOR_DB__"
@@ -465,8 +455,8 @@ def _gics_sector_db_json(
 
 
 def embed_db(mapping: Mapping[str, str] | None) -> str:
-    blob = sector_db_json(mapping)
-    return f'<script type="application/json" id="{DB_SCRIPT_ID}">{html.escape(blob, quote=False)}</script>'
+    """No-op. Sector-db script was only used by the BINNED filter strip."""
+    return ""
 
 
 def markup_attr(sector: str | None) -> str:
@@ -475,90 +465,57 @@ def markup_attr(sector: str | None) -> str:
     return html.escape(sector, quote=True)
 
 
-def _ensure_css(html_text: str) -> str:
-    css = f'<style id="{CSS_STYLE_ID}">\n{strip_css()}\n</style>\n'
-    text, n = re.subn(
-        rf'<style\b[^>]*\bid=["\']{CSS_STYLE_ID}["\'][^>]*>.*?</style>\s*',
-        lambda _m: css,
-        html_text,
-        count=1,
-        flags=re.I | re.S,
-    )
-    if n:
-        return text
-    if "</head>" in html_text:
-        return html_text.replace("</head>", css + "</head>", 1)
-    return css + html_text
+_CSS_ID_RE = re.compile(
+    rf'<style\b[^>]*\bid=["\']{CSS_STYLE_ID}["\'][^>]*>.*?</style>\s*',
+    re.I | re.S,
+)
+_DB_ID_RE = re.compile(
+    r'<script\b[^>]*\bid=["\']gics-sector-db["\'][^>]*>.*?</script>\s*',
+    re.I | re.S,
+)
+_HID_CLASS_RE = re.compile(r'(?<=["\'\s])gics-hid\b\s*', re.I)
 
 
-def _ensure_host(html_text: str, mapping: Mapping[str, str] | None = None) -> str:
-    """Replace empty-or-any ``#gics-filter-strip`` with baked chips. No early-return."""
-    sectors = sectors_from_mapping(mapping)  # GICS_SECTOR_ORDER ∩ mapping
-    host = render_strip(sectors)  # All + sectors
-    match = _HOST_RE.search(html_text)
-    if match:
-        return html_text[: match.start()] + host + html_text[match.end() :]
-    for pat in (
-        r"(<nav\b[^>]*>.*?</nav>)",
-        r'(<div\b[^>]*class=["\'][^"\']*(?:filter-strip|filters|chip-row|g-row|top-filters)[^"\']*["\'][^>]*>)',
-        r"(<h1\b[^>]*>.*?</h1>)",
-        r"(<body\b[^>]*>)",
-    ):
-        found = re.search(pat, html_text, re.I | re.S)
-        if found:
-            return html_text[: found.end()] + "\n" + host + "\n" + html_text[found.end() :]
-    return host + "\n" + html_text
+def _remove_css(html_text: str) -> str:
+    return _CSS_ID_RE.sub("", html_text)
 
 
-def _ensure_db(html_text: str, mapping: Mapping[str, str] | None) -> str:
-    tag = embed_db(mapping)
-    blob = sector_db_json(mapping)
-    if re.search(r'id=["\']gics-sector-db["\']', html_text, re.I):
-        html_text = re.sub(
-            r'<script\b[^>]*\bid=["\']gics-sector-db["\'][^>]*>.*?</script>',
-            lambda _m: tag,
-            html_text,
-            count=1,
-            flags=re.I | re.S,
-        )
-        return html_text
-    if GICS_SECTOR_DB_PLACEHOLDER in html_text:
-        html_text = html_text.replace(GICS_SECTOR_DB_PLACEHOLDER, blob)
-        if not re.search(r'id=["\']gics-sector-db["\']', html_text, re.I):
-            wrapped = tag
-            if "</body>" in html_text:
-                html_text = html_text.replace("</body>", wrapped + "\n</body>", 1)
-            else:
-                html_text += wrapped
-        return html_text
-    if "</body>" in html_text:
-        return html_text.replace("</body>", tag + "\n</body>", 1)
-    return html_text + tag
+def _remove_host(html_text: str, mapping: Mapping[str, str] | None = None) -> str:
+    """Delete leftover ``#gics-filter-strip``. Does not touch G1–G12 hosts."""
+    return _HOST_RE.sub("", html_text)
 
 
-def _ensure_js(html_text: str) -> str:
-    """Always replace strip JS so uniqueSectors stays map-first, then cards."""
-    script = f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
-    text, n = _JS_ID_RE.subn(lambda _m: script, html_text, count=1)
-    if n:
-        return _LEGACY_JS_RE.sub("", text)
-    text, n = _LEGACY_JS_RE.subn(lambda _m: script, html_text, count=1)
-    if n:
-        return _LEGACY_JS_RE.sub("", text)
-    if "</body>" in html_text:
-        return html_text.replace("</body>", script + "</body>", 1)
-    return html_text + script
+def _remove_db(html_text: str, mapping: Mapping[str, str] | None = None) -> str:
+    text = _DB_ID_RE.sub("", html_text)
+    if GICS_SECTOR_DB_PLACEHOLDER in text:
+        text = text.replace(GICS_SECTOR_DB_PLACEHOLDER, "")
+    return text
 
 
-def ensure_embedded(html_text: str, mapping: Mapping[str, str] | None) -> str:
-    """Re-embed filled chips + CSS + sector-db + strip JS after every HTML write.
+def _remove_js(html_text: str) -> str:
+    text = _JS_ID_RE.sub("", html_text)
+    return _LEGACY_JS_RE.sub("", text)
 
-    An empty ``#gics-filter-strip`` is replaced with ``render_strip`` (All +
-    ORDER ∩ mapping). Call this on the way out of ``write_combined``.
+
+def strip_ui(html_text: str, mapping: Mapping[str, str] | None = None) -> str:
+    """Remove GICS sector filter strip host / CSS / JS / sector-db from HTML.
+
+    Unhides leftover ``.gics-hid`` cards so a prior filter cannot stick.
+    G1–G12 group chips (FLAGS/PAIRS/WATCH) are not this host and stay.
     """
     text = html_text or ""
-    text = _ensure_css(text)
-    text = _ensure_host(text, mapping)
-    text = _ensure_db(text, mapping)
-    text = _ensure_js(text)
+    text = _remove_css(text)
+    text = _remove_host(text, mapping)
+    text = _remove_db(text, mapping)
+    text = _remove_js(text)
+    text = _HID_CLASS_RE.sub("", text)
     return text
+
+
+def ensure_embedded(html_text: str, mapping: Mapping[str, str] | None = None) -> str:
+    """No-op embed: Refresh path **removes** leftover GICS strip UI (BINNED).
+
+    Live ``write_combined`` still calls this so a prior bake cannot survive
+    the next Refresh. Mapping is ignored.
+    """
+    return strip_ui(html_text, mapping)
