@@ -163,3 +163,56 @@ name_rec["skew_25d_proxy"] = _skew.get("skew_25d_proxy")
 If Refresh already passes `options_by_name` into `enrich_book`, this drill summary is optional (enrich also stores `skew` per name). Keep it for the options view.
 
 Function used: `dapi_enrich.summarize_skew`.
+
+---
+
+## 5) Portfolio upload (`portfolio.py`)
+
+Copy `portfolio.py` next to live `desk_dash.py`. **Do not replace** live `add_server.py` / `desk_dash.py`. Last uploaded book is gitignored `portfolio_last.json` (or `runtime/portfolio_last.json`).
+
+### `add_server.py` — import + routes (do not change Refresh)
+
+```python
+import portfolio
+```
+
+In `do_GET`, after `/refresh` / `/status`:
+
+```python
+if path.startswith("/api/quote") or path.startswith("/api/quotes"):
+    portfolio.handle_quote_request(self, parsed)
+    return
+if path in ("/api/portfolio", "/api/portfolio/last"):
+    portfolio.handle_portfolio_get(self)
+    return
+```
+
+In `do_POST`, after `/refresh`:
+
+```python
+if path in ("/api/portfolio", "/api/portfolio/run"):
+    portfolio.handle_portfolio_run(self, body)
+    return
+```
+
+`GET /api/quote/{ticker}` uses desk last px then existing DAPI `PX_LAST` candidates. It does **not** add a Refresh stage.
+
+### `desk_dash.py` — `write_combined` tail
+
+After the other `ensure_embedded` calls (GICS / streak / paper / experimental if present), **before** `dest.write_text`:
+
+```python
+import portfolio
+
+# last=None must not wipe #fd-portfolio-db
+text = portfolio.ensure_embedded(
+    text,
+    scorecard=portfolio.load_last(root=base),
+    desk=portfolio.desk_snapshot(base),
+)
+```
+
+Functions used: `portfolio.ensure_embedded`, `portfolio.load_last`, `portfolio.desk_snapshot`, `portfolio.handle_quote_request`, `portfolio.handle_portfolio_get`, `portfolio.handle_portfolio_run`.
+
+Then Refresh once. Top-nav **Portfolio** → paste `position,ticker` → Run. Missing names chip; factor/mom from the live book only.
+

@@ -27,8 +27,9 @@ See [docs/CLOUD-AGENT.md](docs/CLOUD-AGENT.md) and [STRUCTURE.md](STRUCTURE.md).
 ```
 factor-desk/
   dapi_enrich.py         # DAPI enrichment pack (9 layers, no news)
-  add_server.py          # sidecar HTTP on :8765 — Refresh + intraday=1
-  desk_dash.py           # dashboard assembly + enrich pills
+  add_server.py          # sidecar HTTP on :8765 — Refresh + quote + portfolio
+  desk_dash.py           # dashboard assembly + enrich pills + Portfolio embed
+  portfolio.py           # Portfolio upload tab (parse, weights, scorecard)
   write_dash.py          # write factorbook.html
   pull_options_pulse.py  # options pulse + score v2 + skew
   momentum_screen.py     # MOM rows + enrich attach
@@ -46,4 +47,6 @@ factor-desk/
 Refresh: `prices → options pulse → dapi_enrich (~50–60%) → rebuild`.
 Optional: `GET/POST /refresh?intraday=1` (default off). See [docs/DAPI-ENRICH.md](docs/DAPI-ENRICH.md).
 
-Desktop copies `dapi_enrich.py` into `C:\Users\MLP\Desktop\factorbook` and merges the thin hooks. Remaining ingest/troughing modules stay Desktop-owned until synced.
+Desktop copies `dapi_enrich.py` / `portfolio.py` into `C:\Users\MLP\Desktop\factorbook` and merges the thin hooks. Remaining ingest/troughing modules stay Desktop-owned until synced.
+
+Portfolio tab: paste or upload `position,ticker` (signed shares) → scorecard vs the live book. See [docs/PORTFOLIO.md](docs/PORTFOLIO.md).

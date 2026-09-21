@@ -19,9 +19,18 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import dapi_enrich  # noqa: E402
+import portfolio  # noqa: E402
 
 LOG = logging.getLogger("desk_dash")
 HTML_NAME = "factorbook.html"
+LIVE_MIN_BYTES = 1_000_000
+LIVE_NAV_MARKERS = (
+    "Refresh",
+    "Momentum Up",
+    "Momentum Down",
+    "Outliers",
+    "Options",
+)
 
 # Same visual language as live-desk .badge / .spike-chip
 PILL_CSS = """
@@ -226,6 +235,52 @@ def render_html(
 """
 
 
+def looks_like_live_desk(html_text: str) -> bool:
+    if not html_text:
+        return False
+    if all(marker in html_text for marker in LIVE_NAV_MARKERS):
+        return True
+    return len(html_text.encode("utf-8")) >= LIVE_MIN_BYTES
+
+
+def write_combined(
+    path: Path | str | None = None,
+    *,
+    root: Path | None = None,
+    cards: list[Mapping[str, Any]] | None = None,
+    book: Mapping[str, Any] | None = None,
+    html: str | None = None,
+) -> Path:
+    """Write ``factorbook.html``. Always embeds the Portfolio tab.
+
+    If a live (~2.7MB / nav) dashboard already exists, **patch** it in place.
+    Never replace it with the skinny enrich-only grid.
+    """
+    base = Path(root) if root is not None else HERE
+    dest = Path(path) if path is not None else base / HTML_NAME
+    if book is None:
+        book = load_enrichment(base)
+
+    existing = ""
+    if html is not None:
+        existing = html
+    elif dest.is_file():
+        existing = dest.read_text(encoding="utf-8")
+
+    if existing and looks_like_live_desk(existing):
+        text = existing
+        LOG.info("write_combined: patching live desk HTML (%s bytes)", len(existing.encode("utf-8")))
+    else:
+        text = render_html(cards, book=book)
+
+    desk = portfolio.desk_snapshot(base)
+    last = portfolio.load_last(base)
+    text = portfolio.ensure_embedded(text, scorecard=last, desk=desk)
+    dest.write_text(text, encoding="utf-8")
+    LOG.info("wrote %s (%s bytes)", dest, dest.stat().st_size)
+    return dest
+
+
 def assemble_and_write(
     path: Path | str | None = None,
     *,
@@ -233,14 +288,7 @@ def assemble_and_write(
     cards: list[Mapping[str, Any]] | None = None,
     book: Mapping[str, Any] | None = None,
 ) -> Path:
-    base = Path(root) if root is not None else HERE
-    dest = Path(path) if path is not None else base / HTML_NAME
-    if book is None:
-        book = load_enrichment(base)
-    text = render_html(cards, book=book)
-    dest.write_text(text, encoding="utf-8")
-    LOG.info("wrote %s", dest)
-    return dest
+    return write_combined(path, root=root, cards=cards, book=book)
 
 
 def rebuild(path: Path | str | None = None, root: Path | None = None) -> Path:

@@ -13,3 +13,8 @@ clean/*.csv
 *.png
 factorbook_desktop_latest.html
 factorbook.html
+portfolio_last.json
+portfolio_last.json.tmp
+runtime/portfolio_last.json
+mom_score_hist.json
+paper_trades.json
