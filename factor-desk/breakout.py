@@ -112,15 +112,14 @@ GRID_BREAKDOWN_ID = "breakdown-grid"
 NOTE_CLASS = "fd-bb-note"
 SPLIT_CLASS = "fd-bb-split"
 # Right-rail copy on both panes. Gates live in the constants above; this is display only.
-NOTE_COPY = (
-    "Breakout and Breakdown keep early inflections only. "
-    "A name must clear all four gates: score in band (Breakout 7–10, Breakdown 2–6), "
-    "10-trading-day composite score change beyond ±3 (missing Δ fails), "
-    "a fresh streak vs 5 (1–15 days on the correct side of 5), "
-    "and same-sign factor dispersion (prefer residual_20d; else RS63). "
-    "Lists are capped and ranked by an inflection score "
-    "(band edge, |Δ10d|, streak freshness, dispersion size) — not a trade signal."
+# Breakdown is the true opposite of Breakout — do not collapse them into "±3" / "correct side".
+NOTE_LINES: tuple[str, ...] = (
+    "Breakout / Breakdown = early inflections only (all four gates).",
+    "Breakout: score 7–10, 10d score Δ > +3, streak 1–15d above 5, dispersion > 0 (residual_20d else RS63).",
+    "Breakdown: score 2–6, 10d score Δ < −3, streak 1–15d below 5, dispersion < 0.",
+    "Ranked by inflection score (band edge, |Δ10d|, streak freshness, |dispersion|) — not a trade signal. Missing Δ fails.",
 )
+NOTE_COPY = "\n".join(NOTE_LINES)
 HID_CLASS = "fd-bb-hid"
 
 NAV_BREAKOUT_ID = "fd-nav-breakout"
@@ -1243,7 +1242,11 @@ article.fd-bb-card, .fd-bb-card {{
 }}
 #view-breakout .{NOTE_CLASS} p,
 #view-breakdown .{NOTE_CLASS} p {{
-  margin: 0;
+  margin: 0 0 6px;
+}}
+#view-breakout .{NOTE_CLASS} p:last-child,
+#view-breakdown .{NOTE_CLASS} p:last-child {{
+  margin-bottom: 0;
 }}
 .fd-bb-empty {{
   grid-column: 1 / -1;
@@ -1775,8 +1778,9 @@ def strip_js() -> str:
 
 
 def note_html() -> str:
-    """One quiet paragraph. Same copy on Breakout and Breakdown; not a help page."""
-    return f'<aside class="{NOTE_CLASS}"><p>{html.escape(NOTE_COPY)}</p></aside>'
+    """Same four lines on both panes. Not a help page."""
+    paras = "".join(f"<p>{html.escape(line)}</p>" for line in NOTE_LINES)
+    return f'<aside class="{NOTE_CLASS}">{paras}</aside>'
 
 
 def _pane_shell(view_id: str, title: str, grid_id: str, data_view: str) -> str:

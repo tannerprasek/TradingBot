@@ -38,7 +38,7 @@ Card `gics_sector_name` from enrichment is fine. Do **not** add a Sectors tab, `
 
 ## Breakout / Breakdown + hitch (book-delta strip BINNED)
 
-Early-inflection Breakout / Breakdown tabs (score 7–10 or 2–6, `mom_score_d10` beyond ±3, fresh ≤15d streak, positive/negative `residual_20d` or interim RS63 — not maxed MOM). `card_render.ensure_embedded` (shared MOM `cardHTML` wrap) then `breakout.ensure_embedded` + `book_delta.ensure_embedded` (now **removes** leftover `#fd-book-delta`) + `desk_hitch.ensure_embedded` on every HTML write. Breakout/Breakdown/Outliers must mount the same portable card — tabs only filter/rank. See [BREAKOUT-BREAKDOWN.md](BREAKOUT-BREAKDOWN.md). Do **not** reintroduce a Sectors tab. Recopy `card_render.py` and `breakout.py`; do not wholesale replace live `desk_dash.py`.
+Early-inflection Breakout (score 7–10, `mom_score_d10` > +3, streak 1–15d above 5, dispersion > 0) and Breakdown (score 2–6, `mom_score_d10` < −3, streak 1–15d below 5, dispersion < 0). Dispersion is `residual_20d`, else RS63. `card_render.ensure_embedded` (shared MOM `cardHTML` wrap) then `breakout.ensure_embedded` + `book_delta.ensure_embedded` (now **removes** leftover `#fd-book-delta`) + `desk_hitch.ensure_embedded` on every HTML write. Breakout/Breakdown/Outliers must mount the same portable card — tabs only filter/rank. See [BREAKOUT-BREAKDOWN.md](BREAKOUT-BREAKDOWN.md). Do **not** reintroduce a Sectors tab. Recopy `card_render.py` and `breakout.py`; do not wholesale replace live `desk_dash.py`.
 
 ## Paper trading
 
