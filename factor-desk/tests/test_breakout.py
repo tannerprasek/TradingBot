@@ -800,6 +800,48 @@ function syncNav() {}
         self.assertNotIn("fd-bb-note", mom)
         self.assertNotIn("fd-bb-split", mom)
 
+    def test_ensure_embedded_refreshes_stale_side_note(self) -> None:
+        stale = (
+            '<aside class="fd-bb-note"><p>Breakout and Breakdown keep early inflections only. '
+            "a fresh streak vs 5 (1–15 days on the correct side of 5), beyond ±3.</p></aside>"
+        )
+        html = f"""<!DOCTYPE html><html><head></head><body>
+<nav><button>Momentum Down</button></nav>
+<div id="view-mom-up" class="view-pane hide"><div class="ph">Momentum Up</div><div class="grid dense" id="mom-up-grid"></div></div>
+<div id="view-breakout" class="view-pane hide"><div class="ph">Breakout</div>
+  <div class="fd-bb-split"><div class="grid dense" id="breakout-grid"></div>{stale}</div></div>
+<div id="view-breakdown" class="view-pane hide"><div class="ph">Breakdown</div>
+  <div class="fd-bb-split"><div class="grid dense" id="breakdown-grid"></div>{stale}</div></div>
+</body></html>"""
+        mom_before = bo._find_tag_span(html, "view-mom-up")
+        self.assertIsNotNone(mom_before)
+        mom_html = html[mom_before[0] : mom_before[1]]
+        out = bo.ensure_embedded(html, None)
+        fresh = bo.note_html()
+        self.assertEqual(out.count(fresh), 2)
+        self.assertNotIn("correct side", out)
+        self.assertNotIn("beyond ±3", out)
+
+        def chunk(view_id: str) -> str:
+            span = bo._find_tag_span(out, view_id)
+            self.assertIsNotNone(span)
+            return out[span[0] : span[1]]
+
+        for view_id in ("view-breakout", "view-breakdown"):
+            body = chunk(view_id)
+            self.assertEqual(body.count(fresh), 1)
+            self.assertIn("Breakout: score 7–10", body)
+            self.assertIn("Breakdown: score 2–6", body)
+            self.assertIn("streak 1–15d above 5", body)
+            self.assertIn("streak 1–15d below 5", body)
+            self.assertNotIn("correct side", body)
+        mom_after = bo._find_tag_span(out, "view-mom-up")
+        self.assertIsNotNone(mom_after)
+        self.assertEqual(out[mom_after[0] : mom_after[1]], mom_html)
+        again = bo.ensure_embedded(out, None)
+        self.assertEqual(again.count(fresh), 2)
+        self.assertNotIn("correct side", again)
+
     def test_ensure_embedded_none_does_not_wipe_ranked_panes(self) -> None:
         html = """<!DOCTYPE html><html><body>
 <nav><button>Momentum Down</button></nav>

@@ -1816,14 +1816,30 @@ def panes_html(ranked: Mapping[str, Any] | None = None, article_html=None) -> st
     )
 
 
+_NOTE_ASIDE_RE = re.compile(
+    rf'<aside\b[^>]*\bclass=["\'][^"\']*\b{re.escape(NOTE_CLASS)}\b[^"\']*["\'][^>]*>.*?</aside>',
+    re.I | re.S,
+)
+
+
+def _refresh_side_note(html_text: str, span: tuple[int, int]) -> str | None:
+    """Replace a stale ``<aside class="fd-bb-note">`` inside this pane. ``None`` if absent."""
+    chunk = html_text[span[0] : span[1]]
+    if not _NOTE_ASIDE_RE.search(chunk):
+        return None
+    note = note_html()
+    new_chunk = _NOTE_ASIDE_RE.sub(lambda _m: note, chunk)
+    return html_text[: span[0]] + new_chunk + html_text[span[1] :]
+
+
 def _ensure_side_note(html_text: str, view_id: str, grid_id: str) -> str:
-    """Put the right-rail note in an existing pane that predates it. Mom panes are untouched."""
+    """Insert or replace the right-rail note. Mom panes are not passed in."""
     span = _find_tag_span(html_text, view_id)
     if not span:
         return html_text
-    chunk = html_text[span[0] : span[1]]
-    if NOTE_CLASS in chunk:
-        return html_text
+    refreshed = _refresh_side_note(html_text, span)
+    if refreshed is not None:
+        return refreshed
     grid = _find_tag_span(html_text, grid_id)
     note = note_html()
     if grid and span[0] <= grid[0] < span[1]:
