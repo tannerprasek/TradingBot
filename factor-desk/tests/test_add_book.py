@@ -105,6 +105,23 @@ class TickerMatchTests(unittest.TestCase):
         self.assertEqual(de.search_symbols("semi", universe)[0]["t"], "TSEM")
         self.assertEqual(de.search_symbols("equity", universe), [])
 
+    def test_tsem_matches_across_exchange_spellings(self) -> None:
+        """The pushed name was TSEM. US vs UW must not hide the short symbol."""
+        universe = {
+            "names": {
+                "TSEM UW Equity": {
+                    "ticker": "TSEM UW Equity",
+                    "name": "Tower Semiconductor",
+                    "t": "TSEM",
+                }
+            }
+        }
+        for query in ("TSEM", "tsem", "TSEM US", "TSEM US Equity", "TSEM UW Equity"):
+            hits = de.search_symbols(query, universe)
+            self.assertTrue(hits, msg=query)
+            self.assertEqual(hits[0]["t"], "TSEM", msg=query)
+        self.assertEqual(de.search_symbols("tower", universe)[0]["t"], "TSEM")
+
 
 class CardUniverseTests(unittest.TestCase):
     def test_extras_and_residual_only_names_become_cards(self) -> None:
@@ -130,6 +147,34 @@ class CardUniverseTests(unittest.TestCase):
             )
             cards = desk_dash.cards_from_enrichment({"names": {}}, root=root)
             self.assertEqual([c.get("t") for c in cards], ["TSEM"])
+
+    def test_residual_panel_and_ticker_names_are_searchable(self) -> None:
+        """TSEM lives in the factor files, not in the live MOM card list."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "v0_residuals.csv").write_text(
+                "date,ticker,residual\n2026-09-21,TSEM UW Equity,0.02\n",
+                encoding="utf-8",
+            )
+            (root / "ticker_names.json").write_text(
+                json.dumps(
+                    {
+                        "names": {
+                            "TSEM US Equity": {
+                                "ticker": "TSEM US Equity",
+                                "name": "Tower Semiconductor",
+                                "short_name": "TSEM",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cards = desk_dash.cards_from_enrichment({"names": {}}, root=root)
+            self.assertIn("TSEM", {c.get("t") for c in cards})
+            hits = desk_dash.search_desk("tsem", root=root)["hits"]
+            self.assertEqual(hits[0]["t"], "TSEM")
+            self.assertEqual(desk_dash.search_desk("TSEM US Equity", root=root)["hits"][0]["t"], "TSEM")
 
     def test_write_combined_puts_short_symbol_in_search_book(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -159,6 +204,9 @@ class CardUniverseTests(unittest.TestCase):
             self.assertIn('"t":"TSEM"', match.group(1))
             self.assertIn('id="fd-symbol-q"', text)
             self.assertIn("window.__FD_SEARCH__", text)
+            self.assertIn("selectTicker", text)
+            self.assertIn("search-pane", text)
+            self.assertIn("fd-search-pane-hits", text)
             hits = desk_dash.search_desk("apple", root=root)["hits"]
             self.assertEqual(hits[0]["t"], "AAPL")
             self.assertEqual(desk_dash.search_desk("tsem", root=root)["hits"][0]["ticker"], "TSEM US Equity")

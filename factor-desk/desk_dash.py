@@ -531,11 +531,13 @@ _SEARCH_BOOK_JS = r"""
     if (!q) return -1;
     var qu = q.toUpperCase();
     var qf = q.toLowerCase();
+    var qFirst = qu.split(/\s+/)[0];
     var short = shortOf(row.t || row.ticker);
     var yellow = String(row.ticker || "").toUpperCase();
     var name = (row.name && shortOf(row.name) !== short) ? row.name : "";
     if (String(row.name || "").indexOf(" ") >= 0) name = row.name;
-    if (short === qu || yellow === qu) return 0;
+    // First token is the symbol: "TSEM", "TSEM US", and "TSEM UW Equity" all hit TSEM.
+    if (short === qu || yellow === qu || (qFirst && short === qFirst)) return 0;
     if ((short && short.indexOf(qu) === 0) || (yellow && yellow.indexOf(qu) === 0)) return 1;
     if (nameHit(qf, name)) return 2;
     return -1;
@@ -561,25 +563,95 @@ _SEARCH_BOOK_JS = r"""
     var node = statusEl();
     if (node) node.textContent = text || "";
   }
-  function renderHits(query) {
+  function labelOf(row) {
+    var label = row.t || "";
+    if (row.name && row.name !== row.t) label += "  " + row.name;
+    return label;
+  }
+  function choose(row) {
+    if (!row || !row.t) return;
+    var box = boxEl();
+    if (box) box.value = row.t;
+    setStatus(labelOf(row));
+    var sel = null;
+    try { sel = window.selectTicker; } catch (e0) { sel = null; }
+    if (typeof sel !== "function") {
+      try { if (typeof selectTicker === "function") sel = selectTicker; } catch (e1) { sel = null; }
+    }
+    if (typeof sel === "function") {
+      try { sel(row.t); } catch (e2) {}
+    }
+    paintPane([row]);
+  }
+  function paintPane(hits) {
+    var pane = document.getElementById("search-pane");
+    if (!pane) return;
+    if (!hits || !hits.length) {
+      var existing = document.getElementById("fd-search-pane-hits");
+      if (existing) existing.innerHTML = "";
+      return;
+    }
+    pane.classList.remove("hide");
+    pane.hidden = false;
+    var host = document.getElementById("fd-search-pane-hits");
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "fd-search-pane-hits";
+      pane.insertBefore(host, pane.firstChild);
+    }
+    host.innerHTML = "";
+    (hits || []).slice(0, 12).forEach(function (row) {
+      var node = null;
+      if (typeof window.__FD_RENDER_ROW__ === "function") {
+        try { node = window.__FD_RENDER_ROW__(row); } catch (e) { node = null; }
+      }
+      if (!node) {
+        node = document.createElement("article");
+        node.className = "card";
+        node.setAttribute("data-t", row.t);
+        node.setAttribute("data-ticker", row.ticker || row.t);
+        node.textContent = labelOf(row);
+      }
+      node.addEventListener("click", function (ev) {
+        if (ev.target && ev.target.closest && ev.target.closest(".fd-paper, [data-fd-paper-act]")) return;
+        choose(row);
+      });
+      host.appendChild(node);
+    });
+  }
+  function placeHits(list, anchor) {
+    if (!list || !anchor || !anchor.getBoundingClientRect) return;
+    var r = anchor.getBoundingClientRect();
+    list.style.position = "fixed";
+    list.style.left = r.left + "px";
+    list.style.top = (r.bottom + 2) + "px";
+    list.style.minWidth = Math.max(r.width, 220) + "px";
+    list.style.zIndex = "80";
+    list.style.background = "#0b0f14";
+    list.style.margin = "0";
+    list.style.padding = "4px 8px";
+    if (list.parentNode !== document.body) document.body.appendChild(list);
+  }
+  function renderHits(query, anchor) {
     var list = hitsEl();
     if (!list) return;
     var hits = searchSymbols(query);
     list.innerHTML = "";
     if (!String(query || "").trim() || !hits.length) {
       list.hidden = true;
+      paintPane([]);
       return;
     }
     hits.slice(0, 12).forEach(function (row) {
       var li = document.createElement("li");
       li.setAttribute("data-t", row.t);
       li.setAttribute("data-ticker", row.ticker || row.t);
-      var label = row.t;
-      if (row.name && row.name !== row.t) label += "  " + row.name;
-      li.textContent = label;
+      li.textContent = labelOf(row);
       list.appendChild(li);
     });
     list.hidden = false;
+    placeHits(list, anchor || boxEl());
+    paintPane(hits);
   }
   function remember(row) {
     if (!row || !row.t) return;
@@ -600,6 +672,7 @@ _SEARCH_BOOK_JS = r"""
     merge();
   }
   var remoteTimer = null;
+  var activeAnchor = null;
   function scheduleRemote(query) {
     if (remoteTimer) clearTimeout(remoteTimer);
     var q = String(query || "");
@@ -611,27 +684,44 @@ _SEARCH_BOOK_JS = r"""
         if (box && box.value !== q) return;
         var hits = (body && body.hits) || [];
         hits.forEach(remember);
-        renderHits(q);
+        renderHits(q, activeAnchor);
       }).catch(function () {});
     }, 180);
   }
+  function isSearchInput(node) {
+    if (!node || !node.tagName) return false;
+    var tag = String(node.tagName).toUpperCase();
+    if (tag !== "INPUT" && tag !== "TEXTAREA") return false;
+    if (node.closest && node.closest("#search-pane, #fd-symbol-bar")) return true;
+    var blob = [
+      node.id,
+      node.className,
+      node.getAttribute && node.getAttribute("placeholder"),
+      node.getAttribute && node.getAttribute("aria-label"),
+      node.getAttribute && node.getAttribute("name")
+    ].join(" ");
+    return /search|ticker|symbol|lookup/i.test(blob);
+  }
   function onQuery(node) {
-    if (!node) return;
-    var blob = String(node.id || "") + " " + String(node.className || "") + " " +
-      String((node.getAttribute && node.getAttribute("placeholder")) || "");
-    if (!/search|ticker|symbol/i.test(blob)) return;
+    if (!isSearchInput(node)) return;
     var q = node.value || "";
-    renderHits(q);
+    activeAnchor = node;
+    renderHits(q, node);
     scheduleRemote(q);
+    // Live search filters MOM cards and can wipe the pane after our capture
+    // listener. Paint again once that handler has finished.
+    setTimeout(function () { renderHits(q, node); }, 0);
   }
   document.addEventListener("input", function (ev) { onQuery(ev.target); }, true);
   document.addEventListener("click", function (ev) {
     var li = ev.target && ev.target.closest ? ev.target.closest("#fd-search-hits li") : null;
     if (!li) return;
-    var box = boxEl();
-    if (box) box.value = li.getAttribute("data-t") || "";
-    setStatus(li.textContent || "");
-    renderHits(box ? box.value : "");
+    ev.preventDefault();
+    var t = li.getAttribute("data-t") || "";
+    var hits = searchSymbols(t);
+    var row = null;
+    for (var i = 0; i < hits.length; i++) if (hits[i].t === t) { row = hits[i]; break; }
+    choose(row || { t: t, ticker: li.getAttribute("data-ticker") || t, name: t });
   }, true);
   var form = document.getElementById("fd-symbol-bar");
   if (form) {
@@ -642,6 +732,14 @@ _SEARCH_BOOK_JS = r"""
       if (!q) {
         setStatus("Symbol is required.");
         return;
+      }
+      var adding = ev.submitter && ev.submitter.id === "fd-symbol-add";
+      if (!adding) {
+        var hits = searchSymbols(q);
+        var want = q.toUpperCase().split(/\s+/)[0];
+        for (var h = 0; h < hits.length; h++) {
+          if (hits[h].t === want) { choose(hits[h]); return; }
+        }
       }
       var btn = document.getElementById("fd-symbol-add");
       if (btn) btn.disabled = true;
