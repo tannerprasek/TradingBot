@@ -106,8 +106,9 @@ DB_SCRIPT_ID = "fd-breakout-db"
 DISP_DB_ID = "fd-dispersion-db"
 MOM_CACHE_ID = "fd-bb-mom-cache"
 MOM_DB_ID = "fd-bb-mom-db"
+MOM_FULL_DB_ID = "fd-bb-mom-full-db"
 JS_SCRIPT_ID = "fd-breakout-js"
-JS_VER = "pr32-mom-cache"
+JS_VER = "pr33-mom-full"
 _MOM_PANE_IDS: tuple[str, ...] = (
     "view-mom-up",
     "view-mom-down",
@@ -573,6 +574,563 @@ def extract_live_metrics_map(html_text: str) -> dict[str, dict[str, float]]:
                 if cur.get(mk) is None:
                     cur[mk] = mv
     return out
+
+
+# Heavy series / markup. Full Mom cards keep chrome fields and drop these.
+_DROP_CARD_KEYS = frozenset(
+    {
+        "px_series",
+        "prices",
+        "closes",
+        "history",
+        "px_hist",
+        "hist",
+        "mom_score_series",
+        "series",
+        "spark",
+        "sparkline",
+        "html",
+        "svg",
+        "path",
+        "node",
+        "_card",
+        "card",
+        "px",
+    }
+)
+_PILL_KEYS = ("enrich_pills", "pills", "vol_pills", "opt_pills", "badges")
+_TEXT_CHROME_KEYS = ("status", "trend", "blurb", "flow_line", "flow")
+_BAND_PILL_KEYS = frozenset({"fd-bb", "fd-bb-band", "fd-bb-delta"})
+_JS_TICKER_KEY_RE = re.compile(
+    r"""(?:["'](t|d|ticker)["']|\b(t|d|ticker))\s*:\s*(["'])([^"']{1,48})\3""",
+)
+
+
+def _jsonish(value: Any, depth: int = 0) -> Any:
+    """JSON-safe copy. Drops heavy keys, NaN, and empty containers."""
+    if depth > 8:
+        return None
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        return value
+    if isinstance(value, Mapping):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key)
+            if name in _DROP_CARD_KEYS:
+                continue
+            child = _jsonish(item, depth + 1)
+            if child is None or child == "" or child == {} or child == []:
+                continue
+            out[name] = child
+        return out
+    if isinstance(value, (list, tuple)):
+        items: list[Any] = []
+        for item in value:
+            child = _jsonish(item, depth + 1)
+            if child is None:
+                continue
+            items.append(child)
+        return items
+    return None
+
+
+def _real_pills(card: Mapping[str, Any] | None) -> list[Any]:
+    if not isinstance(card, Mapping):
+        return []
+    out: list[Any] = []
+    for key in _PILL_KEYS:
+        raw = card.get(key)
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, Mapping):
+            items = []
+            for name, item in raw.items():
+                if isinstance(item, Mapping):
+                    items.append(item)
+                elif item not in (None, "", False):
+                    items.append({"label": name, "on": item})
+        else:
+            continue
+        for pill in items:
+            if isinstance(pill, Mapping):
+                pkey = str(pill.get("key") or "")
+                if pkey in _BAND_PILL_KEYS:
+                    continue
+                label = str(pill.get("label") or pill.get("name") or pill.get("key") or "").strip()
+                if not label:
+                    continue
+                out.append(pill)
+            elif str(pill or "").strip():
+                out.append(pill)
+    return out
+
+
+def _has_text_chrome(card: Mapping[str, Any] | None) -> bool:
+    if not isinstance(card, Mapping):
+        return False
+    return any(str(card.get(key) or "").strip() for key in _TEXT_CHROME_KEYS)
+
+
+def _has_active_tags(card: Mapping[str, Any] | None) -> bool:
+    if not isinstance(card, Mapping):
+        return False
+    for key in ("tags", "digest_tags", "active_tags", "on_tags"):
+        raw = card.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return True
+        if isinstance(raw, (list, tuple)) and raw:
+            return True
+    tg = card.get("tg") if isinstance(card.get("tg"), Mapping) else card.get("tgs")
+    if isinstance(tg, Mapping):
+        for val in tg.values():
+            if val in (True, 1, "1", "on", "ON"):
+                return True
+    return False
+
+
+def _has_metrics(card: Mapping[str, Any] | None) -> bool:
+    if not isinstance(card, Mapping):
+        return False
+    metrics = card.get("metrics")
+    if not isinstance(metrics, Mapping):
+        return False
+    return any(
+        _float_any(metrics.get(key)) is not None
+        for key in ("r20_pct", "rs_63", "atr_pct", "day_pct", "r20", "rs63", "atr")
+    )
+
+
+def card_chrome_score(card: Mapping[str, Any] | None) -> int:
+    """Higher means more of the Mom chrome ``cardHTML`` actually paints."""
+    if not isinstance(card, Mapping):
+        return 0
+    score = 0
+    if _real_pills(card):
+        score += 3
+    if _has_text_chrome(card):
+        score += 2
+    if _has_active_tags(card):
+        score += 1
+    if _has_metrics(card):
+        score += 4
+    return score
+
+
+def is_dense_card(card: Mapping[str, Any] | None) -> bool:
+    """True for a real Mom card. Streak stubs and metrics-only rows are not dense."""
+    if not isinstance(card, Mapping):
+        return False
+    return bool(_real_pills(card) or _has_text_chrome(card) or _has_active_tags(card))
+
+
+def _fill_card(primary: Mapping[str, Any], secondary: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Copy ``primary`` and fill empty fields from ``secondary``. Does not clobber chrome."""
+    out = dict(primary) if isinstance(primary, Mapping) else {}
+    extra = secondary if isinstance(secondary, Mapping) else {}
+    for key, val in extra.items():
+        if key in _DROP_CARD_KEYS or val is None or val == "":
+            continue
+        if out.get(key) is None or out.get(key) == "":
+            out[key] = val
+    extra_metrics = extra.get("metrics")
+    if isinstance(extra_metrics, Mapping):
+        metrics = dict(out.get("metrics") or {})
+        for key, val in extra_metrics.items():
+            if val is None or val == "":
+                continue
+            if metrics.get(key) is None or metrics.get(key) == "":
+                metrics[key] = val
+        if metrics:
+            out["metrics"] = metrics
+    return out
+
+
+def _prefer_new(new: Mapping[str, Any], old: Mapping[str, Any]) -> bool:
+    new_dense = is_dense_card(new)
+    old_dense = is_dense_card(old)
+    if new_dense != old_dense:
+        return new_dense
+    return card_chrome_score(new) >= card_chrome_score(old)
+
+
+def slim_mom_card(card: Mapping[str, Any] | None, panel: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Serializable Mom card for ``cardHTML``: chrome, scores, metrics. No price series."""
+    src = card if isinstance(card, Mapping) else {}
+    ticker = str(src.get("ticker") or src.get("t") or src.get("d") or src.get("name") or "")
+    stats = px_stats(src, panel, ticker=ticker)
+    raw = _jsonish(dict(src))
+    if not isinstance(raw, dict):
+        return {}
+    short = _short(ticker)
+    if short and not raw.get("t"):
+        raw["t"] = short
+    metrics = metrics_payload(stats, raw)
+    if metrics:
+        raw["metrics"] = metrics
+        for src_key, dest in (("day", "day"), ("r20", "r20"), ("rs63", "rs63"), ("atr_pct", "atr_pct")):
+            if raw.get(dest) is None and stats.get(src_key) is not None:
+                raw[dest] = stats[src_key]
+    return raw
+
+
+def merge_card_indexes(*indexes: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Ticker → densest card. Later indexes win ties. Holes fill from the loser."""
+    out: dict[str, dict[str, Any]] = {}
+    for index in indexes:
+        if not isinstance(index, Mapping):
+            continue
+        for key, card in index.items():
+            if not isinstance(card, Mapping):
+                continue
+            short = _short(str(card.get("t") or card.get("ticker") or card.get("d") or key))
+            if not short:
+                continue
+            prev = out.get(short)
+            if prev is None:
+                out[short] = dict(card)
+                continue
+            primary = card if _prefer_new(card, prev) else prev
+            secondary = prev if primary is card else card
+            out[short] = _fill_card(primary, secondary)
+    return out
+
+
+def cards_to_index(
+    cards: Iterable[Mapping[str, Any]] | None,
+    panel: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Dense Mom cards only. Thin streak rows are not an index."""
+    out: dict[str, dict[str, Any]] = {}
+    for card in cards or []:
+        if not isinstance(card, Mapping):
+            continue
+        slim = slim_mom_card(card, panel)
+        if not is_dense_card(slim):
+            continue
+        short = _short(str(slim.get("t") or slim.get("ticker") or ""))
+        if not short:
+            continue
+        prev = out.get(short)
+        if prev is None:
+            out[short] = slim
+        elif _prefer_new(slim, prev):
+            out[short] = _fill_card(slim, prev)
+        else:
+            out[short] = _fill_card(prev, slim)
+    return out
+
+
+def _skip_ws_comments(text: str, index: int) -> int:
+    length = len(text)
+    while index < length:
+        ch = text[index]
+        if ch in " \t\r\n":
+            index += 1
+            continue
+        if text.startswith("//", index):
+            index = text.find("\n", index)
+            if index < 0:
+                return length
+            continue
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            if end < 0:
+                return length
+            index = end + 2
+            continue
+        break
+    return index
+
+
+def _parse_js_string(text: str, index: int) -> tuple[str | None, int]:
+    quote = text[index]
+    index += 1
+    chars: list[str] = []
+    escapes = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "\\": "\\", "/": "/", "'": "'", '"': '"'}
+    while index < len(text):
+        ch = text[index]
+        if ch == "\\":
+            if index + 1 >= len(text):
+                return None, index
+            nxt = text[index + 1]
+            if nxt == "u" and index + 5 < len(text):
+                hex_digits = text[index + 2 : index + 6]
+                try:
+                    chars.append(chr(int(hex_digits, 16)))
+                except ValueError:
+                    return None, index
+                index += 6
+                continue
+            chars.append(escapes.get(nxt, nxt))
+            index += 2
+            continue
+        if ch == quote:
+            return "".join(chars), index + 1
+        chars.append(ch)
+        index += 1
+    return None, index
+
+
+def _parse_js_number(text: str, index: int) -> tuple[float | None, int]:
+    match = re.match(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?", text[index:])
+    if not match:
+        return None, index
+    raw = match.group(0)
+    try:
+        if any(ch in raw for ch in ".eE"):
+            return float(raw), index + len(raw)
+        return int(raw), index + len(raw)  # type: ignore[return-value]
+    except ValueError:
+        return None, index
+
+
+def _skip_js_value(text: str, index: int) -> int:
+    """Walk a value we will not keep (functions, price series, unknown calls)."""
+    index = _skip_ws_comments(text, index)
+    if index >= len(text):
+        return index
+    depth_brace = 0
+    depth_paren = 0
+    depth_brack = 0
+    in_str: str | None = None
+    escape = False
+    started = False
+    while index < len(text):
+        ch = text[index]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_str:
+                in_str = None
+            index += 1
+            continue
+        if ch in "\"'":
+            in_str = ch
+            started = True
+            index += 1
+            continue
+        if ch == "{":
+            depth_brace += 1
+            started = True
+        elif ch == "}":
+            if depth_brace == 0 and depth_paren == 0 and depth_brack == 0:
+                return index
+            depth_brace = max(0, depth_brace - 1)
+        elif ch == "(":
+            depth_paren += 1
+            started = True
+        elif ch == ")":
+            depth_paren = max(0, depth_paren - 1)
+        elif ch == "[":
+            depth_brack += 1
+            started = True
+        elif ch == "]":
+            depth_brack = max(0, depth_brack - 1)
+        elif ch == "," and depth_brace == 0 and depth_paren == 0 and depth_brack == 0 and started:
+            return index
+        elif ch in " \t\r\n" and started and depth_brace == 0 and depth_paren == 0 and depth_brack == 0:
+            nxt = _skip_ws_comments(text, index)
+            if nxt >= len(text) or text[nxt] in ",}]":
+                return index
+        started = True
+        index += 1
+    return index
+
+
+def _parse_js_value(text: str, index: int) -> tuple[Any, int, bool]:
+    index = _skip_ws_comments(text, index)
+    if index >= len(text):
+        return None, index, False
+    ch = text[index]
+    if ch == "{":
+        obj, nxt = _parse_js_object(text, index)
+        return obj, nxt, isinstance(obj, dict)
+    if ch == "[":
+        arr, nxt = _parse_js_array(text, index)
+        return arr, nxt, isinstance(arr, list)
+    if ch in "\"'":
+        string, nxt = _parse_js_string(text, index)
+        return string, nxt, string is not None
+    if ch == "-" or ch.isdigit():
+        num, nxt = _parse_js_number(text, index)
+        return num, nxt, num is not None
+    match = re.match(r"[A-Za-z_$][\w$]*", text[index:])
+    if not match:
+        return None, index, False
+    word = match.group(0)
+    nxt = index + len(word)
+    if word == "true":
+        return True, nxt, True
+    if word == "false":
+        return False, nxt, True
+    if word in {"null", "undefined", "NaN", "Infinity"}:
+        return None, nxt, True
+    return None, index, False
+
+
+def _parse_js_array(text: str, index: int) -> tuple[list[Any] | None, int]:
+    if index >= len(text) or text[index] != "[":
+        return None, index
+    index += 1
+    out: list[Any] = []
+    while index < len(text):
+        index = _skip_ws_comments(text, index)
+        if index < len(text) and text[index] == "]":
+            return out, index + 1
+        val, index, ok = _parse_js_value(text, index)
+        if not ok:
+            index = _skip_js_value(text, index)
+        else:
+            out.append(val)
+        index = _skip_ws_comments(text, index)
+        if index < len(text) and text[index] == ",":
+            index += 1
+            continue
+        if index < len(text) and text[index] == "]":
+            return out, index + 1
+        return None, index
+    return None, index
+
+
+def _parse_js_key(text: str, index: int) -> tuple[str | None, int]:
+    index = _skip_ws_comments(text, index)
+    if index >= len(text):
+        return None, index
+    if text[index] in "\"'":
+        return _parse_js_string(text, index)
+    match = re.match(r"[A-Za-z_$][\w$]*", text[index:])
+    if not match:
+        return None, index
+    return match.group(0), index + len(match.group(0))
+
+
+def _parse_js_object(text: str, index: int) -> tuple[dict[str, Any] | None, int]:
+    if index >= len(text) or text[index] != "{":
+        return None, index
+    index += 1
+    out: dict[str, Any] = {}
+    while index < len(text):
+        index = _skip_ws_comments(text, index)
+        if index < len(text) and text[index] == "}":
+            return out, index + 1
+        key, index = _parse_js_key(text, index)
+        if not key:
+            return None, index
+        index = _skip_ws_comments(text, index)
+        if index >= len(text) or text[index] != ":":
+            return None, index
+        index += 1
+        if key in _DROP_CARD_KEYS:
+            index = _skip_js_value(text, index)
+        else:
+            val, index, ok = _parse_js_value(text, index)
+            if not ok:
+                index = _skip_js_value(text, index)
+            elif val is not None and val != "":
+                out[key] = val
+        index = _skip_ws_comments(text, index)
+        if index < len(text) and text[index] == ",":
+            index += 1
+            continue
+        if index < len(text) and text[index] == "}":
+            return out, index + 1
+        return None, index
+    return None, index
+
+
+def _js_literal_to_py(blob: str) -> dict[str, Any] | None:
+    """Parse one JS/JSON object literal. ``None`` when it is not an object."""
+    text = (blob or "").strip()
+    if not text:
+        return None
+    if text[0] == "{":
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+    obj, _end = _parse_js_object(text, 0)
+    return obj
+
+
+def _object_start(text: str, pos: int, *, lookback: int = 250_000) -> int | None:
+    """Index of the ``{`` that opens the object containing ``pos``."""
+    start_min = max(0, pos - lookback)
+    index = pos
+    depth = 0
+    in_str: str | None = None
+    while index >= start_min:
+        ch = text[index]
+        if in_str:
+            if ch == in_str:
+                slashes = 0
+                probe = index - 1
+                while probe >= start_min and text[probe] == "\\":
+                    slashes += 1
+                    probe -= 1
+                if slashes % 2 == 0:
+                    in_str = None
+            index -= 1
+            continue
+        if ch in "\"'":
+            slashes = 0
+            probe = index - 1
+            while probe >= start_min and text[probe] == "\\":
+                slashes += 1
+                probe -= 1
+            if slashes % 2 == 0:
+                in_str = ch
+            index -= 1
+            continue
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth == 0:
+                return index
+            depth -= 1
+        index -= 1
+    return None
+
+
+def extract_live_card_index(html_text: str) -> dict[str, dict[str, Any]]:
+    """Ticker → full Mom card scraped from embedded JS (no ``#fd-mom-db``).
+
+    Live factorbook inlines the objects ``cardHTML`` paints (metrics, pills,
+    status, trend, blurb / flow line, scores, streak, residual). Thin
+    ``#fd-bb-mom-db`` streak rows are ignored.
+    """
+    text = html_text or ""
+    found: dict[str, dict[str, Any]] = {}
+    for match in _JS_TICKER_KEY_RE.finditer(text):
+        short = _short(match.group(4) or "")
+        if not short or len(short) > 12 or not short[0].isalpha():
+            continue
+        start = _object_start(text, match.start())
+        if start is None:
+            continue
+        try:
+            parsed, _end = _parse_js_object(text, start)
+        except Exception:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        owner = _short(str(parsed.get("t") or parsed.get("ticker") or parsed.get("d") or ""))
+        if owner != short:
+            continue
+        card = slim_mom_card(parsed)
+        if not is_dense_card(card):
+            continue
+        prev = found.get(short)
+        if prev is None or _prefer_new(card, prev):
+            found[short] = _fill_card(card, prev) if prev else card
+    return found
 
 
 def lookup_live_metrics(live_map: Mapping[str, Any] | None, ticker: str) -> dict[str, float]:
@@ -1329,6 +1887,7 @@ def strip_js() -> str:
   var DB_ID = "fd-breakout-db";
   var MOM_CACHE_ID = "fd-bb-mom-cache";
   var MOM_DB_ID = "fd-bb-mom-db";
+  var FULL_DB_ID = "fd-bb-mom-full-db";
   var VIEW_BO = "view-breakout";
   var VIEW_BD = "view-breakdown";
   var GRID_BO = "breakout-grid";
@@ -1553,13 +2112,253 @@ def strip_js() -> str:
     if (typeof fn !== "function") return "";
     try {{ return fn(card) || ""; }} catch (e2) {{ return ""; }}
   }}
+  var SKIP_CARD = {{px_series:1,prices:1,closes:1,history:1,px_hist:1,mom_score_series:1,series:1,spark:1,html:1,svg:1,node:1,_card:1,card:1}};
+  function realPills(card) {{
+    var keys = ["enrich_pills","pills","vol_pills","opt_pills","badges"];
+    var out = [];
+    if (!card || typeof card !== "object") return out;
+    for (var i = 0; i < keys.length; i++) {{
+      var raw = card[keys[i]];
+      if (!raw) continue;
+      var list = Array.isArray(raw) ? raw : null;
+      if (!list && typeof raw === "object") {{
+        var names = Object.keys(raw);
+        list = [];
+        for (var n = 0; n < names.length; n++) {{
+          var item = raw[names[n]];
+          if (item && typeof item === "object") list.push(item);
+          else if (item) list.push({{label: names[n], on: item}});
+        }}
+      }}
+      if (!list) continue;
+      for (var j = 0; j < list.length; j++) {{
+        var pill = list[j];
+        if (!pill) continue;
+        var key = String((typeof pill === "object" && pill.key) || "");
+        if (key === "fd-bb" || key === "fd-bb-band" || key === "fd-bb-delta") continue;
+        var label = typeof pill === "object" ? String(pill.label || pill.name || pill.key || "") : String(pill);
+        if (!label) continue;
+        out.push(pill);
+      }}
+    }}
+    return out;
+  }}
+  function hasTextChrome(card) {{
+    if (!card) return false;
+    var keys = ["status","trend","blurb","flow_line","flow"];
+    for (var i = 0; i < keys.length; i++) {{
+      if (String(card[keys[i]] || "").trim()) return true;
+    }}
+    return false;
+  }}
+  function hasActiveTags(card) {{
+    if (!card) return false;
+    var tags = card.tags || card.digest_tags || card.active_tags || card.on_tags;
+    if (typeof tags === "string" && tags.trim()) return true;
+    if (Array.isArray(tags) && tags.length) return true;
+    var tg = card.tg || card.tgs;
+    if (tg && typeof tg === "object" && !Array.isArray(tg)) {{
+      var ks = Object.keys(tg);
+      for (var i = 0; i < ks.length; i++) {{
+        var v = tg[ks[i]];
+        if (v === true || v === 1 || v === "1" || v === "on" || v === "ON") return true;
+      }}
+    }}
+    return false;
+  }}
+  function isDenseCard(card) {{
+    if (!card || typeof card !== "object" || card.nodeType) return false;
+    return realPills(card).length > 0 || hasTextChrome(card) || hasActiveTags(card);
+  }}
+  function chromeScore(card) {{
+    if (!card || typeof card !== "object" || card.nodeType) return 0;
+    var n = 0;
+    if (realPills(card).length) n += 3;
+    if (hasTextChrome(card)) n += 2;
+    if (hasActiveTags(card)) n += 1;
+    var m = null;
+    try {{ m = card.metrics; }} catch (eMet) {{ m = null; }}
+    if (m && typeof m === "object" && (m.r20_pct != null || m.rs_63 != null || m.atr_pct != null || m.day_pct != null || m.r20 != null || m.rs63 != null)) n += 4;
+    return n;
+  }}
+  function copyCard(card) {{
+    if (!card || typeof card !== "object" || card.nodeType) return null;
+    var out = {{}};
+    var keys = [];
+    try {{ keys = Object.keys(card); }} catch (eKeys) {{ return null; }}
+    for (var ki = 0; ki < keys.length; ki++) {{
+      var k = keys[ki];
+      if (SKIP_CARD[k]) continue;
+      try {{
+        var v = card[k];
+        if (typeof v === "function") continue;
+        out[k] = v;
+      }} catch (eGet) {{}}
+    }}
+    if (out.metrics && typeof out.metrics === "object") {{
+      var metrics = {{}};
+      for (var mk in out.metrics) {{
+        if (Object.prototype.hasOwnProperty.call(out.metrics, mk)) metrics[mk] = out.metrics[mk];
+      }}
+      out.metrics = metrics;
+    }}
+    if (Array.isArray(out.pills)) out.pills = out.pills.slice();
+    if (Array.isArray(out.enrich_pills)) out.enrich_pills = out.enrich_pills.slice();
+    if (!out.t) out.t = shortOf(out.ticker || out.d || out.name || "");
+    return out;
+  }}
+  function fillCard(primary, secondary) {{
+    var out = copyCard(primary) || {{}};
+    var extra = secondary || {{}};
+    var keys = [];
+    try {{ keys = Object.keys(extra); }} catch (eKeys) {{ keys = []; }}
+    for (var ki = 0; ki < keys.length; ki++) {{
+      var k = keys[ki];
+      if (SKIP_CARD[k]) continue;
+      var v = null;
+      try {{ v = extra[k]; }} catch (eGet) {{ continue; }}
+      if (typeof v === "function" || v == null || v === "") continue;
+      if (out[k] == null || out[k] === "") out[k] = v;
+    }}
+    var extraMetrics = null;
+    try {{ extraMetrics = extra.metrics; }} catch (eMet) {{ extraMetrics = null; }}
+    if (extraMetrics && typeof extraMetrics === "object") {{
+      if (!out.metrics || typeof out.metrics !== "object") out.metrics = {{}};
+      var metricKeys = [];
+      try {{ metricKeys = Object.keys(extraMetrics); }} catch (eKeys2) {{ metricKeys = []; }}
+      for (var mi = 0; mi < metricKeys.length; mi++) {{
+        var mk2 = metricKeys[mi];
+        var mv = null;
+        try {{ mv = extraMetrics[mk2]; }} catch (eMv) {{ continue; }}
+        if (out.metrics[mk2] == null || out.metrics[mk2] === "") out.metrics[mk2] = mv;
+      }}
+    }}
+    if (!out.t) out.t = shortOf(out.ticker || out.d || "");
+    return out;
+  }}
+  function preferCard(a, b) {{
+    if (!a) return b;
+    if (!b) return a;
+    var ad = isDenseCard(a), bd = isDenseCard(b);
+    if (ad !== bd) return bd ? b : a;
+    return chromeScore(b) > chromeScore(a) ? b : a;
+  }}
+  function rememberCard(ticker, card) {{
+    if (!isDenseCard(card)) return;
+    var slim = copyCard(card);
+    if (!slim) return;
+    var t = shortOf(ticker || slim.t || slim.ticker || slim.d || "");
+    if (!t) return;
+    if (!slim.t) slim.t = t;
+    if (!window.__FD_BB_MOM_CARDS__ || typeof window.__FD_BB_MOM_CARDS__ !== "object" || Array.isArray(window.__FD_BB_MOM_CARDS__)) {{
+      window.__FD_BB_MOM_CARDS__ = {{}};
+    }}
+    var prev = window.__FD_BB_MOM_CARDS__[t];
+    if (!prev) {{
+      window.__FD_BB_MOM_CARDS__[t] = slim;
+      return;
+    }}
+    var picked = preferCard(prev, slim);
+    var other = picked === slim ? prev : slim;
+    window.__FD_BB_MOM_CARDS__[t] = fillCard(picked, other);
+  }}
+  function fullDbCards() {{
+    var el = $(FULL_DB_ID);
+    if (!el) return [];
+    var parsed = null;
+    try {{ parsed = JSON.parse(el.textContent || "[]"); }} catch (eFull) {{ return []; }}
+    if (Array.isArray(parsed)) return parsed;
+    if (!parsed || typeof parsed !== "object") return [];
+    var list = [];
+    var keys = Object.keys(parsed);
+    for (var i = 0; i < keys.length; i++) {{
+      var rec = parsed[keys[i]];
+      if (!rec || typeof rec !== "object") continue;
+      if (!rec.t && !rec.ticker) rec.t = keys[i];
+      list.push(rec);
+    }}
+    return list;
+  }}
+  function denseCardFor(ticker) {{
+    var t = shortOf(ticker);
+    if (!t) return null;
+    var mem = window.__FD_BB_MOM_CARDS__;
+    if (mem && isDenseCard(mem[t])) return mem[t];
+    var cache = window.__FD_BB_MOM_CACHE__;
+    if (Array.isArray(cache)) {{
+      for (var i = 0; i < cache.length; i++) {{
+        if (cache[i] && shortOf(cache[i].t) === t && isDenseCard(cache[i].card)) return cache[i].card;
+      }}
+    }}
+    var rows = fullDbCards();
+    for (var j = 0; j < rows.length; j++) {{
+      var row = rows[j];
+      if (row && shortOf(row.t || row.ticker || row.d || "") === t && isDenseCard(row)) return row;
+    }}
+    var live = liveCard(ticker);
+    if (isDenseCard(live)) return live;
+    return null;
+  }}
+  function nodeIsDense(node) {{
+    if (!node || !node.querySelector) return false;
+    var status = node.querySelector(".status, [data-status]");
+    if (status && String(status.textContent || "").replace(/\s+/g, " ").trim()) return true;
+    var blurb = node.querySelector(".blurb, .flow-line");
+    if (blurb && String(blurb.textContent || "").replace(/\s+/g, " ").trim()) return true;
+    if (node.querySelector(".tg.on, .tag.on, .fd-tag-on, [data-on='1'], .badge.on")) return true;
+    var text = String(node.textContent || "");
+    if (/R20\s+-?\d/.test(text) && (/RS63\s+-?\d/.test(text) || /ATR%?\s+-?\d/.test(text))) return true;
+    return false;
+  }}
+  function watchCardHTML() {{
+    var fn = null;
+    try {{ fn = window.cardHTML; }} catch (e0) {{ fn = null; }}
+    if (typeof fn !== "function" || fn.__fdBbCards) return;
+    var wrapped = function (c) {{
+      try {{ rememberCard(c && (c.t || c.ticker || c.d), c); }} catch (e1) {{}}
+      return fn.apply(this, arguments);
+    }};
+    wrapped.__fdBbCards = true;
+    window.cardHTML = wrapped;
+    try {{ cardHTML = wrapped; }} catch (e2) {{}}
+  }}
+  function hydrateFullCards() {{
+    var rows = fullDbCards();
+    for (var i = 0; i < rows.length; i++) {{
+      var row = rows[i];
+      if (row) rememberCard(row.t || row.ticker || row.d, row);
+    }}
+  }}
+  function snapshotMomObjects() {{
+    var bags = [];
+    var mom = window.MOM || {{}};
+    pushBag(bags, mom.cards);
+    pushBag(bags, mom.up);
+    pushBag(bags, mom.down);
+    pushBag(bags, mom.all);
+    pushBag(bags, window.CARDS);
+    pushBag(bags, window.MOM_CARDS);
+    pushBag(bags, window.MOMUP);
+    pushBag(bags, window.MOMDOWN);
+    for (var i = 0; i < bags.length; i++) rememberCard(bags[i] && (bags[i].t || bags[i].ticker || bags[i].d), bags[i]);
+  }}
   function momCardFor(row) {{
     row = row || {{}};
     var t = shortOf(row.t || row.ticker || row.d || "");
     if (!t) return null;
-    var card = liveCard(row.ticker || row.t || t);
-    if (!card && row.card && typeof row.card === "object") card = row.card;
-    if (!card) return null;
+    var parts = [];
+    var dense = denseCardFor(row.ticker || row.t || t);
+    if (dense) parts.push(dense);
+    if (row.card && typeof row.card === "object") parts.push(row.card);
+    var live = liveCard(row.ticker || row.t || t);
+    if (live) parts.push(live);
+    if (!parts.length) return null;
+    var card = copyCard(parts[0]) || {{}};
+    for (var pi = 1; pi < parts.length; pi++) {{
+      var picked = preferCard(card, parts[pi]);
+      var other = picked === parts[pi] ? card : parts[pi];
+      card = fillCard(picked, other);
+    }}
     if (!card.t) card.t = t;
     if (!card.d) card.d = card.t;
     if (!card.ticker) card.ticker = row.ticker || t;
@@ -1773,6 +2572,8 @@ def strip_js() -> str:
     return el;
   }}
   function snapshotMom() {{
+    try {{ snapshotMomObjects(); }} catch (eObj) {{}}
+    try {{ watchCardHTML(); }} catch (eCard) {{}}
     var live = momArticles();
     if (!live.length) return;
     var cache = ensureMomCache();
@@ -1788,7 +2589,10 @@ def strip_js() -> str:
       if (copy.removeAttribute) copy.removeAttribute("id");
       if (copy.classList) copy.classList.remove("hide", "fd-bb-hid", "gics-hid");
       if (cache) cache.appendChild(copy);
-      entries.push({{ t: t, node: copy }});
+      var obj = null;
+      try {{ obj = liveCard(t); }} catch (eLive) {{ obj = null; }}
+      if (obj) rememberCard(t, obj);
+      entries.push({{ t: t, node: copy, card: isDenseCard(obj) ? copyCard(obj) : null }});
     }}
     if (entries.length) window.__FD_BB_MOM_CACHE__ = entries;
   }}
@@ -1876,7 +2680,11 @@ def strip_js() -> str:
     function takeCard(c) {{
       if (!c || typeof c !== "object" || c.nodeType) return;
       var s = slot(c.t || c.ticker || c.d || c.name || "");
-      if (s && !s.card) s.card = c;
+      if (!s) return;
+      if (!s.card) {{ s.card = copyCard(c) || c; return; }}
+      var picked = preferCard(s.card, c);
+      var other = picked === c ? s.card : c;
+      s.card = fillCard(picked, other);
     }}
     function takeMem(item) {{
       if (!item) return;
@@ -1891,6 +2699,14 @@ def strip_js() -> str:
     }}
     var cached = cacheArticles();
     for (var c = 0; c < cached.length; c++) takeNode(cached[c]);
+    try {{ hydrateFullCards(); }} catch (eFull) {{}}
+    var memCards = window.__FD_BB_MOM_CARDS__;
+    if (memCards && typeof memCards === "object") {{
+      var memKeys = Object.keys(memCards);
+      for (var mi = 0; mi < memKeys.length; mi++) takeCard(memCards[memKeys[mi]]);
+    }}
+    var fromFull = fullDbCards();
+    for (var f = 0; f < fromFull.length; f++) takeCard(fromFull[f]);
     var fromDb = momDbCards();
     for (var d = 0; d < fromDb.length; d++) takeCard(fromDb[d]);
     var fromStreak = streakCards();
@@ -2264,22 +3080,31 @@ def strip_js() -> str:
     if (matches.length > RANK_CAP_N) matches = matches.slice(0, RANK_CAP_N);
     return matches;
   }}
+  function cloneMomNode(node, item, row, card) {{
+    var copy = node.cloneNode(true);
+    if (copy.classList) copy.classList.remove("hide", "fd-bb-hid", "gics-hid");
+    if (copy.removeAttribute) copy.removeAttribute("id");
+    if (!copy.getAttribute("data-t") && item.t) copy.setAttribute("data-t", item.t);
+    copy.setAttribute("data-fd-bb-clone", "1");
+    return bindSelect(copy, row, card);
+  }}
   function materialize(item) {{
-    var card = item.card || {{ t: item.t, d: item.t, ticker: item.t }};
+    var merged = (item.card && typeof item.card === "object") ? item.card : null;
+    var dense = isDenseCard(merged) ? merged : denseCardFor(item.t);
+    var card = dense ? (copyCard(dense) || dense) : (merged || {{ t: item.t, d: item.t, ticker: item.t }});
     var row = {{
       t: item.t,
       ticker: card.ticker || item.t,
       card: card,
       score: card.score != null ? card.score : card.mom_score
     }};
-    if (item.node && item.node.cloneNode) {{
-      var copy = item.node.cloneNode(true);
-      if (copy.classList) copy.classList.remove("hide", "fd-bb-hid", "gics-hid");
-      if (copy.removeAttribute) copy.removeAttribute("id");
-      if (!copy.getAttribute("data-t") && item.t) copy.setAttribute("data-t", item.t);
-      copy.setAttribute("data-fd-bb-clone", "1");
-      return bindSelect(copy, row, card);
+    if (item.node && item.node.cloneNode && nodeIsDense(item.node)) return cloneMomNode(item.node, item, row, card);
+    if (isDenseCard(card)) {{
+      var painted = null;
+      try {{ painted = renderRow(row); }} catch (ePaint) {{ painted = null; }}
+      if (painted) return painted;
     }}
+    if (item.node && item.node.cloneNode) return cloneMomNode(item.node, item, row, card);
     return renderRow(row);
   }}
   function emptyLine(universeN) {{
@@ -2463,6 +3288,8 @@ def strip_js() -> str:
     if (hooked) window.__FD_BB_MOM_OBS__ = obs;
   }}
   function bootMomCache() {{
+    try {{ hydrateFullCards(); }} catch (eFull) {{}}
+    try {{ watchCardHTML(); }} catch (eCard) {{}}
     try {{ snapshotMom(); }} catch (eBoot) {{}}
     try {{ hydrateCacheFromDom(); }} catch (eHydrate) {{}}
     try {{ watchMomPanes(); }} catch (eWatch) {{}}
@@ -3494,15 +4321,39 @@ def _embed_mom_db(html_text: str, rows: Sequence[Mapping[str, Any]]) -> str:
     return _insert_before_breakout_js(text, tag)
 
 
+def _embed_mom_full_db(html_text: str, index: Mapping[str, Any]) -> str:
+    """Bake ``#fd-bb-mom-full-db``. Empty index leaves an existing tag in place."""
+    cards = [
+        dict(index[key])
+        for key in sorted(index)
+        if isinstance(index.get(key), Mapping) and is_dense_card(index[key])
+    ]
+    if not cards:
+        return html_text
+    blob = json.dumps(cards, separators=(",", ":"), ensure_ascii=True, default=str)
+    tag = f'<script type="application/json" id="{MOM_FULL_DB_ID}">{_script_json(blob)}</script>\n'
+    text = re.sub(
+        rf'<script\b[^>]*\bid=["\']{re.escape(MOM_FULL_DB_ID)}["\'][^>]*>.*?</script>\s*',
+        "",
+        html_text or "",
+        flags=re.I | re.S,
+    )
+    return _insert_before_breakout_js(text, tag)
+
+
 def persist_mom_universe(
     html_text: str,
     metrics: Mapping[str, Any] | None = None,
+    cards: Iterable[Mapping[str, Any]] | None = None,
 ) -> str:
-    """Snapshot Mom into ``#fd-bb-mom-cache`` so Breakout survives an empty Mom pane.
+    """Snapshot Mom so Breakout still paints full ``cardHTML`` chrome.
 
-    Live Mom grids are copied when they still hold cards. When they do not
-    (Breakout is the saved view), cards are built from ``#mom-streak-db`` plus
-    dispersion / RS63. An empty source does not wipe a cache already on the page.
+    ``#fd-bb-mom-cache`` keeps DOM clones when the Mom panes are emptied.
+    ``#fd-bb-mom-db`` stays the thin streak/gate rows. ``#fd-bb-mom-full-db``
+    is the dense card index (metrics, pills, status, trend, blurb / flow line,
+    scores, streak, residual) scraped from the live card objects, else from
+    ``cards``. Thin rows fill holes on that index; they do not replace it.
+    An empty source does not wipe a cache or full index already on the page.
     """
     text = html_text or ""
     masked, blocks = _mask_scripts(text)
@@ -3512,6 +4363,11 @@ def persist_mom_universe(
     if not isinstance(disp_db, Mapping):
         disp_db = {}
     rows = _records_from_streak(streak if isinstance(streak, Mapping) else None, disp_db, metrics or {})
+    index = merge_card_indexes(cards_to_index(cards), extract_live_card_index(text))
+    for row in rows:
+        short = _short(str(row.get("t") or ""))
+        if short and short in index:
+            index[short] = _fill_card(index[short], row)
     if not fragments and rows and not _cache_has_cards(text):
         fragments = [
             _synth_card(str(row.get("t") or ""), row, _disp_lookup(disp_db, metrics or {}, str(row.get("t") or "")))
@@ -3519,13 +4375,15 @@ def persist_mom_universe(
             if row.get("t")
         ]
     text = _embed_mom_cache(text, fragments)
-    return _embed_mom_db(text, rows)
+    text = _embed_mom_db(text, rows)
+    return _embed_mom_full_db(text, index)
 
 
 def ensure_embedded(
     html_text: str,
     ranked: Mapping[str, Any] | None = None,
     root: Any = None,
+    cards: Iterable[Mapping[str, Any]] | None = None,
 ) -> str:
     """Nav buttons + view shells + filled db + JS. Safe on live ~2.7–4.8MB HTML.
 
@@ -3536,7 +4394,9 @@ def ensure_embedded(
     onto BB rows at embed time. Mom cards also get ``data-dispersion`` from
     the residual panel / enrich book, else the RS63 already on the card.
     The same pass copies Mom cards into ``#fd-bb-mom-cache`` (or rebuilds that
-    cache from ``#mom-streak-db`` when the Mom panes are empty).
+    cache from ``#mom-streak-db`` when the Mom panes are empty) and bakes
+    ``#fd-bb-mom-full-db`` from the live card objects (or ``cards``) so
+    Breakout never paints a thin streak stub.
     """
     text = html_text or ""
     live_map = extract_live_metrics_map(text)
@@ -3560,4 +4420,4 @@ def ensure_embedded(
     if not show_binder_assigned(text):
         text = _ensure_js(text)
     text = stamp_dispersion_html(text, root=root)
-    return persist_mom_universe(text, metrics=live_map)
+    return persist_mom_universe(text, metrics=live_map, cards=cards)
