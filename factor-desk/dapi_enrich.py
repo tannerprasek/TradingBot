@@ -1146,19 +1146,15 @@ def _blank(value: Any) -> bool:
 def _attach_day(card: MutableMapping[str, Any], rec: Mapping[str, Any]) -> None:
     """Map Bloomberg ``CHG_PCT_1D`` into ``day`` / ``ret_1d`` / ``metrics.day_pct`` when empty.
 
-    Stored decimals match ``r20_pct`` (``1.2`` percent points → ``0.012``). Does not
-    overwrite a day the live card already has.
+    Stored decimals match ``r20_pct`` (``9.95`` percent points → ``0.0995``). Does not
+    overwrite a day the live card already has, and does not copy a ``day`` /
+    ``ret_1d`` that was not produced from ``CHG_PCT_1D``.
     """
     chg = as_float(rec.get("chg_pct_1d"))
-    if chg is not None:
-        card["chg_pct_1d"] = chg
-    dec = as_float(rec.get("day"))
-    if dec is None and chg is not None:
-        dec = chg / 100.0
-    if dec is None:
-        dec = as_float(rec.get("ret_1d"))
-    if dec is None:
+    if chg is None:
         return
+    card["chg_pct_1d"] = chg
+    dec = chg / 100.0
     if _blank(card.get("day")) and _blank(card.get("ret_1d")) and _blank(card.get("Day")):
         card["day"] = dec
         card["ret_1d"] = dec
@@ -1170,10 +1166,7 @@ def _attach_day(card: MutableMapping[str, Any], rec: Mapping[str, Any]) -> None:
         metrics = {}
         card["metrics"] = metrics
     if _blank(metrics.get("day_pct")) and _blank(metrics.get("r1_pct")):
-        src = as_float(card.get("day"))
-        if src is None:
-            src = as_float(card.get("ret_1d"))
-        metrics["day_pct"] = src if src is not None else dec
+        metrics["day_pct"] = dec
 
 
 def _attach_short_name(card: MutableMapping[str, Any], rec: Mapping[str, Any]) -> None:
@@ -1524,6 +1517,7 @@ def enrich_book(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     out_path: Path | str | None = None,
     write: bool = True,
+    replace: bool = False,
     progress_cb: Callable[[float, str], None] | None = None,
     asof: datetime | date | str | None = None,
     root: Path | None = None,
@@ -1533,6 +1527,10 @@ def enrich_book(
     ``session`` may be a ``blpapi.Session``, a ``RefDataSession``, or ``None``.
     ``None`` still returns a structured book with nulls + reasons (no invented
     numbers) and writes JSON so Desktop can see the attempt.
+
+    By default the written ``names`` map is merged into the file already at
+    ``out_path``. ``--tickers`` for one name updates that name and leaves the
+    rest of the book. Pass ``replace=True`` to write only the requested names.
     """
     if progress_cb:
         progress_cb(0.50, "dapi_enrich start")
@@ -1666,6 +1664,11 @@ def enrich_book(
         merge_cached_gics(rec, t, prev_book, gics_cache)
         book_names[t] = rec
 
+    book_names = merge_book_names(prev_book, book_names, replace=replace)
+    meta["n_names"] = len(book_names)
+    meta["n_updated"] = len(ordered)
+    meta["replaced"] = bool(replace)
+
     book = {
         "asof": asof_iso,
         "names": book_names,
@@ -1678,6 +1681,28 @@ def enrich_book(
     if progress_cb:
         progress_cb(0.60, "dapi_enrich done")
     return book
+
+
+def merge_book_names(
+    prev_book: Mapping[str, Any] | None,
+    fresh: Mapping[str, Any],
+    *,
+    replace: bool = False,
+) -> dict[str, Any]:
+    """Keep existing enrichment names unless ``replace`` is set.
+
+    Requested tickers are overwritten with the new pull. Every other name in
+    the previous file stays. An empty previous book returns ``fresh`` as-is.
+    """
+    fresh_names = {str(k): v for k, v in fresh.items()}
+    if replace or not isinstance(prev_book, Mapping):
+        return fresh_names
+    prev = prev_book.get("names")
+    if not isinstance(prev, dict) or not prev:
+        return fresh_names
+    merged = {str(k): v for k, v in prev.items()}
+    merged.update(fresh_names)
+    return merged
 
 
 def lookup_name(book: Mapping[str, Any] | None, ticker: str) -> dict[str, Any] | None:
@@ -1752,7 +1777,12 @@ def parse_intraday_flag(value: Any) -> bool:
 def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     p = argparse.ArgumentParser(description="Factor Desk DAPI enrichment (no news layer)")
-    p.add_argument("--tickers", default="", help="Comma-separated tickers")
+    p.add_argument("--tickers", default="", help="Comma-separated tickers. Merged into the existing book.")
+    p.add_argument(
+        "--replace",
+        action="store_true",
+        help="Replace dapi_enrichment.json names instead of merging --tickers into the book.",
+    )
     p.add_argument("--universe", default="", help="Path to ticker list")
     p.add_argument("--intraday", action="store_true", help="Also pull session volume vs ADV")
     p.add_argument("--dry-run", action="store_true", help="No DAPI; write null book + reasons")
@@ -1821,6 +1851,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         chunk_size=args.chunk_size,
         out_path=out,
         root=root,
+        replace=bool(args.replace),
     )
     n_null = sum(
         1
