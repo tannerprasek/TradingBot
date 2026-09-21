@@ -69,6 +69,7 @@ _STATE: dict[str, Any] = {
 
 REFRESH_PATHS = frozenset({"/refresh", "/api/refresh", "/api/refresh_live"})
 ADD_PATHS = frozenset({"/api/add", "/add"})
+SEARCH_PATHS = frozenset({"/api/search", "/search"})
 OPTIONS_REFRESH_PATHS = frozenset(
     {
         "/options-refresh",
@@ -696,6 +697,9 @@ class DeskHandler(BaseHTTPRequestHandler):
         if path in ADD_PATHS:
             self._start_add(query, None)
             return
+        if path in SEARCH_PATHS:
+            self._search(query, None)
+            return
         self._json(404, {"ok": False, "error": "not_found", "path": path})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -714,6 +718,9 @@ class DeskHandler(BaseHTTPRequestHandler):
             return
         if path in ADD_PATHS:
             self._start_add(query, body)
+            return
+        if path in SEARCH_PATHS:
+            self._search(query, body)
             return
         self._json(404, {"ok": False, "error": "not_found", "path": path})
 
@@ -813,6 +820,23 @@ class DeskHandler(BaseHTTPRequestHandler):
                 "n_tickers": len(tickers),
             },
         )
+
+    def _search(self, query: dict[str, list[str]], body: Any) -> None:
+        q = ""
+        if isinstance(body, dict):
+            for key in ("q", "query", "ticker", "symbol"):
+                raw = body.get(key)
+                if raw:
+                    q = str(raw).strip()
+                    break
+        if not q:
+            for key in ("q", "query", "ticker", "symbol"):
+                if query.get(key):
+                    q = str(query[key][0]).strip()
+                    break
+        import desk_dash  # local: search reads the desk book, not the refresh pipeline
+
+        self._json(200, desk_dash.search_desk(q))
 
     def _start_add(self, query: dict[str, list[str]], body: Any) -> None:
         ticker = _one_ticker(query, body)
