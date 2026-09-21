@@ -31,6 +31,8 @@ Threshold is literal **5**.
 
 A day at 5, or a missing print, breaks an above/below run.
 
+**10 trading days:** the same series also drives a composite-score change versus the print 10 points earlier (`series[-(10+1)]` after today's upsert). Under the big score the card shows only the signed delta (`+3` / `−2` / `0`) — no `10d` prefix and no `mom-score-d10` enrich pill. The streak tag stays. Hover text still says composite score, 10 trading days, prior date, and the delta. Momentum Up and Momentum Down filt-bars add one **Change** row (All / `+>3` / `+≤3` / Flat / `−≤3` / `−>3`) that filters on `mom_score_d10` inside `applyMomFilters`. There is no second Up / Down row. `+3` sits in `+≤3`; `−3` sits in `−≤3`. A missing delta stays hidden while a bucket is selected. Fewer than 11 points → no caption. Not options `score_v2` or S-score.
+
 ## Chart marks
 
 Home-card charts keep **tag-trigger** marks (already on the live desk) and add **streak bounds**. Name-drill / detail charts (and card sparks when a close series is present) use the same **2/10 yield-curve** visual language: green/red path + 50/200-day MA overlays.
@@ -52,7 +54,7 @@ Daily close series. **Positive (green):** `close > SMA50 AND close > SMA200`. **
 
 1. If `mom_score_hist.json` is missing or thin, auto-backfill from `prices_long.csv` (`trend_window_score`, last ~120 trading days)
 2. Resolves today’s score + history (live card `mom_score` wins for today)
-3. Attaches `mom_score`, `mom_streak`, `mom_streak_side`, `mom_streak_label`, `mom_streak_start` / `_end` / `_open`, and a pill on the card
+3. Attaches `mom_score`, `mom_streak`, `mom_streak_side`, `mom_streak_label`, `mom_streak_start` / `_end` / `_open`, the 10-print delta (`mom_score_d10` / `_prior` / `_date` / `_label`) when the series has at least 11 points, and pills on the card
 4. Embeds a **filled** `#mom-streak-db` JSON + JS from attached cards so live cards with `data-t` / `data-ticker` still get the tag after an HTML write
 
 `mom_score_hist.json` is gitignored (Desktop local).

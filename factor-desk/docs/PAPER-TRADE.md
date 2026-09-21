@@ -1,6 +1,8 @@
 # Paper trading on dense MOM cards
 
-Generic **Buy** / **Sell** on every dense MOM-style card that goes through live `cardHTML` (home FLAGS/WATCH, Momentum Up/Down, Breakout/Breakdown, search). Paper only — no brokerage, no size UI. One unit notional.
+> **Desk UI is binned.** Factor Desk does not show Buy/Sell, Previous trades, or the Paper nav tab. `paper_trade.ensure_embedded` strips those hosts (and `|paper` / `setView` / `paintView` hooks) so Refresh cannot put them back. This module and any on-disk book stay; the notes below describe the dormant click math, not a visible pane.
+
+Generic **Buy** / **Sell** used to sit on every dense MOM-style card that goes through live `cardHTML` (home FLAGS/WATCH, Momentum Up/Down, Breakout/Breakdown, search). Paper only — no brokerage, no size UI. One unit notional.
 
 A top-nav **Paper** tab (`#fd-nav-paper`, `data-view="paper"`) hosts the book — not a home chrome strip. Recopy [`paper_trade.py`](../paper_trade.py) to Desktop `C:\Users\MLP\Desktop\factorbook\`. Do **not** wholesale replace live `desk_dash.py`. See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §10.
 
@@ -42,6 +44,4 @@ First finite `> 0` among: `paper_mark`, `px_last` / `PX_LAST` / `LAST_PRICE`, `p
   - **week** — scorecard of closes **since Monday 00:00 America/Edmonton**: closed count, hit rate (% with positive signed return), avg win %, avg loss %. Empty: `no closed yet this week`.
   - Collapsible **Closed trades** — matching `table.fd-paper-table` (date, ticker, side, entry, exit, P&L %).
 
-Leftover `#fd-paper-home` in top chrome is stripped and CSS-hidden. Mom Up/Down chrome is otherwise unchanged. `desk_dash.write_combined` always re-embeds `#fd-paper-marks` + `#view-paper` + wrap JS (`paper_trade.ensure_embedded`) so a Refresh rewrite cannot drop the tab.
-
-Paper nav capture calls `stopImmediatePropagation` **before** `showPaper(true)` so a later Experimental listener cannot unhide `#home`. `setView("paper")` still hits `__FD_PAPER_SHOW__`.
+`desk_dash.write_combined` still calls `paper_trade.ensure_embedded`, and that call **removes** `#fd-nav-paper`, `#view-paper`, `#fd-paper-js`, `#fd-paper-css`, `#fd-paper-marks`, card `.fd-paper` hosts, and leftover `#fd-paper-home`. It does not write or delete the book.

@@ -70,7 +70,6 @@ NAV_HTML = f"""
   <button type="button" class="btn nav-btn" id="fd-nav-breakdown" data-view="breakdown" data-fd-breakdown="1">Breakdown</button>
   <button type="button" class="nav-btn" data-view="outliers">Outliers</button>
   <button type="button" class="nav-btn" data-view="options">Options</button>
-  <button type="button" class="btn nav-btn" id="fd-nav-paper" data-view="paper" data-fd-paper-nav="1">Paper</button>
   <button type="button" class="btn nav-btn" id="fd-nav-experimental" data-view="experimental" data-fd-sscore="1">Experimental</button>
 </nav>
 """.strip()
@@ -246,14 +245,15 @@ def _article_html(card: Mapping[str, Any], cache: Mapping[str, Any] | None = Non
     score = card.get("mom_score")
     if score is None:
         score, _src = mom_streak.resolve_card_score(card)
+    score_html = _score_html(card, score)
     spark = chart_marks.render_svg(card)
     mark = paper_trade.mark_of(card)
     px_attr = f' data-px="{mark}"' if mark is not None else ""
-    paper = paper_trade.chrome_html(ticker_raw, mark=mark)
     return f"""
             <article class="card" data-t="{ticker}" data-ticker="{ticker}" data-gics-sector="{sector_attr}"{px_attr}>
               <header>
                 <h2>{ticker}</h2>
+                {score_html}
                 <div class="pills">{pills}</div>
               </header>
               {spark}
@@ -267,9 +267,50 @@ def _article_html(card: Mapping[str, Any], cache: Mapping[str, Any] | None = Non
                 <div><dt>credit</dt><dd>{_fmt(card.get("credit"))}</dd></div>
                 <div><dt>mom_score</dt><dd>{_fmt(score, 0 if isinstance(score, int) else 2)}</dd></div>
               </dl>
-              {paper}
             </article>
             """
+
+
+def _score_html(card: Mapping[str, Any], score: Any) -> str:
+    """Big composite score plus the compact 10-trading-day change."""
+    if score is None:
+        return ""
+    shown: Any = score
+    try:
+        f = float(score)
+        if f.is_integer():
+            shown = int(f)
+    except (TypeError, ValueError):
+        shown = score
+    near = ""
+    label = card.get("mom_score_d10_short") or card.get("mom_score_d10_label")
+    delta = card.get("mom_score_d10")
+    if label or delta is not None:
+        side = "flat"
+        try:
+            dv = float(delta)
+            side = "up" if dv > 0 else ("down" if dv < 0 else "flat")
+            label = mom_streak.d10_short(dv)
+        except (TypeError, ValueError):
+            side = "flat"
+            label = str(label or "").removeprefix("10d").strip()
+        title = ""
+        prior = card.get("mom_score_d10_prior")
+        when = card.get("mom_score_d10_date")
+        if prior is not None and when and delta is not None and score is not None:
+            try:
+                title = mom_streak.d10_title(float(score), float(prior), str(when), float(delta))
+            except (TypeError, ValueError):
+                title = ""
+        title_attr = f' title="{html.escape(title, quote=True)}"' if title else ""
+        delta_attr = ""
+        if delta is not None:
+            delta_attr = f' data-mom-score-d10="{html.escape(str(delta), quote=True)}"'
+        near = (
+            f'<span class="mom-score-d10-near {side}" data-key="mom-score-d10-near"{delta_attr}{title_attr}>'
+            f"{html.escape(str(label))}</span>"
+        )
+    return f'<span class="score sc">{html.escape(str(shown))}{near}</span>'
 
 
 def pills_html(pills: Any) -> str:
@@ -1165,10 +1206,456 @@ def _patch_build_body(body: str, params: str, script: str) -> str:
     return body[:end] + inject + body[end:]
 
 
+def _has_change_key(inner: str) -> bool:
+    return re.search(r"(^|[,{])\s*[\"']?change[\"']?\s*:", inner) is not None
+
+
+def _patch_viewfilt_change(src: str) -> str:
+    """Give mom-up / mom-down filter state ``change:"all"``. Shared assigns too."""
+    if "viewFilt" not in src:
+        return src
+    braces: list[int] = []
+    patterns = (
+        re.compile(r"""(["'])mom-up\1\s*:\s*\{"""),
+        re.compile(r"""(["'])mom-down\1\s*:\s*\{"""),
+        re.compile(r"""viewFilt\s*\[\s*(["'])mom-up\1\s*\]\s*=\s*\{"""),
+        re.compile(r"""viewFilt\s*\[\s*(["'])mom-down\1\s*\]\s*=\s*\{"""),
+        re.compile(r"""viewFilt\s*\[\s*[A-Za-z_$][\w$]*\s*\]\s*=\s*\{"""),
+    )
+    for pat in patterns:
+        for m in pat.finditer(src):
+            brace = src.find("{", m.start())
+            if brace >= 0:
+                braces.append(brace)
+    for brace in sorted(set(braces), reverse=True):
+        end = _match_js_bracket(src, brace)
+        if end < 0 or end - brace > 2500:
+            continue
+        inner = src[brace + 1 : end]
+        if not _is_filt_state(inner) or _has_change_key(inner):
+            continue
+        src = src[:end] + ',change:"all"' + src[end:]
+    return src
+
+
+_CHANGE_LABELS = ("CHANGE", "Change")
+_CHANGE_CHIPS = (
+    '[["all","All"],["gt3","+>3"],["le3","+\u22643"],["flat","Flat"],'
+    '["nle3","\u2212\u22643"],["ngt3","\u2212>3"]]'
+)
+_CHANGE_CLICK_MARK = "/* fd-change-click */"
+
+
+def _change_pred(vf: str, card: str) -> str:
+    """Fail closed unless ``mom_score_d10`` is a finite number in the selected bucket."""
+    return (
+        " /* fd-change-pred */ var __fdD10 = Number("
+        + card
+        + ".mom_score_d10); var __fdD10ok = "
+        + card
+        + ".mom_score_d10 != null && "
+        + card
+        + '.mom_score_d10 !== "" && isFinite(__fdD10); var __fdCh = ('
+        + vf
+        + " && "
+        + vf
+        + '.change) || "all"; if (__fdCh === "+>3") __fdCh = "gt3"; else if (__fdCh === "+\u22643") __fdCh = "le3"; else if (__fdCh === "Flat") __fdCh = "flat"; else if (__fdCh === "\u2212\u22643" || __fdCh === "-\u22643") __fdCh = "nle3"; else if (__fdCh === "\u2212>3" || __fdCh === "->3") __fdCh = "ngt3"; if ('
+        + vf
+        + ' && __fdCh !== "all" && !(__fdD10ok && ((__fdCh === "gt3" && __fdD10 > 3) || (__fdCh === "le3" && __fdD10 > 0 && __fdD10 <= 3) || (__fdCh === "flat" && __fdD10 === 0) || (__fdCh === "nle3" && __fdD10 < 0 && __fdD10 >= -3) || (__fdCh === "ngt3" && __fdD10 < -3)))) return false;'
+    )
+
+
+def _strip_stale_change_pred(body: str) -> str:
+    """Drop an up/down/flat change predicate so the six buckets own the filter."""
+    marker = "/* fd-change-pred */"
+    while marker in body:
+        idx = body.find(marker)
+        end = body.find("return false;", idx)
+        if end < 0:
+            break
+        end += len("return false;")
+        block = body[idx:end]
+        if "+>3" in block and "gt3" in block and "nle3" in block and "ngt3" in block:
+            break
+        body = body[:idx] + body[end:]
+    body = re.sub(
+        r"""if\s*\(\s*[A-Za-z_$][\w$]*\.change\s*===?\s*['"](?:up|down|flat)['"][\s\S]*?\)\s*return\s+false\s*;""",
+        "",
+        body,
+    )
+    return body
+
+
+def _patch_change_apply_body(body: str, _params: str, _script: str) -> str:
+    body = _strip_stale_change_pred(body)
+    if "fd-change-pred" in body and "+>3" in body and "gt3" in body:
+        return body
+    vf = _vf_name(body)
+    if not vf:
+        return body
+    callbacks = _filter_callbacks(body)
+    if not callbacks:
+        return body
+
+    def rank(item: tuple[int, str, int, int]) -> int:
+        _ins, _card, brace, close = item
+        chunk = body[brace:close]
+        score = 0
+        for key in (vf, "score", "tags", "flows", "pills", "outlier", "sort", "status"):
+            if key and key in chunk:
+                score += 1
+        return score
+
+    chosen = max(callbacks, key=rank)
+    if rank(chosen) <= 0 and len(callbacks) != 1:
+        return body
+    insert_at, card, _brace, _close = chosen
+    return body[:insert_at] + _change_pred(vf, card) + body[insert_at:]
+
+
+def _find_all_label_calls(src: str, labels: tuple[str, ...]) -> list[tuple[int, int, str, list[tuple[int, int]]]]:
+    """Every call whose string arg equals ``labels``. End index is past ``)``."""
+    want = set(labels)
+    found: list[tuple[int, int, str, list[tuple[int, int]]]] = []
+    i = 0
+    n = len(src)
+    while i < n:
+        m = re.search(r"\b([A-Za-z_$][\w$]*)\s*\(", src[i:])
+        if not m:
+            break
+        name_start = i + m.start(1)
+        paren = i + m.end() - 1
+        close = _match_js_bracket(src, paren)
+        if close < 0:
+            i = paren + 1
+            continue
+        args = _split_js_args(src, paren, close)
+        if any(_full_js_string(src[a:b]) in want for a, b in args):
+            found.append((name_start, close + 1, m.group(1), args))
+            i = close + 1
+            continue
+        i = paren + 1
+    return found
+
+
+def _change_call_kind(src: str, call: tuple[int, int, str, list[tuple[int, int]]]) -> str:
+    chunk = src[call[0] : call[1]]
+    if any(tok in chunk for tok in ("gt3", "+>3", "nle3", "ngt3", "fd-change-row")):
+        return "granular"
+    return "legacy"
+
+
+def _skip_ws_left(src: str, i: int) -> int:
+    while i >= 0 and src[i] in " \t\r\n":
+        i -= 1
+    return i
+
+
+def _skip_ws_right(src: str, i: int) -> int:
+    n = len(src)
+    while i < n and src[i] in " \t\r\n":
+        i += 1
+    return i
+
+
+def _stmt_bounds_around(src: str, start: int, end: int) -> tuple[int, int]:
+    """Innermost statement containing ``src[start:end]`` (previous brace/semicolon through next semicolon)."""
+    n = len(src)
+    depth = 0
+    i = 0
+    breaks: dict[int, int] = {0: 0}
+    while i < start:
+        ch = src[i]
+        if ch in "\"'`":
+            i = _skip_js_string(src, i)
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch in "([{":
+            depth += 1
+            breaks[depth] = i + 1
+        elif ch in ")]}":
+            breaks.pop(depth, None)
+            depth = max(0, depth - 1)
+        elif ch == ";":
+            breaks[depth] = i + 1
+        i += 1
+    stmt_start = breaks.get(depth, 0)
+    depth2 = depth
+    i = end
+    while i < n:
+        ch = src[i]
+        if ch in "\"'`":
+            i = _skip_js_string(src, i)
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch in "([{":
+            depth2 += 1
+        elif ch in ")]}":
+            depth2 = max(0, depth2 - 1)
+        elif ch == ";" and depth2 == depth:
+            return stmt_start, i + 1
+        i += 1
+    return stmt_start, n
+
+
+def _remove_call_expr(src: str, start: int, end: int) -> str:
+    """Drop a call and the ``+`` / comma that joins it. A lone statement goes with it."""
+    left = _skip_ws_left(src, start - 1)
+    right = _skip_ws_right(src, end)
+    if left >= 0 and src[left] == "+" and not (left >= 1 and src[left - 1] in "=+"):
+        return src[:left] + src[end:]
+    if left >= 0 and src[left] == ",":
+        return src[:left] + src[end:]
+    if right < len(src) and src[right] == "+" and not (right + 1 < len(src) and src[right + 1] == "+"):
+        cut = right + 1
+        if cut < len(src) and src[cut] == "=":
+            pass
+        else:
+            return src[:start] + src[cut:]
+    if right < len(src) and src[right] == ",":
+        return src[:start] + src[right + 1 :]
+    stmt_start, stmt_end = _stmt_bounds_around(src, start, end)
+    return src[:stmt_start] + src[stmt_end:]
+
+
+def _rewrite_change_chips(src: str, call: tuple[int, int, str, list[tuple[int, int]]]) -> str | None:
+    """Replace the chips argument of a Change call with the six granular buckets."""
+    start, end, name, args = call
+    new_args: list[str] = []
+    replaced = False
+    for a, b in args:
+        raw = src[a:b]
+        stripped = raw.strip()
+        if _full_js_string(stripped) is not None:
+            new_args.append(raw)
+            continue
+        if not replaced and (
+            stripped.startswith("[") or re.fullmatch(r"[A-Za-z_$][\w$]*", stripped)
+        ):
+            lead = re.match(r"\s*", raw).group(0)  # type: ignore[union-attr]
+            trail = re.search(r"\s*$", raw).group(0)  # type: ignore[union-attr]
+            new_args.append(lead + _CHANGE_CHIPS + trail)
+            replaced = True
+            continue
+        # mkGrp's 4th arg is a transform. vf.change is a string and throws on click.
+        if replaced and not _is_js_function_expr(raw) and len(new_args) >= 3:
+            continue
+        new_args.append(raw)
+    if not replaced:
+        return None
+    return src[:start] + name + "(" + ",".join(new_args) + ")" + src[end:]
+
+
+def _is_js_function_expr(text: str) -> bool:
+    """True when a call arg is a function or an explicit ``undefined`` map."""
+    s = text.strip()
+    if s in {"undefined", "void 0"}:
+        return True
+    return s.startswith("function") or "=>" in s
+
+
+def _drop_change_value_args(body: str) -> str:
+    """``mkGrp(label, items, key, map)`` — never pass ``vf.change`` as ``map``."""
+    calls = _find_all_label_calls(body, _CHANGE_LABELS)
+    for start, end, name, args in reversed(calls):
+        if len(args) <= 3:
+            continue
+        kept: list[str] = []
+        for i, (a, b) in enumerate(args):
+            raw = body[a:b]
+            if i < 3 or _is_js_function_expr(raw):
+                kept.append(raw)
+        body = body[:start] + name + "(" + ",".join(kept) + ")" + body[end:]
+    return body
+
+
+def _enclosing_brace(src: str, start: int) -> int | None:
+    """Index of the ``{`` that contains ``start``, scanning from the beginning of ``src``."""
+    n = len(src)
+    stack: list[int] = []
+    i = 0
+    while i < start and i < n:
+        ch = src[i]
+        if ch in "\"'`":
+            i = _skip_js_string(src, i)
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            stack.pop()
+        i += 1
+    return stack[-1] if stack else None
+
+
+def _call_is_mom_gated(body: str, start: int) -> bool:
+    brace = _enclosing_brace(body, start)
+    if brace is None:
+        return False
+    head = body[max(0, brace - 240) : brace]
+    return "mom-up" in head and "mom-down" in head
+
+
+def _strip_up_plus_statements(body: str) -> str:
+    spans = _split_js_statements(body)
+    for start, end in reversed(spans):
+        if "Up (+)" in body[start:end]:
+            body = body[:start] + body[end:]
+    return body
+
+
+def _inject_granular_change(body: str, params: str) -> str:
+    if _find_label_call(body, _CHANGE_LABELS):
+        return body
+    score = _find_label_call(body, ("SCORE", "Score"))
+    if not score:
+        return body
+    view = _view_param(params, body)
+    name = score[2]
+    new_call = f'{name}("CHANGE",{_CHANGE_CHIPS},"change")'
+    cond = f'({view}==="mom-up"||{view}==="mom-down")'
+    spans = _split_js_statements(body)
+    score_stmt = _span_containing(spans, score[0])
+    if not score_stmt:
+        return body
+    after = body[score[1] : score_stmt[1]]
+    if re.match(r"\s*,", after):
+        expr = "(" + cond + "?" + new_call + ':"")'
+        return body[: score[1]] + ", " + expr + body[score[1] :]
+    if re.match(r"\s*\+", after):
+        expr = "(" + cond + "?" + new_call + ':"")'
+        return body[: score[1]] + " + " + expr + body[score[1] :]
+    start, end = score_stmt
+    rel = score[0] - start
+    cloned = body[start:end][:rel] + new_call + body[start:end][rel + (score[1] - score[0]) :]
+    cloned = cloned.strip()
+    if not cloned.endswith(";"):
+        cloned += ";"
+    inject = " if (" + cond + ") { " + cloned + " }"
+    return body[:end] + inject + body[end:]
+
+
+def _patch_change_build_body(body: str, params: str, _script: str) -> str:
+    """One Change row: All / +>3 / +≤3 / Flat / −≤3 / −>3. Legacy Up/Down is removed."""
+    calls = _find_all_label_calls(body, _CHANGE_LABELS)
+    granular = [c for c in calls if _change_call_kind(body, c) == "granular"]
+    legacy = [c for c in calls if _change_call_kind(body, c) != "granular"]
+    if granular:
+        for call in reversed(legacy):
+            body = _remove_call_expr(body, call[0], call[1])
+    elif legacy:
+        keep = legacy[0]
+        for call in reversed(legacy[1:]):
+            body = _remove_call_expr(body, call[0], call[1])
+        if _call_is_mom_gated(body, keep[0]):
+            rewritten = _rewrite_change_chips(body, keep)
+            body = rewritten if rewritten is not None else _remove_call_expr(body, keep[0], keep[1])
+        else:
+            body = _remove_call_expr(body, keep[0], keep[1])
+    body = _strip_up_plus_statements(body)
+    body = _inject_granular_change(body, params)
+    return _drop_change_value_args(body)
+
+
+def _change_click_js() -> str:
+    return r"""
+/* fd-change-click */
+function __fdChangeView(el) {
+  if (!el || !el.closest) return "";
+  var filt = el.closest("#mom-down-filt, #mom-up-filt");
+  if (filt && filt.id === "mom-down-filt") return "mom-down";
+  if (filt && filt.id === "mom-up-filt") return "mom-up";
+  var host = el.closest("#view-mom-down, #view-mom-up");
+  if (host && host.id === "view-mom-down") return "mom-down";
+  if (host && host.id === "view-mom-up") return "mom-up";
+  var marked = el.closest("[data-view='mom-down'], [data-view='mom-up']");
+  if (marked) {
+    var dv = marked.getAttribute("data-view") || "";
+    if (dv === "mom-down" || dv === "mom-up") return dv;
+  }
+  return "";
+}
+function __fdChangeEmpty(view) {
+  try {
+    if (!document || !document.getElementById || !view) return;
+    var grid = document.getElementById(view === "mom-down" ? "mom-down-grid" : "mom-up-grid");
+    if (!grid || !grid.querySelectorAll) return;
+    var cards = grid.querySelectorAll("article, .card");
+    var msg = grid.querySelector("[data-fd-change-empty]");
+    if (cards.length) {
+      if (msg && msg.parentNode) msg.parentNode.removeChild(msg);
+      return;
+    }
+    if (grid.querySelector(".empty")) return;
+    var p = document.createElement("p");
+    p.className = "empty";
+    p.setAttribute("data-fd-change-empty", "1");
+    p.textContent = "No names match this filter.";
+    grid.appendChild(p);
+  } catch (eEmpty) {}
+}
+if (typeof paintView === "function" && !paintView.__fdChangeWrapped) {
+  var __fdPaintView = paintView;
+  paintView = function (view) {
+    var out = __fdPaintView.apply(this, arguments);
+    var ch = "";
+    try { ch = (viewFilt && viewFilt[view] && viewFilt[view].change) || ""; } catch (eCh) {}
+    if (ch && ch !== "all") __fdChangeEmpty(view);
+    return out;
+  };
+  paintView.__fdChangeWrapped = 1;
+}
+if (typeof document !== "undefined") document.addEventListener("click", function (ev) {
+  if (ev.__fdChangeClick) return;
+  var t = ev.target;
+  var b = t && t.closest ? t.closest("[data-fk='change'], [data-k='change']") : null;
+  if (!b) return;
+  var view = __fdChangeView(b);
+  if (view !== "mom-up" && view !== "mom-down") return;
+  ev.__fdChangeClick = 1;
+  var val = b.getAttribute("data-fv");
+  if (val == null || val === "") val = b.getAttribute("data-v") || "all";
+  if (val === "+>3") val = "gt3";
+  else if (val === "+\u22643") val = "le3";
+  else if (val === "Flat") val = "flat";
+  else if (val === "\u2212\u22643" || val === "-\u22643") val = "nle3";
+  else if (val === "\u2212>3" || val === "->3") val = "ngt3";
+  if (typeof viewFilt !== "undefined" && viewFilt && viewFilt[view]) viewFilt[view].change = val;
+  if (typeof paintView === "function") paintView(view);
+}, true);
+""".strip()
+
+
 def _patch_mom_filt_script(src: str) -> str:
     src = _patch_viewfilt(src)
+    src = _patch_viewfilt_change(src)
     src = _patch_named_function(src, "applyMomFilters", _patch_apply_body)
+    src = _patch_named_function(src, "applyMomFilters", _patch_change_apply_body)
     src = _patch_named_function(src, "buildFiltBar", _patch_build_body)
+    src = _patch_named_function(src, "buildFiltBar", _patch_change_build_body)
+    if _CHANGE_CLICK_MARK not in src and "viewFilt" in src and "paintView" in src:
+        src = src.rstrip() + "\n" + _change_click_js() + "\n"
     return src
 
 
@@ -1204,6 +1691,9 @@ def _fallback_js() -> str:
   var sel = {};
   sel["mom-up"] = "all";
   sel["mom-down"] = "all";
+  var selChange = {};
+  selChange["mom-up"] = "all";
+  selChange["mom-down"] = "all";
 
   function otherScripts() {
     var t = "";
@@ -1220,6 +1710,7 @@ def _fallback_js() -> str:
     if (t.indexOf("Strong momentum") < 0 || t.indexOf("Momentum building") < 0) return false;
     if (t.indexOf("Constructive") < 0 || t.indexOf("Weak / fading") < 0) return false;
     if (t.indexOf("Softening") < 0 || t.indexOf("fd-status-pred") < 0) return false;
+    if (t.indexOf("+>3") < 0 || t.indexOf("fd-change-pred") < 0) return false;
     return true;
   }
   function shown(el) {
@@ -1265,7 +1756,7 @@ def _fallback_js() -> str:
   }
   function isBar(el) {
     if (el.closest && el.closest("article, .card")) return false;
-    if (el.getAttribute && el.getAttribute("data-fd-status-row")) return false;
+    if (el.getAttribute && (el.getAttribute("data-fd-status-row") || el.getAttribute("data-fd-change-row"))) return false;
     var t = el.textContent || "";
     if (t.indexOf("OUTLIER") < 0 || t.indexOf("NEW") < 0) return false;
     if (t.indexOf("5+") < 0 && t.indexOf("6+") < 0 && t.indexOf("7+") < 0) return false;
@@ -1273,7 +1764,7 @@ def _fallback_js() -> str:
     return true;
   }
   function isTags(el) {
-    if (el.getAttribute && el.getAttribute("data-fd-status-row")) return false;
+    if (el.getAttribute && (el.getAttribute("data-fd-status-row") || el.getAttribute("data-fd-change-row"))) return false;
     var t = el.textContent || "";
     if (t.indexOf("OUTLIER") < 0 || t.indexOf("NEW") < 0) return false;
     if (t.indexOf("5+") >= 0 || t.indexOf("6+") >= 0) return false;
@@ -1290,8 +1781,15 @@ def _fallback_js() -> str:
     }
     return false;
   }
+  function isScoreGroup(el) {
+    if (!el || (el.getAttribute && (el.getAttribute("data-fd-status-row") || el.getAttribute("data-fd-change-row")))) return false;
+    var t = el.textContent || "";
+    if (t.indexOf("5+") < 0 && t.indexOf("6+") < 0) return false;
+    if (t.indexOf("OUTLIER") >= 0 || t.indexOf("NEW") >= 0 || t.indexOf("+>3") >= 0) return false;
+    return true;
+  }
   function isSort(el) {
-    if (el.getAttribute && el.getAttribute("data-fd-status-row")) return false;
+    if (el.getAttribute && (el.getAttribute("data-fd-status-row") || el.getAttribute("data-fd-change-row"))) return false;
     var t = el.textContent || "";
     if (t.indexOf("NEW") >= 0 || t.indexOf("OUTLIER") >= 0) return false;
     var hasName = t.indexOf("Name") >= 0;
@@ -1340,17 +1838,64 @@ def _fallback_js() -> str:
     return out;
   }
   function clearHide() {
-    var nodes = document.querySelectorAll(".fd-status-hid");
-    for (var i = 0; i < nodes.length; i++) nodes[i].classList.remove("fd-status-hid");
+    var nodes = document.querySelectorAll(".fd-status-hid, .fd-change-hid");
+    for (var i = 0; i < nodes.length; i++) {
+      nodes[i].classList.remove("fd-status-hid");
+      nodes[i].classList.remove("fd-change-hid");
+    }
+  }
+  function cardDelta(el) {
+    var n = el.querySelector("[data-mom-score-d10]");
+    if (n) {
+      var raw = n.getAttribute("data-mom-score-d10");
+      if (raw != null && raw !== "") {
+        var v = Number(raw);
+        if (isFinite(v)) return v;
+      }
+    }
+    var cap = el.querySelector(".mom-score-d10-near, .score-d10, [data-key='mom-score-d10-near']");
+    if (!cap) return null;
+    var t = (cap.textContent || "").replace(/\s+/g, "").replace(/\u2212/g, "-");
+    if (!t) return null;
+    var parsed = Number(t);
+    return isFinite(parsed) ? parsed : null;
+  }
+  function normChange(v) {
+    if (v === "+>3") return "gt3";
+    if (v === "+\u22643") return "le3";
+    if (v === "Flat" || v === "flat") return "flat";
+    if (v === "\u2212\u22643" || v === "-\u22643") return "nle3";
+    if (v === "\u2212>3" || v === "->3") return "ngt3";
+    if (v === "All" || v === "ALL") return "all";
+    return v || "all";
+  }
+  function changeMiss(delta, want) {
+    want = normChange(want);
+    if (!want || want === "all") return false;
+    if (delta == null || !isFinite(delta)) return true;
+    if (want === "gt3") return !(delta > 3);
+    if (want === "le3") return !(delta > 0 && delta <= 3);
+    if (want === "flat") return delta !== 0;
+    if (want === "nle3") return !(delta < 0 && delta >= -3);
+    if (want === "ngt3") return !(delta < -3);
+    return true;
+  }
+  function changeOwnedByApply() {
+    var t = otherScripts();
+    return t.indexOf("fd-change-pred") >= 0 && t.indexOf("mom_score_d10") >= 0;
   }
   function applyHide(view) {
     if (view !== "mom-up" && view !== "mom-down") { clearHide(); return; }
     var want = sel[view] || "all";
+    var ch = selChange[view] || "all";
     var cards = cardsIn(view);
+    var skipChange = changeOwnedByApply();
     for (var i = 0; i < cards.length; i++) {
       var st = cardStatus(cards[i]);
       var hide = !!(want && want !== "all" && st !== want);
       cards[i].classList.toggle("fd-status-hid", hide);
+      if (skipChange) cards[i].classList.remove("fd-change-hid");
+      else cards[i].classList.toggle("fd-change-hid", changeMiss(cardDelta(cards[i]), ch));
     }
   }
   function remember(view, val) {
@@ -1360,6 +1905,14 @@ def _fallback_js() -> str:
         window.viewFilt[view].status = val;
       }
     } catch (e1) {}
+  }
+  function rememberChange(view, val) {
+    selChange[view] = val;
+    try {
+      if (window.viewFilt && window.viewFilt[view] && typeof window.viewFilt[view] === "object") {
+        window.viewFilt[view].change = val;
+      }
+    } catch (e2) {}
   }
   function paint(view) {
     var root = document.getElementById(view === "mom-down" ? "view-mom-down" : "view-mom-up") || document.body;
@@ -1433,10 +1986,173 @@ def _fallback_js() -> str:
       if (onCls && offCls && onCls !== offCls) chips[j].className = (val === cur) ? onCls : offCls;
     }
   }
+  function changeLabelText(el) {
+    var nodes = el.querySelectorAll("span, label, b, h3, h4, p");
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].children.length) continue;
+      var tx = (nodes[i].textContent || "").replace(/\s+/g, " ").trim();
+      if (tx === "CHANGE" || tx === "Change") return true;
+    }
+    return false;
+  }
+  function dropLegacyChange(root) {
+    if (!root || !root.querySelectorAll) return;
+    var nodes = root.querySelectorAll("div, section, li");
+    var victims = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.getAttribute && el.getAttribute("data-fd-change-row")) continue;
+      if (!changeLabelText(el)) continue;
+      var text = el.textContent || "";
+      if (text.indexOf("+>3") >= 0) continue;
+      if (text.indexOf("Up (+)") < 0 && text.indexOf("Down (\u2212)") < 0 && text.indexOf("Down (-)") < 0) continue;
+      var smaller = false;
+      for (var k = 0; k < nodes.length; k++) {
+        if (nodes[k] === el || !el.contains(nodes[k])) continue;
+        if (nodes[k].getAttribute && nodes[k].getAttribute("data-fd-change-row")) continue;
+        if (changeLabelText(nodes[k])) { smaller = true; break; }
+      }
+      if (!smaller) victims.push(el);
+    }
+    for (var j = 0; j < victims.length; j++) {
+      if (victims[j].parentNode) victims[j].parentNode.removeChild(victims[j]);
+    }
+  }
+  function relabelChange(group) {
+    var nodes = group.querySelectorAll("*");
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].children.length) continue;
+      var tx = (nodes[i].textContent || "").replace(/\s+/g, " ").trim();
+      if (tx === "SCORE" || tx === "Score") { nodes[i].textContent = "CHANGE"; return; }
+    }
+  }
+  function markChange(row, view) {
+    var cur = selChange[view] || "all";
+    var chips = chipEls(row);
+    var onCls = "", offCls = "";
+    for (var i = 0; i < chips.length; i++) {
+      var cls = chips[i].className || "";
+      if (!offCls) offCls = cls;
+      if ((chips[i].textContent || "").replace(/\s+/g, " ").trim() === "All") onCls = cls;
+    }
+    if (!onCls) onCls = offCls;
+    for (var j = 0; j < chips.length; j++) {
+      var val = chips[j].getAttribute("data-fd-change-val") || "";
+      if (onCls && offCls && onCls !== offCls) chips[j].className = (val === cur) ? onCls : offCls;
+    }
+  }
+  function hasGranularChange(bar) {
+    if (!bar || (bar.textContent || "").indexOf("+>3") < 0) return false;
+    var nodes = bar.querySelectorAll("div, section, li");
+    for (var i = 0; i < nodes.length; i++) {
+      if (!changeLabelText(nodes[i])) continue;
+      if ((nodes[i].textContent || "").indexOf("+>3") < 0) continue;
+      return true;
+    }
+    return false;
+  }
+  function viewFromEl(el) {
+    if (!el || !el.closest) return "";
+    var filt = el.closest("#mom-down-filt, #mom-up-filt");
+    if (filt && filt.id === "mom-down-filt") return "mom-down";
+    if (filt && filt.id === "mom-up-filt") return "mom-up";
+    var host = el.closest("#view-mom-down, #view-mom-up");
+    if (host && host.id === "view-mom-down") return "mom-down";
+    if (host && host.id === "view-mom-up") return "mom-up";
+    var marked = el.closest("[data-view='mom-down'], [data-view='mom-up']");
+    if (marked) {
+      var dv = marked.getAttribute("data-view") || "";
+      if (dv === "mom-down" || dv === "mom-up") return dv;
+    }
+    return "";
+  }
+  function paintChange(view) {
+    var root = document.getElementById(view === "mom-down" ? "view-mom-down" : "view-mom-up") || document.body;
+    var bar = smallest(root, isBar);
+    if (!bar) return;
+    dropLegacyChange(bar);
+    if (hasGranularChange(bar)) return;
+    var existing = bar.querySelector("[data-fd-change-row]");
+    if (existing && existing.getAttribute("data-fd-change-row") === view) {
+      markChange(existing, view);
+      return;
+    }
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    var score = smallest(bar, isScoreGroup);
+    if (!score) return;
+    var g = score.cloneNode(true);
+    g.setAttribute("data-fd-change-row", view);
+    relabelChange(g);
+    var chips = chipEls(g);
+    if (!chips.length) return;
+    var parent = chips[0].parentNode;
+    var onCls = chips[0].className || "";
+    var offCls = onCls;
+    var sample = chips[0];
+    for (var i = 0; i < chips.length; i++) {
+      var tx = (chips[i].textContent || "").replace(/\s+/g, " ").trim();
+      if (tx === "All" || tx === "ALL") onCls = chips[i].className || onCls;
+      else offCls = chips[i].className || offCls;
+    }
+    for (var j = chips.length - 1; j >= 0; j--) {
+      if (chips[j].parentNode) chips[j].parentNode.removeChild(chips[j]);
+    }
+    var items = [{v:"all", l:"All"}, {v:"gt3", l:"+>3"}, {v:"le3", l:"+\u22643"}, {v:"flat", l:"Flat"}, {v:"nle3", l:"\u2212\u22643"}, {v:"ngt3", l:"\u2212>3"}];
+    var cur = selChange[view] || "all";
+    for (var n = 0; n < items.length; n++) {
+      (function (val, lab) {
+        var b = sample.cloneNode(false);
+        b.className = (val === cur) ? onCls : offCls;
+        b.textContent = lab;
+        b.setAttribute("data-fd-change-val", val);
+        if (b.tagName === "BUTTON" && !b.getAttribute("type")) b.type = "button";
+        b.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          rememberChange(view, val);
+          if (typeof window.paintView === "function") {
+            try { window.paintView(view); } catch (e4) {}
+            return;
+          }
+          if (changeOwnedByApply()) return;
+          applyHide(view);
+          var row = bar.querySelector("[data-fd-change-row]");
+          if (row) markChange(row, view);
+        });
+        parent.appendChild(b);
+      })(items[n].v, items[n].l);
+    }
+    if (score.parentNode) score.parentNode.insertBefore(g, score.nextSibling);
+    else bar.appendChild(g);
+  }
+  function onChangeClick(ev) {
+    if (ev.__fdChangeClick) return;
+    var t = ev.target;
+    if (!t || !t.closest) return;
+    var b = t.closest("[data-fk='change'], [data-k='change'], [data-fd-change-val]");
+    if (!b) return;
+    var view = viewFromEl(b);
+    if (view !== "mom-up" && view !== "mom-down") return;
+    ev.__fdChangeClick = 1;
+    var raw = b.getAttribute("data-fv");
+    if (raw == null || raw === "") raw = b.getAttribute("data-v");
+    if (raw == null || raw === "") raw = b.getAttribute("data-fd-change-val") || "";
+    var val = normChange(raw);
+    rememberChange(view, val);
+    if (typeof window.paintView === "function") {
+      try { window.paintView(view); } catch (e3) {}
+      return;
+    }
+    if (changeOwnedByApply()) return;
+    applyHide(view);
+    var row = document.querySelector("[data-fd-change-row]");
+    if (row) markChange(row, view);
+  }
   function tick() {
     var view = viewOf();
     if (view !== "mom-up" && view !== "mom-down") { clearHide(); return; }
     paint(view);
+    paintChange(view);
     applyHide(view);
   }
   var scheduled = false;
@@ -1449,7 +2165,15 @@ def _fallback_js() -> str:
   function boot() {
     if (booted) return;
     booted = true;
-    if (sourcePatched()) return;
+    document.addEventListener("click", onChangeClick, true);
+    dropLegacyChange(document);
+    if (sourcePatched()) {
+      if (window.MutationObserver && document.documentElement) {
+        var legacyObs = new MutationObserver(function () { dropLegacyChange(document); });
+        legacyObs.observe(document.documentElement, {childList: true, subtree: true});
+      }
+      return;
+    }
     tick();
     if (window.MutationObserver && document.documentElement) {
       var obs = new MutationObserver(function () { schedule(); });
@@ -1476,7 +2200,7 @@ def _html_has_mom_filt(html_text: str) -> bool:
 def _inject_status_fallback(html_text: str) -> str:
     css = (
         f'<style id="{_STATUS_CSS_ID}">\n'
-        ".fd-status-hid { display: none !important; }\n"
+        ".fd-status-hid, .fd-change-hid { display: none !important; }\n"
         "</style>\n"
     )
     js = f'<script id="{_STATUS_JS_ID}">\n{_fallback_js()}\n</script>\n'
@@ -1513,6 +2237,12 @@ def ensure_mom_status_filter(html_text: str) -> str:
     Mom Up gains All + Strong momentum + Momentum building + Constructive.
     Mom Down gains All + Weak / fading + Softening. Single-select, after Tags
     and before Sort. Outliers keeps no Status row. Does not restyle the bar.
+
+    Mom Up and Mom Down also keep a single Change row (All / +>3 / +≤3 / Flat /
+    −≤3 / −>3) filtered on ``mom_score_d10`` inside ``applyMomFilters``. A legacy
+    Up (+) / Down (−) group is removed rather than left beside the granular chips.
+    A chip inside ``#mom-down-filt`` writes ``viewFilt["mom-down"]`` only. When
+    the selected bucket matches nothing, that view's grid shows the empty line.
     """
     if not html_text:
         return html_text
@@ -1630,7 +2360,10 @@ def render_html(
       padding: 12px 14px;
     }}
     .card h2 {{ font-size: 14px; margin: 0 0 8px; letter-spacing: 0.02em; }}
-    .pills {{ min-height: 18px; }}
+    .card > header {{ display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 8px; }}
+    .card > header h2 {{ flex: 1 1 auto; margin: 0; }}
+    .score {{ margin-left: auto; text-align: right; font: 700 22px/1 "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }}
+    .pills {{ flex: 1 0 100%; min-height: 18px; }}
     dl {{
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -1647,7 +2380,6 @@ def render_html(
     {chart_marks.strip_css()}
     {breakout.strip_css()}
     {desk_hitch.strip_css()}
-    {paper_trade.strip_css()}
     {s_score.strip_css()}
   </style>
 </head>
@@ -1659,7 +2391,6 @@ def render_html(
   {drill}
   {breakout.panes_html(ranked)}
   {s_score.panes_html(ss_ranked)}
-  {paper_trade.panes_html()}
   <div id="home">
   <div class="grid">
     {"".join(rows)}
@@ -1669,7 +2400,6 @@ def render_html(
   {chart_marks.embed_db(chart_map)}
   {breakout.embed_db(ranked)}
   {desk_hitch.embed_db(hitch_map)}
-  {paper_trade.embed_db(paper_marks)}
   {s_score.embed_db(ss_ranked)}
   <script>
   {mom_streak.strip_js()}
