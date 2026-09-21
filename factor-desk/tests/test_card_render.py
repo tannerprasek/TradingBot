@@ -549,6 +549,11 @@ class Chg1dHeaderTests(unittest.TestCase):
         self.assertEqual(cr.header_title({"ticker": "MSTR US Equity", "name": "MSTR US Equity"}), "MSTR")
         self.assertEqual(cr.header_title({"ticker": "MSTR", "name": "MSTR", "short_name": "MSTR"}), "MSTR")
         self.assertEqual(cr.company_of({"ticker": "MSTR", "name": "MSTR US Equity"}), "")
+        self.assertEqual(
+            cr.company_of({"ticker": "NVDA US Equity", "short_name": "NVIDIA CORP"}),
+            "NVIDIA CORP",
+        )
+        self.assertEqual(cr.company_of({"ticker": "AAPL", "name": "AAPL 3.5 08/15/29 Corp"}), "")
         named = cr.co_name_db([{"ticker": "MSTR US Equity", "short_name": "STRATEGY INC"}])
         self.assertEqual(named.get("MSTR"), "STRATEGY INC")
         self.assertEqual(named.get("MSTR US Equity"), "STRATEGY INC")
@@ -825,6 +830,76 @@ function cardHTML(c) {
         self.assertIn(" | ", rendered)
         self.assertIn("px-1d", rendered)
         self.assertIn('class="sym"', rendered)
+
+    def test_drill_title_chip_and_full_book_dbs_survive_refresh(self) -> None:
+        live = """<!DOCTYPE html><html><head>
+<script type="application/json" id="fd-chg-1d-db">{"QQQ":0.02,"SPY":-0.01}</script>
+<script type="application/json" id="fd-co-name-db">{"QQQ":"INVESCO QQQ","SPY":"SPDR S&P 500"}</script>
+</head><body>
+<nav>
+  <button id="refresh">Refresh</button>
+  <button>Momentum Up</button>
+  <button>Momentum Down</button>
+  <button>Outliers</button>
+  <button>Options</button>
+</nav>
+<script>
+function factorDrillHTML(b) {
+  const coName = b.name || "";
+  const title = coName ? `${b.d}  ${coName}` : b.d;
+  return `<div class="drill"><div class="sym">${title}</div><div class="sub">${coName} · ${b.d}</div><div class="metrics">20d z</div></div>`;
+}
+function cardHTML(c) {
+  var t = c.t || c.d || "";
+  return `<div class="card"><div class="top"><span class="sym">${t}</span><span class="score hi"></span></div></div>`;
+}
+</script>
+</body></html>"""
+        book = {
+            "asof": "2026-09-21",
+            "names": {
+                "MSTR US Equity": {"short_name": "STRATEGY INC", "day": 0.012},
+                "AAPL US Equity": {"NAME": "APPLE INC", "CHG_PCT_1D": 1.5},
+                "NVDA US Equity": {"short_name": "NVIDIA CORP", "chg_pct_1d": -0.8},
+            },
+            "meta": {},
+        }
+        cards = [{"ticker": "MSTR US Equity", "short_name": "STRATEGY INC", "day": 0.012, "mom_score": 10}]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "factorbook.html"
+            dest.write_text(live, encoding="utf-8")
+            first = desk_dash.write_combined(dest, root=root, cards=cards, book=book)
+            text = first.read_text(encoding="utf-8")
+            again = desk_dash.write_combined(dest, root=root, cards=cards, book=book)
+            refreshed = again.read_text(encoding="utf-8")
+        for html in (text, refreshed):
+            self.assertIn("function factorDrillHTML", html)
+            self.assertIn("${b.d} | ${coName}", html)
+            self.assertNotIn("${b.d}  ${coName}", html)
+            self.assertIn("${title}${window.__fdChgSpan(b.d || b.t)}", html)
+            self.assertIn("${coName} · ${b.d}", html)
+            sub = html.split('class="sub">', 1)[1].split("</div>", 1)[0]
+            self.assertNotIn("__fdChgSpan", sub)
+            self.assertNotIn("px-1d", sub)
+            self.assertIn("window.__fdSymTitle", html)
+            self.assertIn("window.__fdChgSpan", html)
+            self.assertIn('class="px-1d chg-1d', html)
+            day = json.loads(re.search(r'id="fd-chg-1d-db">(.*?)</script>', html, re.S).group(1))
+            co = json.loads(re.search(r'id="fd-co-name-db">(.*?)</script>', html, re.S).group(1))
+            for ticker in ("QQQ", "SPY", "MSTR", "AAPL", "NVDA"):
+                self.assertIn(ticker, day)
+                self.assertIn(ticker, co)
+            self.assertAlmostEqual(day["QQQ"], 0.02)
+            self.assertAlmostEqual(day["MSTR"], 0.012)
+            self.assertAlmostEqual(day["AAPL"], 0.015)
+            self.assertAlmostEqual(day["NVDA"], -0.008)
+            self.assertEqual(co["MSTR"], "STRATEGY INC")
+            self.assertEqual(co["AAPL"], "APPLE INC")
+            self.assertEqual(co["NVDA"], "NVIDIA CORP")
+            self.assertEqual(co["QQQ"], "INVESCO QQQ")
+            self.assertGreater(len(day), 1)
+            self.assertGreater(len(co), 1)
 
 
 if __name__ == "__main__":

@@ -138,8 +138,11 @@ CO_NAME_KEYS: tuple[str, ...] = (
     "LONG_COMP_NAME",
     "nm",
 )
+# ``MSTR US Equity`` / ``SPX Index``. A trailing ``CORP`` alone is a company
+# suffix (``NVIDIA CORP``), not a bond yellow key (``AAPL 3.5 08/15/29 Corp``).
 _YELLOW_KEY_RE = re.compile(
-    r"^[A-Za-z0-9.\-]{1,12}(?:\s+[A-Za-z]{1,4})?\s+(?:Equity|Index|Comdty|Curncy|Govt|Corp|Pfd|Mtge)$",
+    r"^[A-Za-z0-9.\-]{1,12}(?:\s+[A-Za-z]{1,4})?\s+(?:Equity|Index|Comdty|Curncy|Govt|Pfd|Mtge)$"
+    r"|^(?=.*\d)[A-Za-z0-9./%\-]+(?:\s+[A-Za-z0-9./%\-]+){1,8}\s+Corp$",
     re.I,
 )
 
@@ -1991,9 +1994,9 @@ _SYM_CONCAT_RE = re.compile(
     re.I,
 )
 _SYM_TMPL_RE = re.compile(
-    r"`(?P<open><(?P<tag>span|div|b|strong)\b[^>`]*\bclass=[\"'][^\"']*\bsym\b[^\"']*[\"'][^>]*>)"
+    r"(?P<open><(?P<tag>span|div|b|strong)\b[^>]*\bclass=[\"'][^\"']*\bsym\b[^\"']*[\"'][^>]*>)"
     r"\$\{(?P<expr>[^}]+)\}"
-    r"</(?P=tag)>`",
+    r"</(?P=tag)>",
     re.I,
 )
 _SYM_ASSIGN_RE = re.compile(
@@ -2121,8 +2124,54 @@ def looks_like_chrome_title(text: str) -> bool:
     )
 
 
+_DRILL_TITLE_RE = re.compile(
+    r"""(?P<lhs>\b(?:const|let|var)\s+title\s*=\s*)"""
+    r"""coName\s*\?\s*`\$\{(?P<obj>[A-Za-z_$][\w$]*)\.d\}[ \t]+\$\{coName\}`"""
+    r"""\s*:\s*(?P<else_expr>[^;\n]+)"""
+)
+_DRILL_SYM_RE = re.compile(
+    r"""(?P<open><(?P<tag>div|span|b|strong)\b[^>]*\bclass\s*=\s*(?P<q>["'])[^"']*\bsym\b[^"']*(?P=q)[^>]*>)"""
+    r"""\$\{title\}"""
+    r"""(?P<close></(?P=tag)>)""",
+    re.I,
+)
+
+
+def _splice_factor_drill(script: str) -> str:
+    """Title line of ``factorDrillHTML``: ``SYMBOL | company`` plus the 1d chip.
+
+    Desktop builds ``${b.d}  ${coName}`` (two spaces, no chip). The chip stays
+    on that ``.sym`` line. The grey ``NAME · Ticker`` subtitle is left alone.
+    """
+    match = _DRILL_TITLE_RE.search(script)
+    if not match and "coName" not in script:
+        return script
+    obj = match.group("obj") if match else "b"
+
+    def title_repl(found: re.Match[str]) -> str:
+        name = found.group("obj")
+        return (
+            f"{found.group('lhs')}coName ? `${{{name}.d}} | ${{coName}}` : {found.group('else_expr')}"
+        )
+
+    text = _DRILL_TITLE_RE.sub(title_repl, script) if match else script
+
+    def sym_repl(found: re.Match[str]) -> str:
+        if "__fdChgSpan" in found.group(0):
+            return found.group(0)
+        return (
+            f"{found.group('open')}${{title}}${{window.__fdChgSpan({obj}.d || {obj}.t)}}"
+            f"{found.group('close')}"
+        )
+
+    if "coName" in text and "${title}" in text:
+        text = _DRILL_SYM_RE.sub(sym_repl, text)
+    return text
+
+
 def _splice_sym_js(script: str) -> str:
     """Point live ``.sym`` builders at the baked title + 1d chip."""
+    script = _splice_factor_drill(script)
 
     def concat_repl(match: re.Match[str]) -> str:
         expr = match.group("expr").strip()
@@ -2142,7 +2191,10 @@ def _splice_sym_js(script: str) -> str:
             return match.group(0)
         tag = match.group("tag")
         open_tag = match.group("open")
-        return f"`{open_tag}${{window.__fdSymTitle({expr})}}</{tag}>${{window.__fdChgSpan({expr})}}`"
+        return (
+            f"{open_tag}${{window.__fdSymTitle({expr})}}</{tag}>"
+            f"${{window.__fdChgSpan({expr})}}"
+        )
 
     def assign_repl(match: re.Match[str]) -> str:
         expr = match.group("expr").strip()
@@ -2303,11 +2355,53 @@ def embed_chg_db(mapping: Mapping[str, Any] | None) -> str:
     return f'<script type="application/json" id="{DB_SCRIPT_ID}">{blob}</script>\n'
 
 
+def _read_embedded_db(html_text: str, script_id: str) -> dict[str, Any]:
+    match = re.search(
+        rf'<script\b[^>]*\bid=["\']{re.escape(script_id)}["\'][^>]*>(.*?)</script>',
+        html_text or "",
+        re.I | re.S,
+    )
+    if not match:
+        return {}
+    raw = (match.group(1) or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return dict(data) if isinstance(data, dict) else {}
+
+
+def _merge_embedded_db(existing: Mapping[str, Any] | None, incoming: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Keep every prior ticker. An empty or one-name map must not wipe the book."""
+    merged: dict[str, Any] = {}
+    for key, val in dict(existing or {}).items():
+        if val is None or val == "":
+            continue
+        merged[str(key)] = val
+    if incoming is None:
+        return merged
+    for key, val in dict(incoming).items():
+        if val is None or val == "":
+            continue
+        merged[str(key)] = val
+    return merged
+
+
 def _ensure_chg_db(html_text: str, day_map: Mapping[str, Any] | None) -> str:
-    """Embed ticker → decimal 1d. ``None`` keeps an existing db."""
-    if day_map is None and re.search(rf"""\bid=["']{DB_SCRIPT_ID}["']""", html_text or "", re.I):
-        return html_text or ""
-    tag = embed_chg_db(day_map or {})
+    """Embed ticker → decimal 1d for the whole book. ``None`` keeps an existing db.
+
+    A later call with ``{}`` or a single ticker merges into the db already in
+    the page. It does not replace a full book with an empty object or one name.
+    """
+    existing = _read_embedded_db(html_text, DB_SCRIPT_ID)
+    if day_map is None:
+        if existing or re.search(rf"""\bid=["']{DB_SCRIPT_ID}["']""", html_text or "", re.I):
+            return html_text or ""
+        day_map = {}
+    merged = _merge_embedded_db(existing, day_map)
+    tag = embed_chg_db(merged)
     text = re.sub(
         rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
         "",
@@ -2325,10 +2419,17 @@ def embed_co_db(mapping: Mapping[str, Any] | None) -> str:
 
 
 def _ensure_co_db(html_text: str, co_map: Mapping[str, Any] | None) -> str:
-    """Embed ticker → short company name. ``None`` keeps an existing db."""
-    if co_map is None and re.search(rf"""\bid=["']{CO_DB_SCRIPT_ID}["']""", html_text or "", re.I):
-        return html_text or ""
-    tag = embed_co_db(co_map or {})
+    """Embed ticker → short company name for the whole book. ``None`` keeps an existing db.
+
+    A later call with ``{}`` or a single name merges. It does not replace the book.
+    """
+    existing = _read_embedded_db(html_text, CO_DB_SCRIPT_ID)
+    if co_map is None:
+        if existing or re.search(rf"""\bid=["']{CO_DB_SCRIPT_ID}["']""", html_text or "", re.I):
+            return html_text or ""
+        co_map = {}
+    merged = _merge_embedded_db(existing, co_map)
+    tag = embed_co_db(merged)
     text = re.sub(
         rf'<script\b[^>]*\bid=["\']{CO_DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
         "",
