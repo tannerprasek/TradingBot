@@ -2419,10 +2419,13 @@ def render_html(
     html_text = gics_filter.ensure_embedded(html_text, None)  # BINNED: remove leftover GICS strip
     html_text = mom_streak.ensure_embedded(html_text, streak_map)
     html_text = chart_marks.ensure_embedded(html_text, chart_map)
+    day_map, drop_chg = card_render.chg_1d_bake(cards, book, root=root)
     html_text = card_render.ensure_embedded(
         html_text,
-        card_render.chg_1d_db(cards, book),
+        day_map,
         card_render.co_name_db(cards, book),
+        drop_chg=drop_chg,
+        root=root,
     )
     html_text = breakout.ensure_embedded(html_text, ranked)
     html_text = book_delta.ensure_embedded(html_text, None)  # BINNED: remove leftover book-delta strip
@@ -2493,10 +2496,13 @@ def write_combined(
     text = gics_filter.ensure_embedded(text, None)  # BINNED: remove leftover GICS strip
     text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards, hist=hist))
     text = chart_marks.ensure_embedded(text, chart_marks.chart_db(cards))
+    day_map, drop_chg = card_render.chg_1d_bake(cards, book, root=base)
     text = card_render.ensure_embedded(
         text,
-        card_render.chg_1d_db(cards, book),
+        day_map,
         card_render.co_name_db(cards, book),
+        drop_chg=drop_chg,
+        root=base,
     )
     text = breakout.ensure_embedded(text, ranked)
     text = book_delta.ensure_embedded(text, None)  # BINNED: remove leftover book-delta strip

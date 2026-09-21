@@ -16,6 +16,7 @@ ROOT = HERE.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import _1d_fill  # noqa: E402
 import card_render as cr  # noqa: E402
 import desk_dash  # noqa: E402
 import mom_streak as ms  # noqa: E402
@@ -462,7 +463,7 @@ class DivCardColorTests(unittest.TestCase):
 
 class Chg1dHeaderTests(unittest.TestCase):
     def test_signed_percent_beside_name_and_distinct_from_d10(self) -> None:
-        up = cr.chg_1d_html({"t": "MSTR", "ret_1d": 0.012, "mom_score_d10": 0, "mom_score_d10_short": "0"})
+        up = cr.chg_1d_html({"t": "MSTR", "chg_pct_1d": 1.2, "ret_1d": 0.012, "mom_score_d10": 0, "mom_score_d10_short": "0"})
         self.assertIn("+1.2%", up)
         self.assertIn("px-1d", up)
         self.assertIn("chg-1d", up)
@@ -471,32 +472,42 @@ class Chg1dHeaderTests(unittest.TestCase):
         down = cr.chg_1d_html({"CHG_PCT_1D": -0.8})
         self.assertIn("\u22120.8%", down)
         self.assertIn("down", down)
-        flat = cr.chg_1d_html({"day": 0})
+        flat = cr.chg_1d_html({"CHG_PCT_1D": 0})
         self.assertIn("0.0%", flat)
         self.assertIn("flat", flat)
         self.assertEqual(cr.chg_1d_html({"t": "MSTR", "score": 10, "mom_score_d10": 0}), "")
         self.assertNotIn("n/a", up.lower())
 
-    def test_decimal_day_wins_over_bloomberg_points(self) -> None:
-        self.assertAlmostEqual(cr.day_decimal({"day": 0.012, "CHG_PCT_1D": 9.0}), 0.012)
-        self.assertAlmostEqual(cr.day_decimal({"ret_1d": -0.008}), -0.008)
+    def test_bloomberg_chg_wins_over_csv_day(self) -> None:
+        # AMD 2026-09-21: Friday CSV 547.54 → 615.52 is +12.4%, CHG_PCT_1D is +9.95%.
+        csv_day = 615.52 / 547.54 - 1.0
+        self.assertAlmostEqual(cr.day_decimal({"day": csv_day, "chg_pct_1d": 9.95}), 0.0995)
+        self.assertAlmostEqual(cr.day_decimal({"ret_1d": csv_day, "CHG_PCT_1D": 9.95}), 0.0995)
         self.assertAlmostEqual(cr.day_decimal({"CHG_PCT_1D": -0.8}), -0.008)
-        self.assertAlmostEqual(cr.day_decimal({"metrics": {"day_pct": 0.021}}), 0.021)
+        self.assertIsNone(cr.day_decimal({"ret_1d": -0.008}))
+        self.assertIsNone(cr.day_decimal({"metrics": {"day_pct": 0.021}}))
         self.assertIsNone(cr.day_decimal({"t": "MSTR", "score": 10}))
+        self.assertAlmostEqual(
+            cr.day_decimal({"day": 0.0995, "fields_used": {"chg_pct_1d": "CHG_PCT_1D"}}),
+            0.0995,
+        )
         stamped: dict = {"CHG_PCT_1D": 1.2}
         cr.alias_stats(stamped)
         self.assertAlmostEqual(stamped["day"], 0.012)
         self.assertAlmostEqual(stamped["ret_1d"], 0.012)
         self.assertAlmostEqual(stamped["metrics"]["day_pct"], 0.012)
-        kept = {"day": 0.05, "CHG_PCT_1D": 1.2, "metrics": {"day_pct": 0.05}}
+        kept = {"day": csv_day, "CHG_PCT_1D": 9.95, "metrics": {"day_pct": csv_day}}
         cr.stamp_day(kept)
-        self.assertEqual(kept["day"], 0.05)
-        self.assertEqual(kept["metrics"]["day_pct"], 0.05)
+        self.assertAlmostEqual(kept["day"], csv_day)
+        chip = cr.chg_1d_html(kept)
+        self.assertIn('data-chg-1d="0.0995"', chip)
+        self.assertNotIn("12.4%", chip)
 
     def test_article_header_places_chip_inside_name_not_score(self) -> None:
         card = {
             "ticker": "MSTR",
             "mom_score": 10,
+            "chg_pct_1d": 1.2,
             "ret_1d": 0.012,
             "mom_score_d10": 0,
             "mom_score_d10_prior": 10,
@@ -522,7 +533,7 @@ class Chg1dHeaderTests(unittest.TestCase):
         self.assertIn("mom-score-d10-near", bare)
 
     def test_header_title_pipe_when_company_present(self) -> None:
-        both = {"ticker": "MSTR", "short_name": "STRATEGY INC", "ret_1d": 0.012, "mom_score": 10}
+        both = {"ticker": "MSTR", "short_name": "STRATEGY INC", "chg_pct_1d": 1.2, "ret_1d": 0.012, "mom_score": 10}
         self.assertEqual(cr.header_title(both), "MSTR | STRATEGY INC")
         self.assertEqual(cr.company_of(both), "STRATEGY INC")
         html = desk_dash._article_html(both)
@@ -543,7 +554,7 @@ class Chg1dHeaderTests(unittest.TestCase):
             "MSTR | STRATEGY INC",
         )
         self.assertEqual(cr.header_title({"d": "MSTR", "NAME": "STRATEGY INC"}), "MSTR | STRATEGY INC")
-        symbol_only = desk_dash._article_html({"ticker": "MSTR", "name": "MSTR", "ret_1d": 0.012, "mom_score": 10})
+        symbol_only = desk_dash._article_html({"ticker": "MSTR", "name": "MSTR", "chg_pct_1d": 1.2, "ret_1d": 0.012, "mom_score": 10})
         self.assertRegex(symbol_only, r'<span class="sym">MSTR</span><span class="px-1d chg-1d up"')
         self.assertNotIn("|", symbol_only.split('class="sym">', 1)[1].split("</span>", 1)[0])
         self.assertEqual(cr.header_title({"ticker": "MSTR US Equity", "name": "MSTR US Equity"}), "MSTR")
@@ -678,7 +689,7 @@ const left = document.querySelector("article.card");
 const right = document.querySelector(".factor-card");
 const hold = document.createElement("div");
 hold.innerHTML = window.cardHTML({{
-  t: "QQQ", score: 4, ret_1d: -0.008, short_name: "INVESCO QQQ",
+  t: "QQQ", score: 4, CHG_PCT_1D: -0.8, short_name: "INVESCO QQQ",
   mom_score_d10: 0, mom_score_d10_short: "0"
 }});
 const miss = document.createElement("div");
@@ -690,7 +701,7 @@ bb.innerHTML = window.cardHTML({{
 }});
 const zero = document.createElement("div");
 zero.innerHTML = window.cardHTML({{
-  t: "ZERO", score: 6, day: 0,
+  t: "ZERO", score: 6, CHG_PCT_1D: 0,
   mom_score_d10: 0, mom_score_d10_short: "0"
 }});
 const report = {{
@@ -802,8 +813,8 @@ function cardHTML(c) {
 </script>
 </body></html>"""
         cards = [
-            {"ticker": "MSTR US Equity", "short_name": "STRATEGY INC", "day": 0.012, "mom_score": 10},
-            {"ticker": "LULU US Equity", "day": -0.008, "mom_score": 4},
+            {"ticker": "MSTR US Equity", "short_name": "STRATEGY INC", "chg_pct_1d": 1.2, "day": 0.012, "mom_score": 10},
+            {"ticker": "LULU US Equity", "chg_pct_1d": -0.8, "day": -0.008, "mom_score": 4},
         ]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -858,13 +869,13 @@ function cardHTML(c) {
         book = {
             "asof": "2026-09-21",
             "names": {
-                "MSTR US Equity": {"short_name": "STRATEGY INC", "day": 0.012},
+                "MSTR US Equity": {"short_name": "STRATEGY INC", "chg_pct_1d": 1.2, "day": 0.012},
                 "AAPL US Equity": {"NAME": "APPLE INC", "CHG_PCT_1D": 1.5},
                 "NVDA US Equity": {"short_name": "NVIDIA CORP", "chg_pct_1d": -0.8},
             },
             "meta": {},
         }
-        cards = [{"ticker": "MSTR US Equity", "short_name": "STRATEGY INC", "day": 0.012, "mom_score": 10}]
+        cards = [{"ticker": "MSTR US Equity", "short_name": "STRATEGY INC", "chg_pct_1d": 1.2, "day": 0.012, "mom_score": 10}]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dest = root / "factorbook.html"
@@ -900,6 +911,120 @@ function cardHTML(c) {
             self.assertEqual(co["QQQ"], "INVESCO QQQ")
             self.assertGreater(len(day), 1)
             self.assertGreater(len(co), 1)
+
+
+class AmdChgSotTests(unittest.TestCase):
+    """2026-09-21 AMD: Bloomberg +9.95% (615.52, +55.70), not Friday CSV +12.4%."""
+
+    def test_baked_chip_uses_chg_not_friday_adj_close(self) -> None:
+        csv_day = _1d_fill.last_two_decimal(547.54, 615.52)
+        self.assertIsNotNone(csv_day)
+        assert csv_day is not None
+        self.assertAlmostEqual(csv_day, 0.12415, places=4)
+        self.assertGreater(abs(csv_day - 0.0995) * 100.0, _1d_fill.CSV_DIVERGE_PP)
+
+        live = """<!DOCTYPE html><html><head>
+<script type="application/json" id="fd-chg-1d-db">{"AMD":0.12415,"AMD US Equity":0.12415,"QQQ":0.02,"INTC":0.05}</script>
+</head><body>
+<nav>
+  <button id="refresh">Refresh</button>
+  <button>Momentum Up</button>
+  <button>Momentum Down</button>
+  <button>Outliers</button>
+  <button>Options</button>
+</nav>
+<div class="card" data-t="AMD US Equity"><div class="top"><span class="sym">AMD</span><span class="px-1d chg-1d up" data-key="chg-1d">+12.4%</span></div></div>
+<div class="card" data-t="INTC US Equity"><div class="top"><span class="sym">INTC</span><span class="px-1d chg-1d up" data-key="chg-1d">+5.0%</span></div></div>
+<div class="card" data-t="CSCO US Equity"><div class="top"><span class="sym">CSCO</span></div></div>
+<script>var liveCards=[{t:"AMD", day:0.12415, ret_1d:0.12415},{t:"CSCO", day:0.12415}];</script>
+</body></html>"""
+        book = {
+            "asof": "2026-09-21",
+            "names": {
+                "AMD US Equity": {
+                    "chg_pct_1d": 9.95,
+                    "px_last": 615.52,
+                    "short_name": "ADVANCED MICRO DEVICES",
+                    "fields_used": {"chg_pct_1d": "CHG_PCT_1D"},
+                    "day": 0.0995,
+                },
+                "NVDA US Equity": {"chg_pct_1d": -0.8, "short_name": "NVIDIA CORP"},
+                "AAPL US Equity": {"CHG_PCT_1D": 1.5, "short_name": "APPLE INC"},
+                "INTC US Equity": {"chg_pct_1d": None, "px_last": 20.0, "day": csv_day},
+            },
+            "meta": {},
+        }
+        cards = [
+            {
+                "ticker": "AMD US Equity",
+                "short_name": "ADVANCED MICRO DEVICES",
+                "day": csv_day,
+                "ret_1d": csv_day,
+                "chg_pct_1d": 9.95,
+                "mom_score": 8,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "prices_long.csv").write_text(
+                "\n".join(
+                    [
+                        "date,ticker,adj_close",
+                        "2026-09-18,AMD,547.54",
+                        "2026-09-21,AMD,615.52",
+                        "2026-09-18,INTC,18.0",
+                        "2026-09-21,INTC,20.0",
+                        "2026-09-18,SPY,500",
+                        "2026-09-21,SPY,510",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            csv_map = _1d_fill.load_last_two(root)
+            self.assertAlmostEqual(csv_map["AMD"], csv_day, places=6)
+            dest = root / "factorbook.html"
+            dest.write_text(live, encoding="utf-8")
+            out = desk_dash.write_combined(dest, root=root, cards=cards, book=book)
+            html = out.read_text(encoding="utf-8")
+
+        day = json.loads(re.search(r'id="fd-chg-1d-db">(.*?)</script>', html, re.S).group(1))
+        self.assertAlmostEqual(day["AMD"], 0.0995, places=4)
+        self.assertAlmostEqual(day["AMD US Equity"], 0.0995, places=4)
+        self.assertNotAlmostEqual(day["AMD"], csv_day, places=3)
+        self.assertAlmostEqual(day["NVDA"], -0.008, places=4)
+        self.assertAlmostEqual(day["AAPL"], 0.015, places=4)
+        self.assertAlmostEqual(day["QQQ"], 0.02, places=4)
+        self.assertNotIn("INTC", day)
+        self.assertNotIn("SPY", day)
+        self.assertNotIn("CSCO", day)
+        self.assertNotIn("+12.4%", html)
+        self.assertNotIn("+5.0%", html)
+        self.assertIn('data-chg-1d="0.0995"', html)
+        self.assertGreater(len(day), 2)
+
+    def test_stub_day_map_keeps_full_enrich_universe(self) -> None:
+        live = """<!DOCTYPE html><html><head>
+<script type="application/json" id="fd-chg-1d-db">{"QQQ":0.02}</script>
+</head><body><span class="sym">QQQ</span></body></html>"""
+        names = {
+            "AMD US Equity": {"chg_pct_1d": 9.95, "short_name": "ADVANCED MICRO DEVICES"},
+            "NVDA US Equity": {"chg_pct_1d": -0.8, "short_name": "NVIDIA CORP"},
+            "AAPL US Equity": {"CHG_PCT_1D": 1.5, "short_name": "APPLE INC"},
+            "MSFT US Equity": {"chg_pct_1d": 1.1, "short_name": "MICROSOFT CORP"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "dapi_enrichment.json").write_text(
+                json.dumps({"asof": "2026-09-21", "names": names, "meta": {}}),
+                encoding="utf-8",
+            )
+            html = cr.ensure_embedded(live, {"ZZ": 0.004}, root=root)
+        day = json.loads(re.search(r'id="fd-chg-1d-db">(.*?)</script>', html, re.S).group(1))
+        for ticker, expect in (("AMD", 0.0995), ("NVDA", -0.008), ("AAPL", 0.015), ("MSFT", 0.011), ("QQQ", 0.02), ("ZZ", 0.004)):
+            self.assertIn(ticker, day)
+            self.assertAlmostEqual(day[ticker], expect, places=4)
+        self.assertGreater(len([k for k in day if " " in k or k in {"AMD", "NVDA", "AAPL", "MSFT"}]), 4)
 
 
 if __name__ == "__main__":

@@ -19,11 +19,14 @@ import html
 import json
 import math
 import re
-from typing import Any, Mapping, MutableMapping
+from pathlib import Path
+from typing import Any, Iterable, Mapping, MutableMapping
+
+import _1d_fill
 
 CSS_STYLE_ID = "fd-card-css"
 JS_SCRIPT_ID = "fd-card-js"
-JS_VER = "pr24-bake-sym"
+JS_VER = "chg-bb-sot"
 DB_SCRIPT_ID = "fd-chg-1d-db"
 CO_DB_SCRIPT_ID = "fd-co-name-db"
 
@@ -97,8 +100,9 @@ DAY_KEYS: tuple[str, ...] = (
     "R1",
     "ret1",
 )
-# Bloomberg ``CHG_PCT_1D`` is percent points (1.2 = +1.2%). ``day`` / ``ret_1d`` /
-# ``metrics.day_pct`` stay decimals (0.012 = +1.2%), same as ``r20_pct`` / ``ret_n``.
+# Bloomberg ``CHG_PCT_1D`` is percent points (9.95 = +9.95%) and is the title-chip
+# source of truth. ``day`` / ``ret_1d`` / ``metrics.day_pct`` are decimals
+# (0.0995 = +9.95%) and count only when they were copied from that field.
 PCT_POINT_KEYS: tuple[str, ...] = (
     "CHG_PCT_1D",
     "chg_pct_1d",
@@ -317,28 +321,14 @@ def _as_float(value: Any) -> float | None:
 
 
 def day_decimal(card: Mapping[str, Any] | None) -> float | None:
-    """1-day return as a decimal (``0.012`` → ``+1.2%``).
+    """Title-chip 1d as a decimal (``0.0995`` → one-decimal ``+10.0%``).
 
-    Decimal fields (``metrics.day_pct`` / ``ret_1d`` / ``day``) win. Bloomberg
-    ``CHG_PCT_1D`` (percent points) is used only when those are empty.
+    Bloomberg ``CHG_PCT_1D`` / ``chg_pct_1d`` (percent points) wins, including
+    when ``day`` / ``ret_1d`` disagrees (AMD 2026-09-21: CSV +12.4% vs CHG
+    +9.95%). Those decimals count only when ``fields_used`` says they were
+    copied from ``CHG_PCT_1D``. A last-two ``adj_close`` return is not a chip.
     """
-    if not isinstance(card, Mapping):
-        return None
-    metrics = card.get("metrics") if isinstance(card.get("metrics"), Mapping) else None
-    for src, keys in (
-        (metrics, _METRIC_DAY_KEYS),
-        (card, DAY_KEYS),
-    ):
-        picked = _pick_num(src, keys)
-        num = _as_float(picked)
-        if num is not None:
-            return num
-    for src in (metrics, card):
-        picked = _pick_num(src, PCT_POINT_KEYS)
-        num = _as_float(picked)
-        if num is not None:
-            return num / 100.0
-    return None
+    return _1d_fill.decimal_from_chg(card)
 
 
 def _js_round1(value: float) -> float:
@@ -463,39 +453,30 @@ def stamp_day(card: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
     return card
 
 
+def chg_1d_bake(
+    cards: Any = None,
+    book: Mapping[str, Any] | None = None,
+    *,
+    root: Path | str | None = None,
+) -> tuple[dict[str, float], set[str]]:
+    """CHG decimals for the whole enrich book, and tickers whose CHG is missing.
+
+    The missing set is removed from ``#fd-chg-1d-db`` so a stale last-two
+    ``adj_close`` percent cannot stay on the title line. Names that only
+    exist in an older embedded map and are not in this book are left alone.
+    """
+    return _1d_fill.bake_chg_db(cards, book, root=root)
+
+
 def chg_1d_db(
     cards: Any = None,
     book: Mapping[str, Any] | None = None,
+    *,
+    root: Path | str | None = None,
 ) -> dict[str, float]:
-    """Ticker → decimal 1-day return for baked cards (Bloomberg fills gaps)."""
-    out: dict[str, float] = {}
-
-    def put(ticker: Any, src: Mapping[str, Any] | None) -> None:
-        if not isinstance(src, Mapping):
-            return
-        dec = day_decimal(src)
-        if dec is None:
-            return
-        key = str(ticker or "").strip()
-        if not key:
-            return
-        val = round(float(dec), 8)
-        if key not in out:
-            out[key] = val
-        short = _short(key)
-        if short and short not in out:
-            out[short] = val
-
-    if cards:
-        for card in cards:
-            if not isinstance(card, Mapping):
-                continue
-            put(card.get("ticker") or card.get("t") or card.get("name") or card.get("d"), card)
-    names = book.get("names") if isinstance(book, Mapping) else None
-    if isinstance(names, dict):
-        for ticker, rec in names.items():
-            put(ticker, rec if isinstance(rec, Mapping) else None)
-    return out
+    """Ticker → decimal 1-day return from Bloomberg ``CHG_PCT_1D`` only."""
+    present, _missing = chg_1d_bake(cards, book, root=root)
+    return present
 
 
 def co_name_db(
@@ -826,7 +807,7 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
-  var CARD_VER = "pr24-bake-sym";
+  var CARD_VER = "chg-bb-sot";
   if (window.__FD_CARD_BOUND__ === CARD_VER) return;
   window.__FD_CARD_BOUND__ = CARD_VER;
 
@@ -905,20 +886,26 @@ def strip_js() -> str:
     stampDay(card);
     return card;
   }
-  function dayDecimal(card) {
+  function dayFromChg(card) {
     if (!card) return null;
+    var pts = pickNum(card, PCT_POINT_KEYS);
+    if (pts == null && card.metrics) pts = pickNum(card.metrics, PCT_POINT_KEYS);
+    if (pts != null) {
+      var p = Number(pts);
+      return isFinite(p) ? p / 100 : null;
+    }
+    var used = card.fields_used || null;
+    var src = used ? String(used.chg_pct_1d || used.day || used.ret_1d || "") : "";
+    if (src !== "CHG_PCT_1D" && src !== "chg_pct_1d") return null;
     var m = card.metrics || {};
     var dec = pickNum(m, METRIC_DAY_KEYS);
     if (dec == null) dec = pickNum(card, DAY_KEYS);
-    if (dec != null) {
-      var n = Number(dec);
-      return isFinite(n) ? n : null;
-    }
-    var pts = pickNum(m, PCT_POINT_KEYS);
-    if (pts == null) pts = pickNum(card, PCT_POINT_KEYS);
-    if (pts == null) return null;
-    var p = Number(pts);
-    return isFinite(p) ? p / 100 : null;
+    if (dec == null) return null;
+    var n = Number(dec);
+    return isFinite(n) ? n : null;
+  }
+  function dayDecimal(card) {
+    return dayFromChg(card);
   }
   function stampDay(card) {
     if (!card) return card;
@@ -1984,7 +1971,8 @@ _SKIP_BLOCK_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.I | re.S)
 _SYM_TAG_RE = re.compile(
     r"""(<(?P<tag>span|div|b|strong)\b[^>]*\bclass\s*=\s*(?P<q>["'])(?P<cls>[^"']*\bsym\b[^"']*)(?P=q)[^>]*>)"""
     r"""(?P<body>[^<]*)"""
-    r"""(</(?P=tag)>)""",
+    r"""(</(?P=tag)>)"""
+    r"""(?P<oldchip>\s*<span\b[^>]*\b(?:px-1d|chg-1d)\b[^>]*>.*?</span>)?""",
     re.I,
 )
 _SYM_CONCAT_RE = re.compile(
@@ -2018,7 +2006,7 @@ _HARVEST_CO_REV_RE = re.compile(
 _HARVEST_DAY_RE = re.compile(
     r'"(?:t|d|ticker|symbol)"\s*:\s*"(?P<tick>[A-Za-z][A-Za-z0-9.]{0,11})"'
     r"[^}]{0,700}?"
-    r'"(?P<key>day|ret_1d|day_pct|r1_pct|CHG_PCT_1D|chg_pct_1d)"\s*:\s*(?P<num>-?\d+(?:\.\d+)?)',
+    r'"(?P<key>CHG_PCT_1D|chg_pct_1d)"\s*:\s*(?P<num>-?\d+(?:\.\d+)?)',
     re.I,
 )
 
@@ -2055,9 +2043,9 @@ def _harvest_live_cards(html_text: str) -> tuple[dict[str, str], dict[str, float
             num = float(match.group("num"))
         except ValueError:
             continue
-        key = match.group("key").lower()
-        if key in {"chg_pct_1d"}:
-            num = num / 100.0
+        # Live card ``day`` / ``ret_1d`` can be a last-two adj_close return.
+        # Only a Bloomberg percent-point field is harvested into the chip map.
+        num = num / 100.0
         days[tick] = num
     return companies, days
 
@@ -2085,7 +2073,27 @@ def _sym_chip(ticker: str, day_map: Mapping[str, Any]) -> str:
     )
 
 
-def _bake_sym_region(region: str, day_map: Mapping[str, Any], co_map: Mapping[str, Any]) -> str:
+def _drop_keys(drop_chg: Iterable[str] | None) -> set[str]:
+    out: set[str] = set()
+    for key in drop_chg or ():
+        text = str(key or "").strip()
+        if not text:
+            continue
+        out.add(text)
+        short = _short(text)
+        if short:
+            out.add(short)
+    return out
+
+
+def _bake_sym_region(
+    region: str,
+    day_map: Mapping[str, Any],
+    co_map: Mapping[str, Any],
+    drop_chg: Iterable[str] | None = None,
+) -> str:
+    dropped = _drop_keys(drop_chg)
+
     def repl(match: re.Match[str]) -> str:
         body = " ".join((match.group("body") or "").split())
         if not body or looks_like_chrome_title(body):
@@ -2097,20 +2105,21 @@ def _bake_sym_region(region: str, day_map: Mapping[str, Any], co_map: Mapping[st
             if not sym or not re.fullmatch(r"[A-Z][A-Z0-9.]{0,9}", sym):
                 return match.group(0)
         title = _sym_title(sym, co_map) or sym
-        chip = _sym_chip(sym, day_map)
         open_tag = match.group(1)
         close_tag = match.group(6)
-        shown = html.escape(title if " | " not in body else body)
+        old_chip = match.group("oldchip") or ""
         if " | " in body:
             shown = html.escape(body)
         elif title:
             shown = html.escape(title)
         else:
             shown = html.escape(sym)
-        tail = region[match.end() : match.end() + 180]
-        has_chip = bool(re.match(r"\s*<span\b[^>]*\b(?:px-1d|chg-1d)\b", tail, re.I))
-        extra = "" if has_chip or not chip else chip
-        return f"{open_tag}{shown}{close_tag}{extra}"
+        known = _lookup_map(day_map, sym) is not None
+        omit = sym in dropped or _short(sym) in dropped
+        if known or omit:
+            chip = "" if omit and not known else _sym_chip(sym, day_map)
+            return f"{open_tag}{shown}{close_tag}{chip}"
+        return f"{open_tag}{shown}{close_tag}{old_chip}"
 
     return _SYM_TAG_RE.sub(repl, region)
 
@@ -2320,32 +2329,39 @@ def bake_dense_headers(
     html_text: str,
     day_map: Mapping[str, Any] | None = None,
     co_map: Mapping[str, Any] | None = None,
+    drop_chg: Iterable[str] | None = None,
 ) -> str:
     """Write ``SYMBOL | company`` and the 1d chip into dense ``.sym`` markup.
 
     ``paintTitle`` no-ops when that title equals the ticker already in ``.sym``
     and the page has no company / 1d to add. This rewrites the HTML string
     ``write_dash`` saves, and retargets a live ``cardHTML`` that concatenates
-    the ticker into ``.sym``.
+    the ticker into ``.sym``. The chip comes from Bloomberg ``CHG_PCT_1D``.
+    A name in ``drop_chg`` loses a previously baked percent.
     """
     text = html_text or ""
     harvested_co, harvested_day = _harvest_live_cards(text)
     companies = dict(harvested_co)
-    days = dict(harvested_day)
-    if co_map:
-        companies.update({str(k): str(v) for k, v in co_map.items() if v not in (None, "")})
+    days: dict[str, float] = {}
+    dropped = _drop_keys(drop_chg)
     if day_map:
         for key, val in day_map.items():
             num = _as_float(val)
             if num is not None:
                 days[str(key)] = num
+    for key, val in harvested_day.items():
+        if key in dropped or _short(key) in dropped:
+            continue
+        days.setdefault(key, val)
+    if co_map:
+        companies.update({str(k): str(v) for k, v in co_map.items() if v not in (None, "")})
     parts: list[str] = []
     last = 0
     for block in _SKIP_BLOCK_RE.finditer(text):
-        parts.append(_bake_sym_region(text[last : block.start()], days, companies))
+        parts.append(_bake_sym_region(text[last : block.start()], days, companies, dropped))
         parts.append(block.group(0))
         last = block.end()
-    parts.append(_bake_sym_region(text[last:], days, companies))
+    parts.append(_bake_sym_region(text[last:], days, companies, dropped))
     return _splice_sym_scripts("".join(parts))
 
 
@@ -2389,18 +2405,28 @@ def _merge_embedded_db(existing: Mapping[str, Any] | None, incoming: Mapping[str
     return merged
 
 
-def _ensure_chg_db(html_text: str, day_map: Mapping[str, Any] | None) -> str:
+def _ensure_chg_db(
+    html_text: str,
+    day_map: Mapping[str, Any] | None,
+    drop_chg: Iterable[str] | None = None,
+) -> str:
     """Embed ticker → decimal 1d for the whole book. ``None`` keeps an existing db.
 
     A later call with ``{}`` or a single ticker merges into the db already in
     the page. It does not replace a full book with an empty object or one name.
+    Tickers in ``drop_chg`` are removed so a missing ``CHG_PCT_1D`` cannot leave
+    a last-two ``adj_close`` percent on the title line.
     """
     existing = _read_embedded_db(html_text, DB_SCRIPT_ID)
-    if day_map is None:
+    if day_map is None and not drop_chg:
         if existing or re.search(rf"""\bid=["']{DB_SCRIPT_ID}["']""", html_text or "", re.I):
             return html_text or ""
         day_map = {}
     merged = _merge_embedded_db(existing, day_map)
+    for key in _drop_keys(drop_chg):
+        if key in (day_map or {}):
+            continue
+        merged.pop(key, None)
     tag = embed_chg_db(merged)
     text = re.sub(
         rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
@@ -2440,23 +2466,59 @@ def _ensure_co_db(html_text: str, co_map: Mapping[str, Any] | None) -> str:
     return _insert_early(text, tag)
 
 
+def _combine_chg_map(
+    day_map: Mapping[str, Any] | None,
+    drop_chg: Iterable[str] | None,
+    root: Path | str | None,
+) -> tuple[dict[str, float], set[str]]:
+    """Union on-disk enrich CHG with an explicit map. A 2-name map does not shrink the book."""
+    full_map: dict[str, float] = {}
+    full_drop: set[str] = set()
+    if root is not None:
+        full_map, full_drop = _1d_fill.bake_chg_db(None, None, root=root)
+    combined = dict(full_map)
+    for key in _drop_keys(drop_chg):
+        combined.pop(key, None)
+        full_drop.add(key)
+    if day_map:
+        for key, val in day_map.items():
+            num = _as_float(val)
+            if num is None:
+                continue
+            combined[str(key)] = num
+            full_drop.discard(str(key))
+            short = _short(str(key))
+            if short:
+                full_drop.discard(short)
+    return combined, full_drop
+
+
 def ensure_embedded(
     html_text: str,
     day_map: Mapping[str, Any] | None = None,
     co_map: Mapping[str, Any] | None = None,
+    *,
+    drop_chg: Iterable[str] | None = None,
+    root: Path | str | None = None,
 ) -> str:
     """Inject portable card CSS + wrap live ``cardHTML``. Safe on ~2.7–4.8MB HTML.
 
     ``day_map`` is ticker → decimal 1-day return (Bloomberg ``CHG_PCT_1D`` / 100).
     ``co_map`` is ticker → short company name (Bloomberg ``NAME``), not ``SYMBOL | name``.
-    Baked cards and the DETAIL name card pick both up on embed. Paper Buy/Sell is
-    not part of this renderer.
+    When ``root`` is set, on-disk ``dapi_enrichment.json`` CHG fields are unioned
+    in so a 2-name map cannot replace the book. ``drop_chg`` removes names whose
+    CHG is missing. Baked cards and the DETAIL name card pick both up on embed.
+    Paper Buy/Sell is not part of this renderer.
     """
     text = html_text or ""
     text = _ensure_css(text)
-    text = _ensure_chg_db(text, day_map)
+    bake_map: Mapping[str, Any] | None = day_map
+    bake_drop: Iterable[str] | None = drop_chg
+    if root is not None or drop_chg:
+        bake_map, bake_drop = _combine_chg_map(day_map, drop_chg, root)
+    text = _ensure_chg_db(text, bake_map, bake_drop)
     text = _ensure_co_db(text, co_map)
-    text = bake_dense_headers(text, day_map, co_map)
+    text = bake_dense_headers(text, bake_map, co_map, bake_drop)
     text = _ensure_sym_helpers(text)
     text = _ensure_js(text)
     return text

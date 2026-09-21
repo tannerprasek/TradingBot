@@ -300,6 +300,79 @@ class CardHookTests(unittest.TestCase):
         self.assertIsNone(missing["chg_pct_1d"])
         self.assertIsNone(missing["day"])
         self.assertEqual(missing["null_reasons"]["chg_pct_1d"], "no_candidate_resolved")
+        stale = {"ticker": "AMD US Equity", "day": 0.12415, "ret_1d": 0.12415}
+        de.attach_card_fields(stale, missing)
+        self.assertEqual(stale["day"], 0.12415)
+        self.assertNotIn("chg_pct_1d", stale)
+
+    def test_equity_pack_requests_chg_pct_1d(self) -> None:
+        fields = de.flatten_candidates(de.EQUITY_PACK_KEYS)
+        self.assertIn("CHG_PCT_1D", fields)
+        book = de.enrich_book(["AMD US Equity"], de.NullSession(), write=False)
+        self.assertIn("CHG_PCT_1D", book["meta"]["fields_attempted"])
+
+    def test_tickers_merge_into_existing_book(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "dapi_enrichment.json"
+            dest.write_text(
+                json.dumps(
+                    {
+                        "asof": "2026-09-18",
+                        "names": {
+                            "AMD US Equity": {"ticker": "AMD US Equity", "chg_pct_1d": 9.95, "px_last": 615.52},
+                            "NVDA US Equity": {"ticker": "NVDA US Equity", "chg_pct_1d": -0.4},
+                        },
+                        "meta": {"n_names": 2},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            book = de.enrich_book(
+                ["MSFT US Equity"],
+                de.DictSession({"MSFT US Equity": {"CHG_PCT_1D": 1.1, "PX_LAST": 400.0}}),
+                out_path=dest,
+                root=root,
+            )
+            self.assertEqual(set(book["names"]), {"AMD US Equity", "NVDA US Equity", "MSFT US Equity"})
+            self.assertAlmostEqual(book["names"]["AMD US Equity"]["chg_pct_1d"], 9.95)
+            self.assertAlmostEqual(book["names"]["MSFT US Equity"]["chg_pct_1d"], 1.1)
+            self.assertFalse(book["meta"]["replaced"])
+            on_disk = json.loads(dest.read_text(encoding="utf-8"))
+            self.assertEqual(set(on_disk["names"]), set(book["names"]))
+
+            replaced = de.enrich_book(
+                ["QQQ US Equity"],
+                de.NullSession(),
+                out_path=dest,
+                root=root,
+                replace=True,
+            )
+            self.assertEqual(set(replaced["names"]), {"QQQ US Equity"})
+            self.assertTrue(replaced["meta"]["replaced"])
+
+            rc = de.main(
+                ["--tickers", "AAPL US Equity", "--dry-run", "--root", str(root), "--out", str(dest)]
+            )
+            self.assertEqual(rc, 0)
+            merged = json.loads(dest.read_text(encoding="utf-8"))
+            self.assertIn("QQQ US Equity", merged["names"])
+            self.assertIn("AAPL US Equity", merged["names"])
+            rc = de.main(
+                [
+                    "--tickers",
+                    "AMD US Equity",
+                    "--dry-run",
+                    "--replace",
+                    "--root",
+                    str(root),
+                    "--out",
+                    str(dest),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            wiped = json.loads(dest.read_text(encoding="utf-8"))
+            self.assertEqual(set(wiped["names"]), {"AMD US Equity"})
 
     def test_short_name_prefers_name_over_long_comp(self) -> None:
         rec = de.build_name_record(
