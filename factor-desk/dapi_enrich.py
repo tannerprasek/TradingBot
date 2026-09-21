@@ -149,6 +149,9 @@ FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     # 4. Liquidity / friction
     "volume_avg_20d": ("VOLUME_AVG_20D", "VOLUME_AVG_30D", "AVG_DAILY_VOLUME_20D"),
     "px_last": ("PX_LAST", "LAST_PRICE", "PX_CLOSE"),
+    # Short company name for card titles (``MSTR | STRATEGY INC``). NAME is the
+    # Bloomberg short name; LONG_COMP_NAME is the fallback.
+    "short_name": ("NAME", "LONG_COMP_NAME"),
     # 1-day price change, percent points (1.2 = +1.2%). Not a decimal return.
     "chg_pct_1d": ("CHG_PCT_1D",),
     "free_float_pct": ("EQY_FREE_FLOAT_PCT", "EQY_FREE_FLOAT_PERCENT"),
@@ -196,6 +199,7 @@ EQUITY_PACK_KEYS = (
     "iv_mid",
     "volume_avg_20d",
     "px_last",
+    "short_name",
     "chg_pct_1d",
     "free_float_pct",
     "inst_pct",
@@ -932,6 +936,7 @@ def build_name_record(
         "intraday": None,
         "skew": None,
         "gics_sector_name": None,
+        "short_name": None,
         "fields_used": used,
         "null_reasons": reasons,
         "enrich_pills": [],
@@ -963,6 +968,7 @@ def build_name_record(
 
     adv = _put(rec, used, reasons, "adv_shares", raw, "volume_avg_20d")
     px = _put(rec, used, reasons, "px_last", raw, "px_last")
+    _put(rec, used, reasons, "short_name", raw, "short_name", as_type="str")
     chg = _put(rec, used, reasons, "chg_pct_1d", raw, "chg_pct_1d")
     if chg is not None:
         dec = chg / 100.0
@@ -1129,6 +1135,7 @@ def attach_card_fields(card: MutableMapping[str, Any], rec: Mapping[str, Any] | 
     name, _reason = parse_gics_sector_name(rec.get("gics_sector_name"))
     card["gics_sector_name"] = name
     _attach_day(card, rec)
+    _attach_short_name(card, rec)
     return card
 
 
@@ -1167,6 +1174,19 @@ def _attach_day(card: MutableMapping[str, Any], rec: Mapping[str, Any]) -> None:
         if src is None:
             src = as_float(card.get("ret_1d"))
         metrics["day_pct"] = src if src is not None else dec
+
+
+def _attach_short_name(card: MutableMapping[str, Any], rec: Mapping[str, Any]) -> None:
+    """Copy Bloomberg ``NAME`` onto ``short_name`` when the card does not already have one.
+
+    Leaves ``name`` alone. Live cards use ``name`` as a ticker fallback, so the
+    company string stays on ``short_name`` and the header formatter joins it.
+    """
+    if not _blank(card.get("short_name")):
+        return
+    text = as_str(rec.get("short_name"))
+    if text:
+        card["short_name"] = text
 
 
 # ---------------------------------------------------------------------------

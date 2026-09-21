@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import add_server  # noqa: E402
+import card_render as cr  # noqa: E402
 import dapi_enrich as de  # noqa: E402
 import desk_dash  # noqa: E402
 import momentum_screen  # noqa: E402
@@ -299,6 +300,26 @@ class CardHookTests(unittest.TestCase):
         self.assertIsNone(missing["chg_pct_1d"])
         self.assertIsNone(missing["day"])
         self.assertEqual(missing["null_reasons"]["chg_pct_1d"], "no_candidate_resolved")
+
+    def test_short_name_prefers_name_over_long_comp(self) -> None:
+        rec = de.build_name_record(
+            "MSTR US Equity",
+            {"NAME": "STRATEGY INC", "LONG_COMP_NAME": "MicroStrategy Inc", "CHG_PCT_1D": 1.2},
+        )
+        self.assertEqual(rec["fields_used"]["short_name"], "NAME")
+        self.assertEqual(rec["short_name"], "STRATEGY INC")
+        card: dict = {"ticker": "MSTR US Equity", "name": "MSTR US Equity"}
+        de.attach_card_fields(card, rec)
+        self.assertEqual(card["short_name"], "STRATEGY INC")
+        self.assertEqual(card["name"], "MSTR US Equity")
+        self.assertEqual(cr.header_title(card), "MSTR | STRATEGY INC")
+        self.assertAlmostEqual(card["day"], 0.012)
+        long_only = de.build_name_record("QQQ US Equity", {"LONG_COMP_NAME": "INVESCO QQQ TRUST"})
+        self.assertEqual(long_only["fields_used"]["short_name"], "LONG_COMP_NAME")
+        self.assertEqual(long_only["short_name"], "INVESCO QQQ TRUST")
+        kept = {"ticker": "MSTR", "short_name": "KEEP ME"}
+        de.attach_card_fields(kept, rec)
+        self.assertEqual(kept["short_name"], "KEEP ME")
 
     def test_attach_fields(self) -> None:
         rec = de.build_name_record("A US Equity", {"EQY_BETA": 1.1, "EQY_INST_PCT_SH_OUT": 90})

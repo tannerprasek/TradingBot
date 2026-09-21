@@ -23,8 +23,9 @@ from typing import Any, Mapping, MutableMapping
 
 CSS_STYLE_ID = "fd-card-css"
 JS_SCRIPT_ID = "fd-card-js"
-JS_VER = "pr21-chg-1d"
+JS_VER = "pr22-sym-co"
 DB_SCRIPT_ID = "fd-chg-1d-db"
+CO_DB_SCRIPT_ID = "fd-co-name-db"
 
 _BAND_WHY_RE = re.compile(r"^band\s", re.I)
 _DUMP_PILL_KEYS = frozenset({"fd-bb"})
@@ -120,6 +121,27 @@ _SKIP_PORTABLE = frozenset(
     }
 )
 _EMPTY_STAT = frozenset({"", "-", "—", "–", "−", "n/a", "na", "none", "null"})
+# Bloomberg short name first (``NAME``), then the fields the DETAIL name card already uses.
+CO_NAME_KEYS: tuple[str, ...] = (
+    "short_name",
+    "SHORT_NAME",
+    "name_short",
+    "co_name",
+    "company",
+    "company_name",
+    "COMPANY_NAME",
+    "sec_name",
+    "security_name",
+    "SECURITY_NAME",
+    "NAME",
+    "long_name",
+    "LONG_COMP_NAME",
+    "nm",
+)
+_YELLOW_KEY_RE = re.compile(
+    r"^[A-Za-z0-9.\-]{1,12}(?:\s+[A-Za-z]{1,4})?\s+(?:Equity|Index|Comdty|Curncy|Govt|Corp|Pfd|Mtge)$",
+    re.I,
+)
 
 
 def _short(ticker: Any) -> str:
@@ -331,6 +353,76 @@ def format_chg_1d(decimal: float) -> tuple[str, str]:
     return f"\u2212{abs(rounded):.1f}%", "down"
 
 
+def _text(value: Any) -> str:
+    if value is None or isinstance(value, (bool, int, float)):
+        return ""
+    text = " ".join(str(value).split()).strip()
+    if not text or text.lower() in _EMPTY_STAT:
+        return ""
+    return text
+
+
+def _is_yellow_key(text: str) -> bool:
+    return bool(_YELLOW_KEY_RE.match((text or "").strip()))
+
+
+def symbol_of(card: Mapping[str, Any] | None) -> str:
+    """Short ticker (``MSTR``), not the yellow key and not the company name."""
+    if not isinstance(card, Mapping):
+        return ""
+    for key in ("d", "t", "ticker", "symbol"):
+        short = _short(card.get(key))
+        if short:
+            return short
+    name = _text(card.get("name"))
+    if name and " " not in name and not _is_yellow_key(name):
+        return _short(name)
+    return ""
+
+
+def _clean_company(symbol: str, company: str) -> str:
+    """Company piece only. Drops a repeated symbol and yellow keys."""
+    co = " ".join(str(company or "").split()).strip()
+    if not co or _is_yellow_key(co):
+        return ""
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return co
+    if co.upper() == sym:
+        return ""
+    if " | " in co:
+        left, right = co.split(" | ", 1)
+        if left.strip().upper() == sym:
+            return _clean_company(sym, right)
+    if co.upper().startswith(sym + " "):
+        rest = co[len(sym) :].strip(" \t|-–—:·")
+        if not rest or rest.upper() == sym or _is_yellow_key(rest):
+            return ""
+        return rest
+    return co
+
+
+def company_of(card: Mapping[str, Any] | None) -> str:
+    """Short company name. Empty when missing or equal to the symbol."""
+    if not isinstance(card, Mapping):
+        return ""
+    sym = symbol_of(card)
+    for key in CO_NAME_KEYS:
+        co = _clean_company(sym, _text(card.get(key)))
+        if co:
+            return co
+    return _clean_company(sym, _text(card.get("name")))
+
+
+def header_title(card: Mapping[str, Any] | None) -> str:
+    """``MSTR | STRATEGY INC``, or the symbol alone when the company is missing."""
+    sym = symbol_of(card)
+    co = company_of(card)
+    if sym and co:
+        return f"{sym} | {co}"
+    return sym or co
+
+
 def chg_1d_html(card: Mapping[str, Any] | None) -> str:
     """Compact header chip. Empty string when the 1-day change is missing."""
     dec = day_decimal(card)
@@ -396,6 +488,45 @@ def chg_1d_db(
             if not isinstance(card, Mapping):
                 continue
             put(card.get("ticker") or card.get("t") or card.get("name") or card.get("d"), card)
+    names = book.get("names") if isinstance(book, Mapping) else None
+    if isinstance(names, dict):
+        for ticker, rec in names.items():
+            put(ticker, rec if isinstance(rec, Mapping) else None)
+    return out
+
+
+def co_name_db(
+    cards: Any = None,
+    book: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Ticker → short company name (``STRATEGY INC``), not ``SYMBOL | name``."""
+    out: dict[str, str] = {}
+
+    def put(ticker: Any, src: Mapping[str, Any] | None) -> None:
+        if not isinstance(src, Mapping):
+            return
+        worked: Mapping[str, Any] = src
+        if ticker and not symbol_of(src):
+            copied = dict(src)
+            copied["ticker"] = ticker
+            worked = copied
+        co = company_of(worked)
+        if not co:
+            return
+        key = str(ticker or symbol_of(worked) or "").strip()
+        if not key:
+            return
+        if key not in out:
+            out[key] = co
+        short = _short(key)
+        if short and short not in out:
+            out[short] = co
+
+    if cards:
+        for card in cards:
+            if not isinstance(card, Mapping):
+                continue
+            put(card.get("ticker") or card.get("t") or card.get("d") or card.get("symbol"), card)
     names = book.get("names") if isinstance(book, Mapping) else None
     if isinstance(names, dict):
         for ticker, rec in names.items():
@@ -684,7 +815,7 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
-  var CARD_VER = "pr21-chg-1d";
+  var CARD_VER = "pr22-sym-co";
   if (window.__FD_CARD_BOUND__ === CARD_VER) return;
   window.__FD_CARD_BOUND__ = CARD_VER;
 
@@ -810,6 +941,49 @@ def strip_js() -> str:
     var view = formatChg1d(dec);
     if (!view) return "";
     return '<span class="px-1d chg-1d ' + view.side + '" data-key="chg-1d" data-chg-1d="' + esc(dec) + '" title="1d CHG_PCT_1D">' + esc(view.label) + "</span>";
+  }
+  var CO_KEYS = ["short_name","SHORT_NAME","name_short","co_name","company","company_name","COMPANY_NAME","sec_name","security_name","NAME","long_name","LONG_COMP_NAME","nm"];
+  function isYellowKey(text) {
+    return /^[A-Za-z0-9.\-]{1,12}(?:\s+[A-Za-z]{1,4})?\s+(?:Equity|Index|Comdty|Curncy|Govt|Corp|Pfd|Mtge)$/i.test(String(text || "").trim());
+  }
+  function cleanCompany(sym, company) {
+    var co = String(company || "").replace(/\s+/g, " ").trim();
+    if (!co || co === "-" || co === "—" || isYellowKey(co)) return "";
+    var S = String(sym || "").trim().toUpperCase();
+    if (!S) return co;
+    if (co.toUpperCase() === S) return "";
+    var pipe = co.indexOf(" | ");
+    if (pipe >= 0 && co.slice(0, pipe).trim().toUpperCase() === S) return cleanCompany(S, co.slice(pipe + 3));
+    if (co.toUpperCase().indexOf(S + " ") === 0) {
+      var rest = co.slice(S.length).replace(/^[\s|\-–—:·]+/, "").trim();
+      if (!rest || rest.toUpperCase() === S || isYellowKey(rest)) return "";
+      return rest;
+    }
+    return co;
+  }
+  function symbolOfCard(card) {
+    if (!card) return "";
+    var sym = shortOf(card.d || card.t || card.ticker || card.symbol || "");
+    if (sym) return sym;
+    var name = String(card.name || "").replace(/\s+/g, " ").trim();
+    if (name && name.indexOf(" ") < 0 && !isYellowKey(name)) return shortOf(name);
+    return "";
+  }
+  function companyOf(card) {
+    if (!card) return "";
+    var sym = symbolOfCard(card);
+    var i, co;
+    for (i = 0; i < CO_KEYS.length; i++) {
+      co = cleanCompany(sym, card[CO_KEYS[i]]);
+      if (co) return co;
+    }
+    return cleanCompany(sym, card.name);
+  }
+  function headerTitle(card) {
+    var sym = symbolOfCard(card);
+    var co = companyOf(card);
+    if (sym && co) return sym + " | " + co;
+    return sym || co;
   }
   function activeTagsFromCard(card) {
     var out = [];
@@ -1065,7 +1239,8 @@ def strip_js() -> str:
   }
   function fallbackHTML(c) {
     c = c || {};
-    var t = esc(shortOf(c.d || c.t || c.ticker || c.name || ""));
+    var t = esc(shortOf(c.d || c.t || c.ticker || c.symbol || ""));
+    var title = esc(headerTitle(c) || shortOf(c.d || c.t || c.ticker || c.name || ""));
     var score = c.score != null ? c.score : (c.mom_score != null ? c.mom_score : "");
     var day = fmt(c.day != null ? c.day : (c.Day != null ? c.Day : (c.ret_1d != null ? c.ret_1d : null)));
     var r20 = fmt(c.r20 != null ? c.r20 : (c.R20 != null ? c.R20 : null));
@@ -1079,7 +1254,7 @@ def strip_js() -> str:
       return p && p.key !== "mom-score-d10";
     });
     return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(c.ticker || t) + '">' +
-      "<header><h2>" + t + chg1dHTML(c) + '</h2><span class="sc score">' + esc(String(score)) + near + "</span>" +
+      "<header><h2>" + title + chg1dHTML(c) + '</h2><span class="sc score">' + esc(String(score)) + near + "</span>" +
       '<div class="pills">' + pillsHTML(pills) + "</div></header>" +
       '<div class="stats"><span>Day ' + esc(day) + "</span><span>R20 " + esc(r20) + "</span><span>RS63 " + esc(rs63) + "</span><span>ATR% " + esc(atr) + "</span></div>" +
       "</article>";
@@ -1444,6 +1619,91 @@ def strip_js() -> str:
     if (dec == null && node) dec = dayFromDb(node);
     return dec;
   }
+  function readCoDb() {
+    var el = document.getElementById("fd-co-name-db");
+    if (!el) return {};
+    try { return JSON.parse(el.textContent || "{}") || {}; } catch (e) { return {}; }
+  }
+  function companyFromDb(node, sym) {
+    var db = readCoDb();
+    var t = tickerOfNode(node);
+    var short = shortOf(sym || t);
+    var keys = [];
+    if (t) keys.push(t);
+    if (sym) keys.push(sym);
+    if (short) keys.push(short);
+    var i, co;
+    for (i = 0; i < keys.length; i++) {
+      if (db[keys[i]] == null || db[keys[i]] === "") continue;
+      co = cleanCompany(short, db[keys[i]]);
+      if (co) return co;
+    }
+    var all = Object.keys(db);
+    for (i = 0; i < all.length; i++) {
+      if (short && shortOf(all[i]) === short) {
+        co = cleanCompany(short, db[all[i]]);
+        if (co) return co;
+      }
+    }
+    return "";
+  }
+  function isTitleKeep(el) {
+    if (!el || !el.classList) return false;
+    return el.classList.contains("px-1d") || el.classList.contains("chg-1d") ||
+      el.classList.contains("score") || el.classList.contains("sc") ||
+      el.classList.contains("mom-score-d10-near") || el.classList.contains("badge") ||
+      el.classList.contains("spike-chip");
+  }
+  function headingText(host) {
+    if (!host) return "";
+    var parts = [];
+    for (var n = host.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 3) parts.push(n.textContent || "");
+      else if (n.nodeType === 1 && !isTitleKeep(n)) parts.push(n.textContent || "");
+    }
+    return parts.join(" ").replace(/\s+/g, " ").trim();
+  }
+  function setHeadingText(host, title) {
+    var chip = null;
+    var n = host.firstChild;
+    while (n) {
+      var next = n.nextSibling;
+      if (n.nodeType === 1 && n.classList && (n.classList.contains("px-1d") || n.classList.contains("chg-1d"))) chip = n;
+      else if (!(n.nodeType === 1 && isTitleKeep(n))) host.removeChild(n);
+      n = next;
+    }
+    var text = document.createTextNode(title);
+    if (chip && chip.parentNode === host) host.insertBefore(text, chip);
+    else host.insertBefore(text, host.firstChild);
+  }
+  function paintTitle(node, card) {
+    if (!node || node.nodeType !== 1) return;
+    if (node.closest && node.closest("nav, .topnav, #topnav, #gics-filter-strip, svg, .chart, .fd-chart")) return;
+    var host = nameEl(node);
+    if (!host) return;
+    var sym = symbolOfCard(card);
+    if (!sym) sym = shortOf(tickerOfNode(host) || tickerOfNode(node));
+    var raw = headingText(host);
+    if (!sym) {
+      var piped = raw.match(/^([A-Za-z][A-Za-z0-9.\-]{0,9})\s+\|\s+(.+)$/);
+      if (piped) sym = shortOf(piped[1]);
+    }
+    if (!sym && !isYellowKey(raw)) {
+      var lead = raw.match(/^([A-Z][A-Z0-9]{0,4}(?:\.[A-Z])?)\s+(\S.*)$/);
+      if (lead) sym = lead[1];
+    }
+    var co = companyOf(card);
+    if (!co) {
+      var found = null;
+      try { found = findCard(sym || tickerOfNode(node)); } catch (e0) { found = null; }
+      if (found) co = companyOf(found);
+    }
+    if (!co) co = companyFromDb(host, sym);
+    if (!co) co = cleanCompany(sym, raw);
+    var title = (sym && co) ? (sym + " | " + co) : (sym || co || "");
+    if (!title || raw === title) return;
+    setHeadingText(host, title);
+  }
   function paintChg1d(node, card) {
     if (!node || node.nodeType !== 1) return;
     if (node.closest && node.closest("nav, .topnav, #topnav, #gics-filter-strip")) return;
@@ -1483,7 +1743,10 @@ def strip_js() -> str:
   function paintAllChg1d() {
     var nodes = document.querySelectorAll(CARD_SEL);
     var i;
-    for (i = 0; i < nodes.length; i++) paintChg1d(nodes[i], null);
+    for (i = 0; i < nodes.length; i++) {
+      paintTitle(nodes[i], null);
+      paintChg1d(nodes[i], null);
+    }
     var details = document.querySelectorAll(DETAIL_SEL);
     for (i = 0; i < details.length; i++) {
       var kids = details[i].children || [];
@@ -1493,6 +1756,7 @@ def strip_js() -> str:
         if (!kid || kid.nodeType !== 1) continue;
         if (kid.closest && kid.closest("svg, .chart, .fd-chart")) continue;
         if (isNameNode(kid) && looksLikeChromeTitle(ownText(kid) || kid.textContent)) continue;
+        paintTitle(kid, null);
         paintChg1d(kid, null);
       }
       var heads = details[i].querySelectorAll("h1, h2, h3, .company, .sec-name, .long-name, .nm");
@@ -1500,6 +1764,7 @@ def strip_js() -> str:
         var head = heads[k];
         if (head.closest && head.closest("svg, .chart, .fd-chart, .stats, .score, .sc, nav, .topnav, .pills, .chips, .badges")) continue;
         if (looksLikeChromeTitle(ownText(head) || head.textContent)) continue;
+        paintTitle(head, null);
         paintChg1d(head, null);
       }
     }
@@ -1510,6 +1775,7 @@ def strip_js() -> str:
     fillStats(node, card);
     stripBandWhy(node, card);
     paintScoreD10(node, card);
+    paintTitle(node, card);
     paintChg1d(node, card);
     node.setAttribute("data-fd-card-polished", "1");
     return node;
@@ -1711,15 +1977,46 @@ def _ensure_chg_db(html_text: str, day_map: Mapping[str, Any] | None) -> str:
     return text + tag
 
 
-def ensure_embedded(html_text: str, day_map: Mapping[str, Any] | None = None) -> str:
+def embed_co_db(mapping: Mapping[str, Any] | None) -> str:
+    blob = json.dumps(dict(mapping or {}), separators=(",", ":"), ensure_ascii=True)
+    blob = blob.replace("</", "<\\/")
+    return f'<script type="application/json" id="{CO_DB_SCRIPT_ID}">{blob}</script>\n'
+
+
+def _ensure_co_db(html_text: str, co_map: Mapping[str, Any] | None) -> str:
+    """Embed ticker → short company name. ``None`` keeps an existing db."""
+    if co_map is None and re.search(rf"""\bid=["']{CO_DB_SCRIPT_ID}["']""", html_text or "", re.I):
+        return html_text or ""
+    tag = embed_co_db(co_map or {})
+    text, n = re.subn(
+        rf'<script\b[^>]*\bid=["\']{CO_DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
+        lambda _m: tag,
+        html_text or "",
+        count=1,
+        flags=re.I | re.S,
+    )
+    if n:
+        return text
+    if "</body>" in text:
+        return text.replace("</body>", tag + "</body>", 1)
+    return text + tag
+
+
+def ensure_embedded(
+    html_text: str,
+    day_map: Mapping[str, Any] | None = None,
+    co_map: Mapping[str, Any] | None = None,
+) -> str:
     """Inject portable card CSS + wrap live ``cardHTML``. Safe on ~2.7–4.8MB HTML.
 
     ``day_map`` is ticker → decimal 1-day return (Bloomberg ``CHG_PCT_1D`` / 100).
-    Baked cards and the DETAIL name card pick it up on embed. Paper Buy/Sell is
+    ``co_map`` is ticker → short company name (Bloomberg ``NAME``), not ``SYMBOL | name``.
+    Baked cards and the DETAIL name card pick both up on embed. Paper Buy/Sell is
     not part of this renderer.
     """
     text = html_text or ""
     text = _ensure_css(text)
     text = _ensure_chg_db(text, day_map)
+    text = _ensure_co_db(text, co_map)
     text = _ensure_js(text)
     return text

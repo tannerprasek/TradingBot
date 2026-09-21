@@ -500,6 +500,39 @@ class Chg1dHeaderTests(unittest.TestCase):
         self.assertNotIn("chg-1d", bare)
         self.assertIn("mom-score-d10-near", bare)
 
+    def test_header_title_pipe_when_company_present(self) -> None:
+        both = {"ticker": "MSTR", "short_name": "STRATEGY INC", "ret_1d": 0.012, "mom_score": 10}
+        self.assertEqual(cr.header_title(both), "MSTR | STRATEGY INC")
+        self.assertEqual(cr.company_of(both), "STRATEGY INC")
+        html = desk_dash._article_html(both)
+        self.assertRegex(
+            html,
+            r"<h2>MSTR \| STRATEGY INC<span class=\"px-1d chg-1d up\"[^>]*title=\"1d CHG_PCT_1D\">\+1\.2%</span></h2>",
+        )
+        self.assertIn('data-t="MSTR"', html)
+        self.assertNotIn('data-t="MSTR |', html)
+        score_at = html.find('<span class="score sc">')
+        pills_at = html.find('<div class="pills">', score_at)
+        self.assertNotIn("px-1d", html[score_at:pills_at])
+        self.assertNotIn("+1.2%", html[score_at:pills_at])
+        stripped = {"ticker": "MSTR", "name": "MSTR STRATEGY INC", "day": 0.012}
+        self.assertEqual(cr.header_title(stripped), "MSTR | STRATEGY INC")
+        self.assertEqual(
+            cr.header_title({"ticker": "MSTR", "short_name": "MSTR | STRATEGY INC"}),
+            "MSTR | STRATEGY INC",
+        )
+        self.assertEqual(cr.header_title({"d": "MSTR", "NAME": "STRATEGY INC"}), "MSTR | STRATEGY INC")
+        symbol_only = desk_dash._article_html({"ticker": "MSTR", "name": "MSTR", "ret_1d": 0.012, "mom_score": 10})
+        self.assertRegex(symbol_only, r"<h2>MSTR<span class=\"px-1d chg-1d up\"")
+        self.assertNotIn("|", symbol_only.split("<h2>", 1)[1].split("</h2>", 1)[0].split("<span", 1)[0])
+        self.assertEqual(cr.header_title({"ticker": "MSTR US Equity", "name": "MSTR US Equity"}), "MSTR")
+        self.assertEqual(cr.header_title({"ticker": "MSTR", "name": "MSTR", "short_name": "MSTR"}), "MSTR")
+        self.assertEqual(cr.company_of({"ticker": "MSTR", "name": "MSTR US Equity"}), "")
+        named = cr.co_name_db([{"ticker": "MSTR US Equity", "short_name": "STRATEGY INC"}])
+        self.assertEqual(named.get("MSTR"), "STRATEGY INC")
+        self.assertEqual(named.get("MSTR US Equity"), "STRATEGY INC")
+        self.assertNotIn("|", named["MSTR"])
+
     def test_detail_and_live_cardhtml_paint_1d_beside_name(self) -> None:
         node = shutil.which("node")
         if not node:
@@ -537,9 +570,15 @@ class Chg1dHeaderTests(unittest.TestCase):
   return '<article class="card" data-t="'+t+'"><header><h2>'+t+'</h2><span class="score">'+(c.score!=null?c.score:"")+d10+'</span><div class="pills"><span class="badge">OUTLIER</span></div></header></article>';
 }</script>
 </body></html>"""
-        html = cr.ensure_embedded(live, {"MSTR": 0.012, "MSTR US Equity": 0.012})
+        html = cr.ensure_embedded(
+            live,
+            {"MSTR": 0.012, "MSTR US Equity": 0.012},
+            {"MSTR": "STRATEGY INC", "MSTR US Equity": "STRATEGY INC"},
+        )
         self.assertIn('id="fd-chg-1d-db"', html)
+        self.assertIn('id="fd-co-name-db"', html)
         self.assertIn("paintChg1d", html)
+        self.assertIn("paintTitle", html)
         with tempfile.TemporaryDirectory() as tmp:
             page = Path(tmp) / "page.html"
             runner = Path(tmp) / "run.js"
@@ -564,7 +603,7 @@ const left = document.querySelector("article.card");
 const right = document.querySelector(".factor-card");
 const hold = document.createElement("div");
 hold.innerHTML = window.cardHTML({{
-  t: "QQQ", score: 4, ret_1d: -0.008,
+  t: "QQQ", score: 4, ret_1d: -0.008, short_name: "INVESCO QQQ",
   mom_score_d10: 0, mom_score_d10_short: "0"
 }});
 const miss = document.createElement("div");
@@ -581,6 +620,7 @@ zero.innerHTML = window.cardHTML({{
 }});
 const report = {{
   leftChip: chipInfo(left),
+  leftName: left.querySelector("h2") ? left.querySelector("h2").textContent : "",
   leftScore: left.querySelector(".score") ? left.querySelector(".score").textContent : "",
   leftPills: left.querySelector(".pills") ? left.querySelector(".pills").textContent : "",
   leftD10: left.querySelectorAll(".mom-score-d10-near, [data-key='mom-score-d10-near']").length,
@@ -591,6 +631,7 @@ const report = {{
   qqqChip: chipInfo(hold),
   qqqScore: hold.querySelector(".score") ? hold.querySelector(".score").textContent : "",
   missChip: chipInfo(miss),
+  missHtml: miss.innerHTML,
   amd: bb.innerHTML,
   amdChip: chipInfo(bb),
   amdScore: bb.querySelector(".score") ? bb.querySelector(".score").textContent : "",
@@ -618,17 +659,23 @@ console.log(JSON.stringify(report));
             self.assertIn("0", report["leftScore"])
             self.assertNotIn("+1.2%", report["leftScore"])
             self.assertIn("Momentum building", report["leftPills"])
+            self.assertIn("MSTR | STRATEGY INC", report["leftName"])
+            self.assertIn("+1.2%", report["leftName"])
             self.assertEqual(report["rightChip"]["text"], "+1.2%")
             self.assertFalse(report["rightChip"]["inScore"])
-            self.assertIn("MSTR STRATEGY INC", report["rightName"])
+            self.assertIn("MSTR | STRATEGY INC", report["rightName"])
+            self.assertNotIn("MSTR STRATEGY INC", report["rightName"])
             self.assertTrue(report["rightBadge"])
+            self.assertIn("QQQ | INVESCO QQQ", report["qqq"])
             self.assertEqual(report["qqqChip"]["text"], "\u22120.8%")
             self.assertIn("down", report["qqqChip"]["cls"])
             self.assertNotIn("\u22120.8%", report["qqqScore"])
             self.assertIn("0", report["qqqScore"])
             self.assertIn('data-key="mom-score-d10-near"', report["qqq"])
             self.assertIsNone(report["missChip"])
-            self.assertNotIn("px-1d", report["miss"] if "miss" in report else "")
+            self.assertNotIn("px-1d", report["missHtml"])
+            self.assertNotIn("|", report["missHtml"])
+            self.assertNotIn("|", report["amd"])
             self.assertNotIn("n/a", report["qqq"].lower())
             self.assertEqual(report["amdChip"]["text"], "+1.2%")
             self.assertIn("+1", report["amdScore"])
