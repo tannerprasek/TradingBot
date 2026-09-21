@@ -332,33 +332,569 @@ def pills_html(pills: Any) -> str:
     return "".join(bits)
 
 
-def cards_from_enrichment(book: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+def _card_from_name(ticker: str, rec: Mapping[str, Any] | None) -> dict[str, Any]:
+    row = rec if isinstance(rec, Mapping) else {}
+    short = dapi_enrich.short_symbol(str(ticker))
+    return {
+        "ticker": ticker,
+        "name": row.get("name") or ticker,
+        "t": short,
+        "d": short,
+        "short_name": row.get("short_name") or short,
+        "limited_history": bool(row.get("limited_history")),
+        "si_ratio": row.get("si_ratio"),
+        "vol_regime": row.get("vol_regime"),
+        "liq": row.get("liq"),
+        "inst_pct": row.get("inst_pct"),
+        "event_days": row.get("event_days"),
+        "beta": row.get("beta"),
+        "credit": row.get("credit"),
+        "enrich_pills": list(row.get("enrich_pills") or []),
+        "gics_sector_name": row.get("gics_sector_name"),
+        "mom_score": row.get("mom_score"),
+        "tag_triggers": row.get("tag_triggers") or row.get("tags"),
+        "px_last": row.get("px_last"),
+        "px_series": row.get("px_series") or row.get("prices") or row.get("closes"),
+    }
+
+
+def cards_from_enrichment(
+    book: Mapping[str, Any] | None,
+    root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Card universe = enrich names ∪ ``universe_extra.txt`` ∪ residual-last tickers.
+
+    A name that Add merged into prices / ``v0/residual_last.csv`` still gets a
+    limited-history card when ``dapi_enrichment.json`` never saw it. Search
+    uses the short symbol (``TSEM``), not only the yellow key.
+    """
     cards: list[dict[str, Any]] = []
+    seen: set[str] = set()
     names = (book or {}).get("names") if isinstance(book, Mapping) else None
-    if not isinstance(names, dict):
+    if isinstance(names, dict):
+        for ticker, rec in names.items():
+            card = _card_from_name(str(ticker), rec if isinstance(rec, Mapping) else {})
+            cards.append(card)
+            seen.add(dapi_enrich.name_key(str(ticker)))
+            short = dapi_enrich.short_symbol(str(ticker))
+            if short:
+                seen.add(short)
+    if root is None:
         return cards
-    for ticker, rec in names.items():
-        if not isinstance(rec, Mapping):
-            rec = {}
-        card: dict[str, Any] = {
-            "ticker": ticker,
-            "name": ticker,
-            "si_ratio": rec.get("si_ratio"),
-            "vol_regime": rec.get("vol_regime"),
-            "liq": rec.get("liq"),
-            "inst_pct": rec.get("inst_pct"),
-            "event_days": rec.get("event_days"),
-            "beta": rec.get("beta"),
-            "credit": rec.get("credit"),
-            "enrich_pills": list(rec.get("enrich_pills") or []),
-            "gics_sector_name": rec.get("gics_sector_name"),
-            "mom_score": rec.get("mom_score"),
-            "tag_triggers": rec.get("tag_triggers") or rec.get("tags"),
-            "px_last": rec.get("px_last"),
-            "px_series": rec.get("px_series") or rec.get("prices") or rec.get("closes"),
-        }
+    for ticker in dapi_enrich.book_extra_tickers(root):
+        key = dapi_enrich.name_key(ticker)
+        short = dapi_enrich.short_symbol(key)
+        if not key or key in seen or (short and short in seen):
+            continue
+        card = _card_from_name(
+            key,
+            {
+                "name": short or key,
+                "short_name": short or key,
+                "limited_history": True,
+                "enrich_stub": True,
+            },
+        )
         cards.append(card)
+        seen.add(key)
+        if short:
+            seen.add(short)
     return cards
+
+
+SEARCH_BOOK_ID = "fd-search-book"
+SEARCH_BOOK_JS_ID = "fd-search-book-js"
+SYMBOL_BAR_ID = "fd-symbol-bar"
+
+_SYMBOL_BAR = """
+<style id="fd-symbol-css">
+.fd-symbol-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 12px}
+.fd-symbol-bar input[type="search"]{font:14px/1.2 "Segoe UI","DejaVu Sans","Noto Sans",sans-serif;padding:4px 8px;min-width:200px;border-radius:3px;border:1px solid #4b5563;background:#0b0f14;color:#e5e7eb}
+#fd-symbol-add{font:650 11px/1.2 "Segoe UI","DejaVu Sans",sans-serif;letter-spacing:.04em;padding:4px 10px;border-radius:3px;border:1px solid #4b5563;color:#e5e7eb;background:#1f2937;cursor:pointer}
+#fd-search-hits{list-style:none;margin:0;padding:4px 0;flex:1 0 100%}
+#fd-search-hits li{padding:2px 0;cursor:pointer}
+#fd-search-hits li:hover{color:#93c5fd}
+.fd-symbol-status{flex:1 0 100%;margin:0;color:#e5e7eb;font-size:13px}
+</style>
+<form id="fd-symbol-bar" class="fd-symbol-bar" autocomplete="off" action="#" onsubmit="return false">
+  <input id="fd-symbol-q" class="fd-symbol-search" type="search" placeholder="Search symbol" aria-label="Search symbol" />
+  <button type="submit" id="fd-symbol-add">Add</button>
+  <ul id="fd-search-hits" hidden></ul>
+  <p id="fd-symbol-status" class="fd-symbol-status" aria-live="polite"></p>
+</form>
+""".strip()
+
+# Matcher stays aligned with dapi_enrich.search_symbols (exact, prefix, name word).
+_SEARCH_BOOK_JS = r"""
+(function () {
+  var el = document.getElementById("fd-search-book");
+  if (!el || window.__FD_SEARCH_BOOK_BOUND__) return;
+  window.__FD_SEARCH_BOOK_BOUND__ = true;
+  var ORIGINS = ["http://127.0.0.1:8765", "http://localhost:8765"];
+  function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
+  function read() {
+    try { return JSON.parse(el.textContent || "{}") || {}; }
+    catch (e) { return {}; }
+  }
+  function symbolOf(rec, k) {
+    return shortOf(rec.t || rec.ticker || rec.symbol || k || "");
+  }
+  function rowsOf(payload) {
+    var names = (payload && payload.names) || {};
+    var out = [];
+    var seen = {};
+    Object.keys(names).forEach(function (k) {
+      var rec = names[k] || {};
+      var t = symbolOf(rec, k);
+      if (!t || seen[t]) return;
+      seen[t] = true;
+      var name = rec.name || "";
+      if (!name || shortOf(name) === t && String(name).indexOf(" ") < 0) name = rec.short_name || t;
+      if (shortOf(name) === t && String(name).indexOf(" ") < 0) name = t;
+      out.push({
+        t: t,
+        d: rec.d || t,
+        ticker: rec.ticker || k,
+        name: name || t,
+        short_name: t,
+        px_last: rec.px_last,
+        gics_sector_name: rec.gics_sector_name,
+        limited_history: !!rec.limited_history
+      });
+    });
+    return out;
+  }
+  function listed(bag, t) {
+    if (!bag) return false;
+    if (Array.isArray(bag)) {
+      for (var i = 0; i < bag.length; i++) {
+        var c = bag[i] || {};
+        if (shortOf(c.t || c.ticker || c.d || c.symbol) === t) return true;
+      }
+      return false;
+    }
+    if (typeof bag === "object") {
+      if (bag[t]) return true;
+      var keys = Object.keys(bag);
+      for (var j = 0; j < keys.length; j++) if (shortOf(keys[j]) === t) return true;
+    }
+    return false;
+  }
+  function pushArr(arr, row) {
+    if (!Array.isArray(arr)) return;
+    if (!listed(arr, row.t)) arr.push(row);
+  }
+  function putMap(map, row) {
+    if (!map || typeof map !== "object" || Array.isArray(map)) return;
+    if (!map[row.t]) map[row.t] = row;
+    if (row.ticker && !map[row.ticker]) map[row.ticker] = row;
+  }
+  function merge() {
+    var payload = read();
+    var rows = rowsOf(payload);
+    window.BOOK = window.BOOK || {};
+    if (!window.BOOK.names || typeof window.BOOK.names !== "object" || Array.isArray(window.BOOK.names)) {
+      window.BOOK.names = {};
+    }
+    window.NAMES = window.NAMES || {};
+    window.MOM = window.MOM || {};
+    if (!Array.isArray(window.MOM.cards)) window.MOM.cards = [];
+    if (!Array.isArray(window.MOM.search)) window.MOM.search = [];
+    if (!Array.isArray(window.MOM.all)) window.MOM.all = [];
+    if (!Array.isArray(window.CARDS)) window.CARDS = [];
+    if (!Array.isArray(window.MOM_CARDS)) window.MOM_CARDS = [];
+    rows.forEach(function (row) {
+      putMap(window.BOOK.names, row);
+      putMap(window.NAMES, row);
+      putMap(window.BOOK, row);
+      pushArr(window.MOM.cards, row);
+      pushArr(window.MOM.search, row);
+      pushArr(window.MOM.all, row);
+      pushArr(window.CARDS, row);
+      pushArr(window.MOM_CARDS, row);
+    });
+    window.__FD_SEARCH_BOOK__ = payload;
+    return rows;
+  }
+  function nameHit(q, name) {
+    if (!q || q.length < 2 || !name) return false;
+    var folded = String(name).toLowerCase();
+    if (folded.indexOf(q) === 0) return true;
+    var words = folded.split(/[^0-9a-z]+/);
+    for (var i = 0; i < words.length; i++) {
+      if (words[i] && words[i].indexOf(q) === 0) return true;
+    }
+    return false;
+  }
+  function scoreRow(row, query) {
+    var q = String(query || "").trim();
+    if (!q) return -1;
+    var qu = q.toUpperCase();
+    var qf = q.toLowerCase();
+    var qFirst = qu.split(/\s+/)[0];
+    var short = shortOf(row.t || row.ticker);
+    var yellow = String(row.ticker || "").toUpperCase();
+    var name = (row.name && shortOf(row.name) !== short) ? row.name : "";
+    if (String(row.name || "").indexOf(" ") >= 0) name = row.name;
+    // First token is the symbol: "TSEM", "TSEM US", and "TSEM UW Equity" all hit TSEM.
+    if (short === qu || yellow === qu || (qFirst && short === qFirst)) return 0;
+    if ((short && short.indexOf(qu) === 0) || (yellow && yellow.indexOf(qu) === 0)) return 1;
+    if (nameHit(qf, name)) return 2;
+    return -1;
+  }
+  function searchSymbols(query) {
+    var rows = merge();
+    var scored = [];
+    rows.forEach(function (row) {
+      var s = scoreRow(row, query);
+      if (s >= 0) scored.push({ s: s, row: row });
+    });
+    scored.sort(function (a, b) {
+      if (a.s !== b.s) return a.s - b.s;
+      return a.row.t < b.row.t ? -1 : (a.row.t > b.row.t ? 1 : 0);
+    });
+    return scored.map(function (item) { return item.row; });
+  }
+  window.__FD_SEARCH__ = searchSymbols;
+  function hitsEl() { return document.getElementById("fd-search-hits"); }
+  function boxEl() { return document.getElementById("fd-symbol-q"); }
+  function statusEl() { return document.getElementById("fd-symbol-status"); }
+  function setStatus(text) {
+    var node = statusEl();
+    if (node) node.textContent = text || "";
+  }
+  function labelOf(row) {
+    var label = row.t || "";
+    if (row.name && row.name !== row.t) label += "  " + row.name;
+    return label;
+  }
+  function choose(row) {
+    if (!row || !row.t) return;
+    var box = boxEl();
+    if (box) box.value = row.t;
+    setStatus(labelOf(row));
+    var sel = null;
+    try { sel = window.selectTicker; } catch (e0) { sel = null; }
+    if (typeof sel !== "function") {
+      try { if (typeof selectTicker === "function") sel = selectTicker; } catch (e1) { sel = null; }
+    }
+    if (typeof sel === "function") {
+      try { sel(row.t); } catch (e2) {}
+    }
+    paintPane([row]);
+  }
+  function paintPane(hits) {
+    var pane = document.getElementById("search-pane");
+    if (!pane) return;
+    if (!hits || !hits.length) {
+      var existing = document.getElementById("fd-search-pane-hits");
+      if (existing) existing.innerHTML = "";
+      return;
+    }
+    pane.classList.remove("hide");
+    pane.hidden = false;
+    var host = document.getElementById("fd-search-pane-hits");
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "fd-search-pane-hits";
+      pane.insertBefore(host, pane.firstChild);
+    }
+    host.innerHTML = "";
+    (hits || []).slice(0, 12).forEach(function (row) {
+      var node = null;
+      if (typeof window.__FD_RENDER_ROW__ === "function") {
+        try { node = window.__FD_RENDER_ROW__(row); } catch (e) { node = null; }
+      }
+      if (!node) {
+        node = document.createElement("article");
+        node.className = "card";
+        node.setAttribute("data-t", row.t);
+        node.setAttribute("data-ticker", row.ticker || row.t);
+        node.textContent = labelOf(row);
+      }
+      node.addEventListener("click", function (ev) {
+        if (ev.target && ev.target.closest && ev.target.closest(".fd-paper, [data-fd-paper-act]")) return;
+        choose(row);
+      });
+      host.appendChild(node);
+    });
+  }
+  function placeHits(list, anchor) {
+    if (!list || !anchor || !anchor.getBoundingClientRect) return;
+    var r = anchor.getBoundingClientRect();
+    list.style.position = "fixed";
+    list.style.left = r.left + "px";
+    list.style.top = (r.bottom + 2) + "px";
+    list.style.minWidth = Math.max(r.width, 220) + "px";
+    list.style.zIndex = "80";
+    list.style.background = "#0b0f14";
+    list.style.margin = "0";
+    list.style.padding = "4px 8px";
+    if (list.parentNode !== document.body) document.body.appendChild(list);
+  }
+  function renderHits(query, anchor) {
+    var list = hitsEl();
+    if (!list) return;
+    var hits = searchSymbols(query);
+    list.innerHTML = "";
+    if (!String(query || "").trim() || !hits.length) {
+      list.hidden = true;
+      paintPane([]);
+      return;
+    }
+    hits.slice(0, 12).forEach(function (row) {
+      var li = document.createElement("li");
+      li.setAttribute("data-t", row.t);
+      li.setAttribute("data-ticker", row.ticker || row.t);
+      li.textContent = labelOf(row);
+      list.appendChild(li);
+    });
+    list.hidden = false;
+    placeHits(list, anchor || boxEl());
+    paintPane(hits);
+  }
+  function remember(row) {
+    if (!row || !row.t) return;
+    var payload = read();
+    payload.names = payload.names || {};
+    var entry = {
+      t: row.t,
+      d: row.t,
+      ticker: row.ticker || row.t,
+      name: row.name || row.t,
+      short_name: row.t,
+      px_last: row.px_last,
+      limited_history: !!row.limited_history
+    };
+    payload.names[row.t] = entry;
+    if (entry.ticker && entry.ticker !== row.t) payload.names[entry.ticker] = entry;
+    el.textContent = JSON.stringify(payload);
+    merge();
+  }
+  var remoteTimer = null;
+  var activeAnchor = null;
+  function scheduleRemote(query) {
+    if (remoteTimer) clearTimeout(remoteTimer);
+    var q = String(query || "");
+    if (!q.trim()) return;
+    remoteTimer = setTimeout(function () {
+      var url = ORIGINS[0] + "/api/search?q=" + encodeURIComponent(q.trim());
+      fetch(url).then(function (r) { return r.json(); }).then(function (body) {
+        var box = boxEl();
+        if (box && box.value !== q) return;
+        var hits = (body && body.hits) || [];
+        hits.forEach(remember);
+        renderHits(q, activeAnchor);
+      }).catch(function () {});
+    }, 180);
+  }
+  function isSearchInput(node) {
+    if (!node || !node.tagName) return false;
+    var tag = String(node.tagName).toUpperCase();
+    if (tag !== "INPUT" && tag !== "TEXTAREA") return false;
+    if (node.closest && node.closest("#search-pane, #fd-symbol-bar")) return true;
+    var blob = [
+      node.id,
+      node.className,
+      node.getAttribute && node.getAttribute("placeholder"),
+      node.getAttribute && node.getAttribute("aria-label"),
+      node.getAttribute && node.getAttribute("name")
+    ].join(" ");
+    return /search|ticker|symbol|lookup/i.test(blob);
+  }
+  function onQuery(node) {
+    if (!isSearchInput(node)) return;
+    var q = node.value || "";
+    activeAnchor = node;
+    renderHits(q, node);
+    scheduleRemote(q);
+    // Live search filters MOM cards and can wipe the pane after our capture
+    // listener. Paint again once that handler has finished.
+    setTimeout(function () { renderHits(q, node); }, 0);
+  }
+  document.addEventListener("input", function (ev) { onQuery(ev.target); }, true);
+  document.addEventListener("click", function (ev) {
+    var li = ev.target && ev.target.closest ? ev.target.closest("#fd-search-hits li") : null;
+    if (!li) return;
+    ev.preventDefault();
+    var t = li.getAttribute("data-t") || "";
+    var hits = searchSymbols(t);
+    var row = null;
+    for (var i = 0; i < hits.length; i++) if (hits[i].t === t) { row = hits[i]; break; }
+    choose(row || { t: t, ticker: li.getAttribute("data-ticker") || t, name: t });
+  }, true);
+  var form = document.getElementById("fd-symbol-bar");
+  if (form) {
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var box = boxEl();
+      var q = box ? String(box.value || "").trim() : "";
+      if (!q) {
+        setStatus("Symbol is required.");
+        return;
+      }
+      var adding = ev.submitter && ev.submitter.id === "fd-symbol-add";
+      if (!adding) {
+        var hits = searchSymbols(q);
+        var want = q.toUpperCase().split(/\s+/)[0];
+        for (var h = 0; h < hits.length; h++) {
+          if (hits[h].t === want) { choose(hits[h]); return; }
+        }
+      }
+      var btn = document.getElementById("fd-symbol-add");
+      if (btn) btn.disabled = true;
+      setStatus("Adding " + q.toUpperCase() + "…");
+      var payload = JSON.stringify({ ticker: q });
+      var paths = ["/api/add", "/add"];
+      var i = 0;
+      function tryAdd() {
+        if (i >= paths.length) return Promise.reject(new Error("sidecar offline"));
+        return fetch(ORIGINS[0] + paths[i++], {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload
+        }).then(function (r) {
+          if (r.status === 202 || r.ok) return r.json();
+          if (r.status === 404 || r.status === 405) throw new Error("try next");
+          return r.json().then(function (j) {
+            var err = new Error((j && (j.message || j.error)) || String(r.status));
+            err.body = j;
+            throw err;
+          });
+        }).catch(function (err) {
+          if (err && err.body) throw err;
+          return tryAdd();
+        });
+      }
+      function finish(msg, reload) {
+        setStatus(msg || "");
+        if (btn) btn.disabled = false;
+        if (reload) setTimeout(function () { window.location.reload(); }, 1800);
+      }
+      tryAdd().then(function () {
+        var n = 0;
+        function poll() {
+          fetch(ORIGINS[0] + "/status").then(function (r) { return r.json(); }).then(function (st) {
+            if (st && st.busy && n++ < 80) { setTimeout(poll, 400); return; }
+            var last = (st && st.last) || {};
+            if (last.short) remember({ t: last.short, ticker: last.ticker, name: last.short });
+            if (last.ok) finish(last.message || ("Added " + (last.short || q)), true);
+            else finish(last.message || (st && st.error) || "Add did not land in the book.", false);
+          }).catch(function () { finish("sidecar offline", false); });
+        }
+        poll();
+      }).catch(function (err) {
+        finish((err && err.message) || "sidecar offline", false);
+      });
+    });
+  }
+  merge();
+})();
+""".strip()
+
+
+def search_book_payload(cards: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
+    """Short-symbol search/book map written into the live desk HTML."""
+    names: dict[str, Any] = {}
+    for card in cards or []:
+        if not isinstance(card, Mapping):
+            continue
+        raw = str(card.get("ticker") or "").strip()
+        ticker = dapi_enrich.canonical_ticker(raw) if raw else ""
+        short = dapi_enrich.short_symbol(str(card.get("t") or "") or ticker)
+        if not short:
+            continue
+        if not ticker:
+            ticker = dapi_enrich.canonical_ticker(short)
+        label = dapi_enrich._company_label(card, ticker, short) or short
+        entry = {
+            "t": short,
+            "d": short,
+            "ticker": ticker or short,
+            "name": label,
+            "short_name": short,
+            "px_last": card.get("px_last"),
+            "gics_sector_name": card.get("gics_sector_name"),
+            "limited_history": bool(card.get("limited_history")),
+        }
+        names[short] = entry
+        if ticker and ticker != short:
+            names[ticker] = entry
+    return {"names": names}
+
+
+def search_desk(query: str, root: Path | None = None) -> dict[str, Any]:
+    """Search the card universe (enrich names ∪ extras ∪ residual-last)."""
+    base = Path(root) if root is not None else HERE
+    book = load_enrichment(base)
+    cards = cards_from_enrichment(book, root=base)
+    q = " ".join((query or "").split())
+    return {"ok": True, "q": q, "hits": dapi_enrich.search_symbols(q, cards)}
+
+
+def _strip_symbol_ui(html_text: str) -> str:
+    text = html_text or ""
+    text = re.sub(
+        rf'<script\b[^>]*\bid=["\']{re.escape(SEARCH_BOOK_ID)}["\'][^>]*>.*?</script>\s*',
+        "",
+        text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    text = re.sub(
+        rf'<script\b[^>]*\bid=["\']{re.escape(SEARCH_BOOK_JS_ID)}["\'][^>]*>.*?</script>\s*',
+        "",
+        text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    text = re.sub(
+        r'<style\b[^>]*\bid=["\']fd-symbol-css["\'][^>]*>.*?</style>\s*',
+        "",
+        text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    text = re.sub(
+        rf'<form\b[^>]*\bid=["\']{re.escape(SYMBOL_BAR_ID)}["\'][^>]*>.*?</form>\s*',
+        "",
+        text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    return text
+
+
+def _insert_symbol_bar(html_text: str) -> str:
+    """Put the search/add bar after the first nav, or at the start of body."""
+    bar = _SYMBOL_BAR + "\n"
+    nav = re.search(r"</nav\s*>", html_text, flags=re.I)
+    if nav:
+        at = nav.end()
+        return html_text[:at] + "\n" + bar + html_text[at:]
+    body = re.search(r"<body\b[^>]*>", html_text, flags=re.I)
+    if body:
+        at = body.end()
+        return html_text[:at] + "\n" + bar + html_text[at:]
+    return bar + html_text
+
+
+def ensure_search_book(html_text: str, cards: Iterable[Mapping[str, Any]] | None = None) -> str:
+    """Embed ``#fd-search-book``, the search/add bar, and the match script.
+
+    Live ``write_combined`` patches fat chrome and does not rebuild the
+    desktop card array. Without this payload a residual-only Add never
+    appears in search. Not a ``__PAYLOAD__`` splice.
+    """
+    payload = search_book_payload(cards)
+    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=True, default=str).replace("</", "<\\/")
+    tag = f'<script type="application/json" id="{SEARCH_BOOK_ID}">{blob}</script>'
+    script = f'<script id="{SEARCH_BOOK_JS_ID}">\n{_SEARCH_BOOK_JS}\n</script>'
+    text = _insert_symbol_bar(_strip_symbol_ui(html_text or ""))
+    block = tag + "\n" + script + "\n"
+    if "</body>" in text:
+        return text.replace("</body>", block + "</body>", 1)
+    return text + block
 
 
 def _fmt(value: Any, digits: int = 2) -> str:
@@ -2417,7 +2953,7 @@ def render_html(
     if cache is None:
         cache = dapi_enrich.load_gics_cache()
     if cards is None:
-        cards = cards_from_enrichment(book)
+        cards = cards_from_enrichment(book, root=root)
     cards = attach_all(
         list(cards),
         book,
@@ -2542,6 +3078,7 @@ def render_html(
     html_text = paper_trade.ensure_embedded(html_text, paper_marks)
     html_text = s_score.ensure_embedded(html_text, ss_ranked)
     html_text = portfolio.ensure_embedded(html_text)
+    html_text = ensure_search_book(html_text, cards)
     return ensure_mom_status_filter(_ensure_options_refresh_ui(html_text))
 
 
@@ -2558,7 +3095,9 @@ def write_combined(
     GICS sector-filter strip and book-delta strip are BINNED: leftover hosts
     are removed on every write. G1–G12 group chips stay.
 
-    Enrichment is files-based (``dapi_enrichment.json`` / ``book``). There is
+    Enrichment is files-based (``dapi_enrichment.json`` / ``book``). The card
+    universe also includes ``universe_extra.txt`` and ``v0/residual_last.csv``
+    so an Add that never landed in enrich is still searchable. There is
     no ``factor_payload=`` argument and no legacy ``__PAYLOAD__`` splice.
 
     When ``path`` is omitted and ``<root>/factorbook.html`` is skinny or
@@ -2571,7 +3110,7 @@ def write_combined(
         book = load_enrichment(base)
     cache = dapi_enrich.load_gics_cache(root=base)
     if cards is None:
-        cards = cards_from_enrichment(book)
+        cards = cards_from_enrichment(book, root=base)
     cards = [dict(c) for c in cards]
     hist = mom_streak.rebuild_hist_for_cards(cards, root=base, write=True)
     series, _src = mom_streak.discover_score_series(base, hist=hist)
@@ -2626,6 +3165,7 @@ def write_combined(
     text = paper_trade.ensure_embedded(text, paper_marks)
     text = s_score.ensure_embedded(text, ss_ranked)
     text = portfolio.ensure_embedded(text)
+    text = ensure_search_book(text, cards)
     text = ensure_mom_status_filter(text)
     # Gate before any write. Binder/label failures never hit disk.
     # A document under LIVE_MIN_BYTES always fails assert_nav_integrity.

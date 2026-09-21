@@ -22,6 +22,14 @@ options pulse degrades — Refresh still finishes.
 
 Thin ENRICH HOOK: Desktop copies ``run_dapi_enrich_stage`` / ``parse_intraday``
 into the live ``add_server.py`` if this file is not the one serving :8765.
+
+Add-to-book (``POST /api/add``, :func:`do_add`)::
+
+    history → merge prices → universe_extra → enrich-or-stub → rebuild
+
+Enrichment is best-effort. A DAPI miss still stubs ``dapi_enrichment.json``
+so the desk card universe (and ``#fd-search-book``) includes the short symbol.
+The status says the name is in the book when that stub landed.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
@@ -60,6 +68,8 @@ _STATE: dict[str, Any] = {
 }
 
 REFRESH_PATHS = frozenset({"/refresh", "/api/refresh", "/api/refresh_live"})
+ADD_PATHS = frozenset({"/api/add", "/add"})
+SEARCH_PATHS = frozenset({"/api/search", "/search"})
 OPTIONS_REFRESH_PATHS = frozenset(
     {
         "/options-refresh",
@@ -107,6 +117,28 @@ def _set_progress(pct: float, stage: str) -> None:
 
 def _progress_cb(frac: float, stage: str) -> None:
     _set_progress(frac, stage)
+
+
+def _try_call_strict(module_name: str, func_names: tuple[str, ...], **kwargs: Any) -> tuple[Any, str | None]:
+    """Call ``module.fn(**kwargs)`` only. Never retry with an empty argument list.
+
+    An empty retry would turn a one-name Add into a full-book Bloomberg pull.
+    """
+    try:
+        mod = __import__(module_name)
+    except ImportError as exc:
+        return None, f"{module_name}_missing:{exc}"
+    for name in func_names:
+        fn = getattr(mod, name, None)
+        if not callable(fn):
+            continue
+        try:
+            return fn(**kwargs), None
+        except TypeError:
+            continue
+        except Exception as exc:  # noqa: BLE001
+            return None, f"{module_name}.{name}:{exc}"
+    return None, f"{module_name}_no_entry:{','.join(func_names)}"
 
 
 def _try_call(module_name: str, func_names: tuple[str, ...], **kwargs: Any) -> tuple[Any, str | None]:
@@ -423,6 +455,187 @@ def run_options_refresh(
     }
 
 
+def _one_ticker(query: dict[str, list[str]], body: Any | None) -> str:
+    if isinstance(body, dict):
+        for key in ("ticker", "symbol", "name", "t"):
+            raw = body.get(key)
+            if raw:
+                return str(raw).strip()
+        if body.get("tickers"):
+            raw = body["tickers"]
+            if isinstance(raw, list) and raw:
+                return str(raw[0]).strip()
+            if isinstance(raw, str) and raw.strip():
+                return raw.split(",")[0].strip()
+    for key in ("ticker", "symbol", "t"):
+        if query.get(key):
+            return str(query[key][0]).strip()
+    return ""
+
+
+def _pull_add_history(ticker: str, root: Path) -> tuple[Any, str | None]:
+    """Desktop Bloomberg history when ``pull_blpapi_live`` exposes it. Missing module is not an error."""
+    result, err = _try_call_strict(
+        "pull_blpapi_live",
+        ("pull_history", "pull_hist", "fetch_history", "add_history"),
+        tickers=[ticker],
+        ticker=ticker,
+        root=root,
+    )
+    if err and ("_missing" in err or "_no_entry" in err):
+        return None, None
+    return result, err
+
+
+def _merge_add_prices(ticker: str, root: Path) -> str | None:
+    """Merge the new history into ``prices_long.csv`` when a Desktop helper exists."""
+    for module_name, names in (
+        ("pull_blpapi_live", ("merge_prices", "merge_into_prices_long", "append_prices")),
+        ("clean_ingest", ("merge_prices", "merge_long", "append_prices")),
+    ):
+        _result, err = _try_call_strict(
+            module_name,
+            names,
+            ticker=ticker,
+            tickers=[ticker],
+            root=root,
+        )
+        if err and ("_missing" in err or "_no_entry" in err):
+            continue
+        return err
+    return None
+
+
+def _add_message(
+    short: str,
+    *,
+    in_book: bool,
+    enrich_ok: bool,
+    px: Any,
+    rebuild_err: str | None,
+) -> str:
+    if not in_book:
+        return f"{short or 'symbol'} was not added to the book."
+    if rebuild_err and "legacy-sized" in str(rebuild_err):
+        return (
+            f"{short} is in the enrichment book, but the live desk HTML was not updated "
+            f"({rebuild_err})."
+        )
+    if enrich_ok:
+        return f"Added {short}."
+    px_note = " Last price was attached from the price file." if px is not None else ""
+    return (
+        f"{short} is in the book.{px_note} "
+        "DAPI enrichment did not fill fields; the card is limited-history and still searchable."
+    )
+
+
+def do_add(
+    ticker: str,
+    *,
+    root: Path | None = None,
+    session: Any | None = None,
+    progress_cb: Callable[[float, str], None] | None = None,
+    rebuild: bool = True,
+) -> dict[str, Any]:
+    """Add one symbol: history → prices → ``universe_extra`` → enrich or stub → rebuild.
+
+    Bloomberg history and the price merge run only when the Desktop modules
+    are importable. They are skipped in this tree (no Bloomberg). Enrichment
+    is attempted for the new name and merged into ``dapi_enrichment.json``.
+    If DAPI does not resolve fields, a stub ``names[ticker]`` is still written
+    and the status stays honest: the name is in the book.
+    """
+    cb = progress_cb or _progress_cb
+    base = Path(root) if root is not None else HERE
+    raw = str(ticker or "").strip()
+    key = dapi_enrich.canonical_ticker(raw) if raw else ""
+    short = dapi_enrich.short_symbol(key)
+    if not key:
+        return {
+            "ok": False,
+            "in_book": False,
+            "enrich_ok": False,
+            "stubbed": False,
+            "ticker": "",
+            "short": "",
+            "message": "ticker is required.",
+            "error": "ticker_required",
+        }
+
+    cb(0.10, "history")
+    hist_result, hist_err = _pull_add_history(key, base)
+    if hist_err:
+        LOG.warning("add history: %s", hist_err)
+    cb(0.30, "merge prices")
+    merge_err = _merge_add_prices(key, base)
+    if merge_err:
+        LOG.warning("add merge prices: %s", merge_err)
+
+    cb(0.40, "universe_extra")
+    dapi_enrich.append_universe_extra(base, key)
+
+    cb(0.50, "dapi_enrich")
+    prices_ctx = hist_result if isinstance(hist_result, dict) else None
+    enrich_error: str | None = None
+    try:
+        book = dapi_enrich.upsert_add_names(
+            [key],
+            root=base,
+            session=session,
+            prices_ctx=prices_ctx,
+            open_session=session is None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("add enrich raised (stub via union): %s", exc)
+        enrich_error = str(exc)
+        book = dapi_enrich.load_enrichment(dapi_enrich.default_out_path(base)) or {
+            "names": {},
+            "meta": {},
+        }
+
+    names = book.get("names") if isinstance(book, Mapping) else None
+    rec = None
+    if isinstance(names, dict):
+        rec = names.get(key) or names.get(short)
+    in_book = isinstance(rec, Mapping) or key in {
+        dapi_enrich.name_key(t) for t in dapi_enrich.book_extra_tickers(base)
+    }
+    enrich_ok = dapi_enrich.dapi_fields_resolved(rec if isinstance(rec, Mapping) else None)
+    stubbed = in_book and not enrich_ok
+    meta = book.get("meta") if isinstance(book, Mapping) else {}
+    if isinstance(meta, Mapping) and meta.get("add_enrich_error") and not enrich_error:
+        enrich_error = str(meta.get("add_enrich_error"))
+    px = rec.get("px_last") if isinstance(rec, Mapping) else None
+
+    rebuild_err = None
+    if rebuild and in_book:
+        cb(0.70, "rebuild")
+        rebuild_err = run_rebuild(cb, root=base)
+    elif rebuild:
+        cb(0.70, "rebuild skipped")
+
+    live_failed = bool(rebuild_err) and "legacy-sized" in str(rebuild_err)
+    message = _add_message(short, in_book=in_book, enrich_ok=enrich_ok, px=px, rebuild_err=rebuild_err)
+    ok = bool(in_book) and not live_failed
+    cb(1.0, "done" if ok else "failed")
+    return {
+        "ok": ok,
+        "in_book": bool(in_book),
+        "enrich_ok": bool(enrich_ok),
+        "stubbed": bool(stubbed),
+        "ticker": key,
+        "short": short,
+        "message": message,
+        "history_err": hist_err,
+        "merge_err": merge_err,
+        "enrich_error": enrich_error,
+        "rebuild_err": rebuild_err,
+        "px_last": px,
+        "kind": "add",
+    }
+
+
 def _read_json_body(handler: BaseHTTPRequestHandler) -> Any:
     length = int(handler.headers.get("Content-Length") or 0)
     if length <= 0:
@@ -481,6 +694,12 @@ class DeskHandler(BaseHTTPRequestHandler):
         if path in ("/gics-fill", "/gics_once", "/gics-once"):
             self._start_gics_fill(query, None)
             return
+        if path in ADD_PATHS:
+            self._start_add(query, None)
+            return
+        if path in SEARCH_PATHS:
+            self._search(query, None)
+            return
         self._json(404, {"ok": False, "error": "not_found", "path": path})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -496,6 +715,12 @@ class DeskHandler(BaseHTTPRequestHandler):
             return
         if path in ("/gics-fill", "/gics_once", "/gics-once"):
             self._start_gics_fill(query, body)
+            return
+        if path in ADD_PATHS:
+            self._start_add(query, body)
+            return
+        if path in SEARCH_PATHS:
+            self._search(query, body)
             return
         self._json(404, {"ok": False, "error": "not_found", "path": path})
 
@@ -593,6 +818,62 @@ class DeskHandler(BaseHTTPRequestHandler):
                 "kind": "options",
                 "options": True,
                 "n_tickers": len(tickers),
+            },
+        )
+
+    def _search(self, query: dict[str, list[str]], body: Any) -> None:
+        q = ""
+        if isinstance(body, dict):
+            for key in ("q", "query", "ticker", "symbol"):
+                raw = body.get(key)
+                if raw:
+                    q = str(raw).strip()
+                    break
+        if not q:
+            for key in ("q", "query", "ticker", "symbol"):
+                if query.get(key):
+                    q = str(query[key][0]).strip()
+                    break
+        import desk_dash  # local: search reads the desk book, not the refresh pipeline
+
+        self._json(200, desk_dash.search_desk(q))
+
+    def _start_add(self, query: dict[str, list[str]], body: Any) -> None:
+        ticker = _one_ticker(query, body)
+        if not ticker:
+            self._json(400, {"ok": False, "error": "ticker_required", "message": "ticker is required."})
+            return
+        if not self._claim_busy(kind="add", options=False):
+            return
+
+        def worker() -> None:
+            try:
+                result = do_add(ticker)
+                with _STATE_LOCK:
+                    _STATE["last"] = result
+                    _STATE["error"] = None if result.get("ok") else result.get("message")
+                    _STATE["stage"] = "done" if result.get("ok") else "error"
+                    _STATE["pct"] = 100
+                    _STATE["kind"] = "add"
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("add failed")
+                with _STATE_LOCK:
+                    _STATE["error"] = str(exc)
+                    _STATE["stage"] = "error"
+                    _STATE["last"] = {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+            finally:
+                with _STATE_LOCK:
+                    _STATE["busy"] = False
+
+        threading.Thread(target=worker, name="factor-desk-add", daemon=True).start()
+        self._json(
+            202,
+            {
+                "ok": True,
+                "accepted": True,
+                "kind": "add",
+                "ticker": dapi_enrich.canonical_ticker(ticker),
+                "short": dapi_enrich.short_symbol(ticker),
             },
         )
 

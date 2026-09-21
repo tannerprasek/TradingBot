@@ -121,6 +121,12 @@ GICS `gics_sector_name` is card data, **not** a filter strip. The GICS strip is 
 
 `DEFAULT_MAX_NAMES = 0`, 15C+15P, UI top 20×2, on-demand Refresh only.
 
+## Add-to-book
+
+`POST /api/add` (`add_server.do_add`) merges the new yellow key into `dapi_enrichment.json` after prices and `universe_extra.txt`, then rebuilds. Name, `short_name`, GICS, pills, and `px_last` are copied when DAPI or `prices_long.csv` actually has them. If DAPI does not resolve fields, the name is still stubbed (`limited_history`) and the Add status says it is in the book.
+
+`desk_dash.cards_from_enrichment` also unions `universe_extra.txt` and `v0/residual_last.csv`, and `write_combined` writes those short symbols into `#fd-search-book`. Copy `add_server.py`, `dapi_enrich.py`, and `desk_dash.py` to `C:\Users\MLP\Desktop\factorbook`. See [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §13.
+
 ## Capacity
 
 If open or any chunk raises a capacity-like error (`BLOOMBERG_LIMIT`, daily limit, not logged in, …):
