@@ -10,7 +10,7 @@ Until a dedicated repo exists, this folder is the cloud source of truth. Desktop
 | `gics_filter.py` | GICS names on cards; filter strip BINNED (`ensure_embedded` removes leftover UI) |
 | `mom_streak.py` | Home momentum rank streak vs 5 (tags + hist + span) |
 | `card_render.py` | Portable MOM `cardHTML` wrap — one card component for every tab |
-| `breakout.py` | Breakout / Breakdown tab ranking (mid-score climbers / crackers) |
+| `breakout.py` | Breakout / Breakdown tab ranking (early inflections, not worked trends) |
 | `book_delta.py` | Snapshot persist; since-last-Refresh strip BINNED |
 | `desk_hitch.py` | Desk Analyst hitch pills from `ideas/` notes |
 | `paper_trade.py` | Paper Buy/Sell on dense `cardHTML` cards + Paper tab (localStorage; not a home chrome strip) |

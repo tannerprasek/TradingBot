@@ -1,53 +1,45 @@
 # Breakout / Breakdown tabs
 
-Home **Momentum Up** already surfaces maxed names (score ~12–13). **Breakout** / **Breakdown** are the mid-score climbers and crackers — inspiration for Desk Analysts A/B/C, not a second MOM dump.
+Home **Momentum Up** already surfaces worked trends. **Breakout** / **Breakdown** catch **early inflections** — a score that just entered a selective band, a strong 10-day lift or drop, a fresh cross of 5, and the name beating or lagging its factor. Not a dump of the book, and not an opt-spike list.
 
-No Sectors tab. No extra DAPI stage. Ranking reads live card `t` / `score` (or `mom_score`) plus `mom_score_hist.json` / `mom_streak` series.
+No Sectors tab. No extra DAPI stage. Ranking reads card `score` / `mom_score`, `mom_score_d10` and the streak fields `mom_streak` already attaches, plus one dispersion field (below).
 
 Tune every cut in the constants block at the top of [`breakout.py`](../breakout.py).
 
-## Selection philosophy
+## Hard gates (all required)
 
-| Tab | Band (0–13 MOM rank) | Direction | Streak | Cap |
-| --- | --- | --- | --- | --- |
-| **Breakout** | **6–11** (exclude 12–13 already there; ≤5 only if accelerating hard, Δ≥2 and score≥4) | score today **>** score N trading days ago | `mom_streak_side==above`, prefer **2–20d** just flipped/climbing over a 100d baked run | **8–12** max |
-| **Breakdown** | **2–7** (exclude 0–1 dead) | falling Δ | `below`, fresh/worsening 2–20d over ancient downs | **8–12** max |
-
-Lookback **N** prefers **5–10** trading days (default **7**).
-
-## `breakout_score` / `breakdown_score`
-
-Single rank key per side. Higher is better. Names below `MIN_COMPOSITE` are dropped so the cap is not filled with junk.
-
-```
-breakout_score =
-    3.0 * band_fit(score, lo=6, hi=11, sweet=7–10)
-  + 1.6 * clip(Δ_7d, -4, +4) / 4
-  + 2.0 * streak_freshness(streak, side==above)
-  + optional field boosts
-  + accel boost (last 3d Δ > prior 3d Δ, and Δ>0)
-  + 1.0 if the name only qualifies via the ≤5 hard-accel exception
-
-breakdown_score =
-    3.0 * band_fit(score, lo=2, hi=7, sweet=3–6)
-  + 1.6 * clip(-Δ_7d, -4, +4) / 4
-  + 2.0 * streak_freshness(streak, side==below)
-  + optional field boosts
-  + accel boost (last 3d Δ < prior 3d Δ, and Δ<0)
-```
-
-`band_fit` is 1.0 in the sweet range, linear falloff to 0 just outside the band.
-
-`streak_freshness` is 1.0 on a 2–12d run on the wanted side, 0.75 through 20d, then decays to ~0.05 by 100d (already baked). Wrong side → 0.
-
-Optional boosts (cheap card fields only — **no DAPI pull**):
-
-| Signal | Weight | Source |
+| Gate | Breakout | Breakdown |
 | --- | --- | --- |
-| FLAGS | +0.8 | `list` / `flags` / `lists` |
-| hop / leader | +0.5 | `tag_triggers` / tags text |
-| OPT SPIKE | +0.6 | `opt_spike` / pill `opt-spike` |
-| outlier newbie | +0.4 | OUTLIERS + streak ≤5d |
+| Score | **[7, 10]** inclusive. ≤6 is mush. 11–13 is already extended. | **[2, 6]** inclusive. 0–1 is already dead. ≥7 is not a breakdown. |
+| 10d change | `mom_score_d10` **> 3**. Missing (fewer than 11 score prints) → out. Exact +3 is not enough. | `mom_score_d10` **< −3**. Missing → out. Exact −3 is not enough. |
+| Streak | `mom_streak_side == above` and length **1–15**. **1** = just crossed above 5 today. **2–15** = fresh. **N>15** (`↑Nd>5`) is a baked trend → out. | Mirror: `below`, length **1–15**. **1** = just broke below 5. **N>15** baked down → out. A live score of **6 is still above 5**, so this gate keeps it out until the print is actually below 5. |
+| Dispersion | **Clearly positive** (strictly > 0). | **Clearly negative** (strictly < 0). |
+
+High score + long ↑ streak + flat or mild 10d is continuation, not Breakout. Low score + long ↓ streak + still falling hard is already dead, not Breakdown. An opt spike by itself is not a breakout and does not add rank.
+
+## Dispersion field
+
+1. **`residual_20d`** when the enrich record already has it (`r_stock_20d − β × r_mkt_20d`, copied onto the card). Same preference for `factor_residual`, `vs_group`, or `vs_sleeve` if one of those is already on the card or `metrics`. A present **0 does not fall through**.
+2. **Interim: RS63** when none of those fields exist. Card / `metrics.rs_63` / `rs63`, or 63-day return minus SPY (or QQQ) when **both** price series exist. A raw stock return with no benchmark is not used.
+
+No synthetic residual is computed for this gate.
+
+## Inflection score
+
+Gates decide membership. Sort uses an inflection score (higher magnitude = earlier / more interesting):
+
+```
+magnitude =
+    3.0 * band_early          # 1.0 on the early edge (breakout 7, breakdown 6), ~0.55 on the far edge
+  + 1.6 * clip(|d10|, 0, 8) / 8
+  + 2.0 * freshness           # 1.0 for streak 5–12; lower for a 1d cross and for 13–15
+  + 1.4 * clip(|dispersion|, 0, 0.15) / 0.15
+  + 0.35 * structure          # FLAGS + hop/leader only. Not required. Opt spike = 0.
+```
+
+`inflection_score` is **+magnitude** on Breakout and **−magnitude** on Breakdown. Breakout sorts descending. Breakdown sorts by the most negative inflection (same order as magnitude descending). `breakout_score` / `breakdown_score` stay the positive magnitude.
+
+Display cap is **24** per side. That cap is a backstop — the gates are what keep the list to tens of names, not hundreds.
 
 ## UI
 

@@ -1113,6 +1113,9 @@ def attach_card_fields(card: MutableMapping[str, Any], rec: Mapping[str, Any] | 
     card["event_days"] = rec.get("event_days")
     card["beta"] = rec.get("beta")
     card["credit"] = rec.get("credit")
+    # 20d factor residual already on the enrich record. Do not compute one here.
+    if rec.get("residual_20d") is not None:
+        card["residual_20d"] = rec.get("residual_20d")
     pills = rec.get("enrich_pills")
     card["enrich_pills"] = list(pills) if isinstance(pills, list) else []
     name, _reason = parse_gics_sector_name(rec.get("gics_sector_name"))
