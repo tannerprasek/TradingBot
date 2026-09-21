@@ -624,11 +624,13 @@ _SEARCH_BOOK_JS = r"""
     renderHits(q);
     scheduleRemote(q);
   }
-  document.addEventListener("input", function (ev) { onQuery(ev.target); }, true);
+  var selectedTicker = "";
+  document.addEventListener("input", function (ev) { onQuery(ev.target); selectedTicker = ""; }, true);
   document.addEventListener("click", function (ev) {
     var li = ev.target && ev.target.closest ? ev.target.closest("#fd-search-hits li") : null;
     if (!li) return;
     var box = boxEl();
+    selectedTicker = li.getAttribute("data-ticker") || li.getAttribute("data-t") || "";
     if (box) box.value = li.getAttribute("data-t") || "";
     setStatus(li.textContent || "");
     renderHits(box ? box.value : "");
@@ -638,14 +640,26 @@ _SEARCH_BOOK_JS = r"""
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       var box = boxEl();
-      var q = box ? String(box.value || "").trim() : "";
+      var typed = box ? String(box.value || "").trim() : "";
+      var q = selectedTicker || typed;
+      if (!selectedTicker && typed) {
+        var local = searchSymbols(typed);
+        if (local.length === 1) q = local[0].ticker || local[0].t || typed;
+        else if (local.length) {
+          var exact = null;
+          for (var hi = 0; hi < local.length; hi++) {
+            if (shortOf(local[hi].t) === typed.toUpperCase()) { exact = local[hi]; break; }
+          }
+          if (exact) q = exact.ticker || exact.t;
+        }
+      }
       if (!q) {
         setStatus("Symbol is required.");
         return;
       }
       var btn = document.getElementById("fd-symbol-add");
       if (btn) btn.disabled = true;
-      setStatus("Adding " + q.toUpperCase() + "…");
+      setStatus("Adding " + String(q).toUpperCase() + "…");
       var payload = JSON.stringify({ ticker: q });
       var paths = ["/api/add", "/add"];
       var i = 0;
@@ -679,9 +693,20 @@ _SEARCH_BOOK_JS = r"""
           fetch(ORIGINS[0] + "/status").then(function (r) { return r.json(); }).then(function (st) {
             if (st && st.busy && n++ < 80) { setTimeout(poll, 400); return; }
             var last = (st && st.last) || {};
-            if (last.short) remember({ t: last.short, ticker: last.ticker, name: last.short });
-            if (last.ok) finish(last.message || ("Added " + (last.short || q)), true);
-            else finish(last.message || (st && st.error) || "Add did not land in the book.", false);
+            if (last.short) remember({
+              t: last.short,
+              ticker: last.ticker,
+              name: last.short,
+              limited_history: !!last.stubbed
+            });
+            if (last.ok && last.searchable !== false) {
+              finish(last.message || ("Added " + (last.short || q)), true);
+            } else {
+              finish(
+                last.message || (st && st.error) || "Add did not land in search.",
+                false
+              );
+            }
           }).catch(function () { finish("sidecar offline", false); });
         }
         poll();
@@ -732,6 +757,54 @@ def search_desk(query: str, root: Path | None = None) -> dict[str, Any]:
     cards = cards_from_enrichment(book, root=base)
     q = " ".join((query or "").split())
     return {"ok": True, "q": q, "hits": dapi_enrich.search_symbols(q, cards)}
+
+
+def search_book_blob(html_text: str) -> str:
+    """Raw JSON text inside ``#fd-search-book``, or empty when missing."""
+    match = re.search(
+        rf'<script\b[^>]*\bid=["\']{re.escape(SEARCH_BOOK_ID)}["\'][^>]*>(.*?)</script>',
+        html_text or "",
+        flags=re.I | re.S,
+    )
+    return match.group(1) if match else ""
+
+
+def search_book_has_symbol(html_text: str, ticker: str) -> bool:
+    """True when the live desk search payload lists the short symbol.
+
+    The TSEM failure mode pulled prices / residual into the rest of the book
+    while ``#fd-search-book`` still had zero copies of the short symbol.
+    """
+    short = dapi_enrich.short_symbol(dapi_enrich.canonical_ticker(ticker) if ticker else "")
+    if not short:
+        return False
+    blob = search_book_blob(html_text)
+    if not blob:
+        return False
+    try:
+        payload = json.loads(blob)
+    except json.JSONDecodeError:
+        return short in blob
+    names = payload.get("names") if isinstance(payload, Mapping) else None
+    if not isinstance(names, dict):
+        return short in blob
+    if short in names:
+        return True
+    key = dapi_enrich.canonical_ticker(ticker)
+    if key in names:
+        return True
+    for rec in names.values():
+        if not isinstance(rec, Mapping):
+            continue
+        if dapi_enrich.short_symbol(str(rec.get("t") or rec.get("ticker") or "")) == short:
+            return True
+    return False
+
+
+def land_search_book(root: Path | None = None, cards: list[Mapping[str, Any]] | None = None) -> Path:
+    """Patch the live desk so ``#fd-search-book`` matches the card universe."""
+    base = Path(root) if root is not None else HERE
+    return write_combined(root=base, cards=cards)
 
 
 def _strip_symbol_ui(html_text: str) -> str:
