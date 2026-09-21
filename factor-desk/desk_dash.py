@@ -349,6 +349,7 @@ def cards_from_enrichment(book: Mapping[str, Any] | None) -> list[dict[str, Any]
             "event_days": rec.get("event_days"),
             "beta": rec.get("beta"),
             "credit": rec.get("credit"),
+            "residual_20d": rec.get("residual_20d"),
             "enrich_pills": list(rec.get("enrich_pills") or []),
             "gics_sector_name": rec.get("gics_sector_name"),
             "mom_score": rec.get("mom_score"),

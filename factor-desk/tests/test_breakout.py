@@ -69,12 +69,22 @@ def _merge_hist(parts: list[dict]) -> dict:
     return {"names": names, "asof": "2026-09-17"}
 
 
+def _pass_up() -> list[float]:
+    """Score 9, d10 +5, above-5 streak of 6."""
+    return [4, 4, 4, 4, 5, 5, 6, 7, 8, 8, 9, 9]
+
+
+def _pass_dn() -> list[float]:
+    """Score 3, d10 −5, below-5 streak of 5."""
+    return [8, 8, 8, 8, 7, 6, 5, 4, 4, 3, 3, 3]
+
+
 class RankingTests(unittest.TestCase):
     def test_climber_in_band_selected_maxed_and_weak_dropped(self) -> None:
-        h1, climb = _hist_and_card("CLIMB US Equity", [5, 6, 7, 8, 8, 9, 9, 9, 10, 10])
-        h2, maxed = _hist_and_card("MAXED US Equity", [13] * 40)
-        h3, weak = _hist_and_card("WEAK US Equity", [3, 3, 3, 3, 3, 3, 3, 3])
-        h4, dead = _hist_and_card("DEAD US Equity", [1, 1, 1, 0, 0, 0, 0, 0])
+        h1, climb = _hist_and_card("CLIMB US Equity", _pass_up(), extra={"rs63": 0.08})
+        h2, maxed = _hist_and_card("MAXED US Equity", [13] * 40, extra={"rs63": 0.2})
+        h3, weak = _hist_and_card("WEAK US Equity", [3] * 12, extra={"rs63": 0.08})
+        h4, dead = _hist_and_card("DEAD US Equity", [1] * 20, extra={"rs63": -0.2})
         hist = _merge_hist([h1, h2, h3, h4])
         ranked = bo.rank_book([climb, maxed, weak, dead], hist)
         bo_names = {r["t"] for r in ranked["breakout"]}
@@ -85,66 +95,83 @@ class RankingTests(unittest.TestCase):
         self.assertNotIn("DEAD", bd_names)
         self.assertLessEqual(len(ranked["breakout"]), bo.RANK_CAP)
 
-    def test_hard_accel_weak_name_can_breakout(self) -> None:
-        _h, card = _hist_and_card("ACCEL US Equity", [2, 2, 3, 3, 4, 4, 5, 5])
-        row = bo.score_one(card, _h, kind="breakout")
-        self.assertIsNotNone(row)
-        self.assertGreaterEqual(row["breakout_score"], bo.MIN_COMPOSITE)
+    def test_weak_accel_and_opt_spike_are_not_breakout(self) -> None:
+        _h, card = _hist_and_card(
+            "ACCEL US Equity",
+            [2, 2, 3, 3, 4, 4, 5, 5],
+            extra={"rs63": 0.2, "opt_spike": True},
+        )
+        self.assertIsNone(bo.score_one(card, _h, kind="breakout"))
 
     def test_breakdown_cracker_not_already_dead(self) -> None:
-        h1, crack = _hist_and_card("CRACK US Equity", [8, 7, 6, 5, 5, 4, 4, 3, 3])
-        h2, still_up = _hist_and_card("UP US Equity", [9, 9, 10, 10, 11, 11, 11])
-        ranked = bo.rank_book([crack, still_up], _merge_hist([h1, h2]))
+        h1, crack = _hist_and_card("CRACK US Equity", _pass_dn(), extra={"rs63": -0.07})
+        h2, still_up = _hist_and_card("UP US Equity", [9] * 12, extra={"rs63": -0.2})
+        h3, dead = _hist_and_card("DEAD US Equity", [1] * 16, extra={"rs63": -0.3})
+        ranked = bo.rank_book([crack, still_up, dead], _merge_hist([h1, h2, h3]))
         names = {r["t"] for r in ranked["breakdown"]}
         self.assertIn("CRACK", names)
         self.assertNotIn("UP", names)
+        self.assertNotIn("DEAD", names)
         self.assertEqual(ranked["breakdown"][0]["side"], "below")
+        self.assertLess(ranked["breakdown"][0]["inflection_score"], 0)
 
-    def test_fresh_streak_outRanks_baked_run(self) -> None:
-        _hf, fresh = _hist_and_card("FRESH US Equity", [5, 6, 7, 8, 8, 8, 9, 9])
-        baked_scores = [8] * 96 + [8, 8, 8, 9]
-        _hb, baked = _hist_and_card("BAKED US Equity", baked_scores)
+    def test_fresh_streak_beats_baked_run(self) -> None:
+        _hf, fresh = _hist_and_card("FRESH US Equity", _pass_up(), extra={"rs63": 0.05})
+        baked_scores = [6] * 6 + [7, 8, 9, 10, 10, 10, 10, 10, 10, 10]
+        _hb, baked = _hist_and_card("BAKED US Equity", baked_scores, extra={"rs63": 0.2})
         ranked = bo.rank_book([fresh, baked], _merge_hist([_hf, _hb]))
         names = [r["t"] for r in ranked["breakout"]]
         self.assertIn("FRESH", names)
-        if "BAKED" in names:
-            self.assertLess(
-                names.index("FRESH"),
-                names.index("BAKED"),
-            )
+        self.assertNotIn("BAKED", names)
         fresh_row = next(r for r in ranked["breakout"] if r["t"] == "FRESH")
         self.assertIn("breakout_score", fresh_row)
-        self.assertGreater(fresh["mom_streak"], 1)
-        self.assertLess(fresh["mom_streak"], 20)
+        self.assertGreaterEqual(fresh["mom_streak"], 2)
+        self.assertLessEqual(fresh["mom_streak"], 15)
+        self.assertGreater(baked["mom_streak"], 15)
 
-    def test_cap_keeps_few_cards(self) -> None:
+    def test_cap_is_a_backstop_not_the_filter(self) -> None:
         cards = []
         hists = []
-        for i in range(20):
-            scores = [6, 6, 7, 7, 8, 8, 8 + (i % 3) * 0.1, 9]
-            h, c = _hist_and_card(f"N{i:02d} US Equity", scores)
+        for i in range(30):
+            lift = 4 + (i % 4)
+            early = 8 - lift
+            scores = [early, early, 4, 4, 5, 5, 6, 7, 8, 8, 8, 8]
+            h, c = _hist_and_card(
+                f"N{i:02d} US Equity",
+                scores,
+                extra={"rs63": 0.02 + i * 0.001},
+            )
             hists.append(h)
             cards.append(c)
         ranked = bo.rank_book(cards, _merge_hist(hists))
-        self.assertLessEqual(len(ranked["breakout"]), 12)
-        self.assertGreaterEqual(len(ranked["breakout"]), 1)
-        scores = [r["breakout_score"] for r in ranked["breakout"]]
+        self.assertEqual(len(ranked["breakout"]), bo.RANK_CAP)
+        self.assertLessEqual(bo.RANK_CAP, 24)
+        scores = [r["inflection_score"] for r in ranked["breakout"]]
         self.assertEqual(scores, sorted(scores, reverse=True))
 
-    def test_flags_hop_boosts_composite(self) -> None:
-        scores = [6, 7, 7, 8, 8, 9, 9, 9]
-        _h1, plain = _hist_and_card("PLAIN US Equity", scores)
+    def test_flags_hop_boosts_composite_opt_spike_does_not(self) -> None:
+        scores = _pass_up()
+        _h1, plain = _hist_and_card("PLAIN US Equity", scores, extra={"rs63": 0.05})
         _h2, flagged = _hist_and_card(
             "FLAG US Equity",
             scores,
             list_name="FLAGS",
             tags=[{"label": "hop"}, {"label": "leader"}],
+            extra={"rs63": 0.05},
+        )
+        _h3, spiked = _hist_and_card(
+            "SPIKE US Equity",
+            scores,
+            extra={"rs63": 0.05, "opt_spike": True},
         )
         a = bo.score_one(plain, _h1, kind="breakout")
         b = bo.score_one(flagged, _h2, kind="breakout")
+        c = bo.score_one(spiked, _h3, kind="breakout")
         self.assertIsNotNone(a)
         self.assertIsNotNone(b)
+        self.assertIsNotNone(c)
         self.assertGreater(b["breakout_score"], a["breakout_score"])
+        self.assertEqual(c["breakout_score"], a["breakout_score"])
 
 
     def test_slim_payload_embeds_portable_stats_and_tags(self) -> None:
@@ -320,7 +347,7 @@ class RankingTests(unittest.TestCase):
                 lines.append(f"{d.isoformat()},SPY US Equity,{spy:.4f}")
                 lines.append(f"{d.isoformat()},SPCX US Equity,{px:.4f}")
             (root / "prices_long.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
-            hist, card = _hist_and_card("SPCX US Equity", [6, 7, 8, 8, 9, 9, 10])
+            hist, card = _hist_and_card("SPCX US Equity", _pass_up())
             ranked = bo.rank_book([card], hist, root=root)
             self.assertTrue(ranked["breakout"], ranked)
             row = ranked["breakout"][0]
@@ -331,6 +358,172 @@ class RankingTests(unittest.TestCase):
             self.assertIsInstance(slim["r20"], float)
             self.assertIsInstance(slim["atr_pct"], float)
             self.assertGreater(slim["atr_pct"], 0)
+            self.assertEqual(ranked["breakout"][0]["dispersion_field"], "rs63")
+            self.assertGreater(ranked["breakout"][0]["dispersion"], 0)
+
+
+class InflectionGateTests(unittest.TestCase):
+    """Hard gates: band, d10, streak length, dispersion. Each case is true or false."""
+
+    def _row(self, scores: list[float], *, kind: str = "breakout", extra: dict | None = None):
+        hist, card = _hist_and_card("NAME US Equity", scores, extra=extra)
+        return bo.score_one(card, hist, kind=kind), card
+
+    def test_breakout_band_edges(self) -> None:
+        # 7 inclusive passes; 6 and 11 do not. d10 and streak stay fresh.
+        low = [3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7]
+        hi = [6, 6, 6, 6, 6, 6, 7, 8, 9, 9, 10, 10]
+        mush = [2, 2, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
+        ext = [6, 6, 6, 6, 7, 7, 8, 9, 10, 10, 11, 11]
+        self.assertIsNotNone(self._row(low, extra={"rs63": 0.04})[0])
+        self.assertIsNotNone(self._row(hi, extra={"rs63": 0.04})[0])
+        self.assertIsNone(self._row(mush, extra={"rs63": 0.04})[0])
+        self.assertIsNone(self._row(ext, extra={"rs63": 0.2})[0])
+
+    def test_breakout_d10_must_exceed_3_and_exist(self) -> None:
+        exact = [5, 5, 5, 5, 5, 6, 6, 7, 7, 8, 8, 8]  # d10 = 8-5 = 3
+        strong = [4, 4, 4, 4, 5, 5, 6, 7, 8, 8, 9, 9]  # d10 = 5
+        short = [6, 7, 8, 9, 9]
+        self.assertIsNone(self._row(exact, extra={"rs63": 0.05})[0])
+        row, card = self._row(strong, extra={"rs63": 0.05})
+        self.assertIsNotNone(row)
+        self.assertGreater(card["mom_score_d10"], 3)
+        self.assertEqual(row["dispersion_field"], "rs63")
+        self.assertIsNone(self._row(short, extra={"rs63": 0.2})[0])
+
+    def test_breakout_streak_fresh_or_just_crossed_not_baked(self) -> None:
+        just = [3, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 8]  # streak 1, score 8, d10 +5
+        fresh15 = [4] + [6] * 5 + [7] * 5 + [8] * 4 + [10]
+        baked = [6] * 6 + [7] * 5 + [8] * 4 + [10]  # streak 16, d10 +4, score 10
+        flat_long = [10] * 20
+        mild = [8] * 10 + [10] * 10  # score 10, d10 +2, streak 20
+        self.assertEqual(self._row(just, extra={"rs63": 0.05})[1]["mom_streak"], 1)
+        self.assertIsNotNone(self._row(just, extra={"rs63": 0.05})[0])
+        row15, card15 = self._row(fresh15, extra={"rs63": 0.05})
+        self.assertEqual(card15["mom_streak"], 15)
+        self.assertIsNotNone(row15)
+        self.assertGreater(self._row(baked, extra={"rs63": 0.2})[1]["mom_streak"], 15)
+        self.assertIsNone(self._row(baked, extra={"rs63": 0.2})[0])
+        self.assertIsNone(self._row(flat_long, extra={"rs63": 0.3})[0])
+        self.assertIsNone(self._row(mild, extra={"rs63": 0.3})[0])
+
+    def test_breakout_dispersion_residual_then_rs63(self) -> None:
+        scores = _pass_up()
+        self.assertIsNotNone(self._row(scores, extra={"residual_20d": 0.04})[0])
+        row, _card = self._row(scores, extra={"residual_20d": 0.04, "rs63": -0.2})
+        self.assertIsNotNone(row)
+        self.assertEqual(row["dispersion_field"], "residual_20d")
+        self.assertGreater(row["dispersion"], 0)
+        # Present residual of 0 or negative does not fall through to a hot RS63.
+        self.assertIsNone(self._row(scores, extra={"residual_20d": 0, "rs63": 0.4})[0])
+        self.assertIsNone(self._row(scores, extra={"residual_20d": -0.02, "rs63": 0.4})[0])
+        self.assertIsNone(self._row(scores, extra={"rs63": 0})[0])
+        self.assertIsNone(self._row(scores, extra={"rs63": -0.01})[0])
+        self.assertIsNone(self._row(scores)[0])
+        met_hist, met = _hist_and_card(
+            "MET US Equity",
+            scores,
+            extra={"metrics": {"rs_63": 0.03}},
+        )
+        met_row = bo.score_one(met, met_hist, kind="breakout")
+        self.assertIsNotNone(met_row)
+        self.assertEqual(met_row["dispersion_field"], "rs63")
+        grp, _gcard = self._row(scores, extra={"vs_group": 0.02, "rs63": -0.4})
+        self.assertEqual(grp["dispersion_field"], "vs_group")
+        # Rising prices without a benchmark are not RS63.
+        hist, card = _hist_and_card(
+            "RAW US Equity",
+            scores,
+            extra={"px_series": [100.0 * (1.01 ** i) for i in range(80)]},
+        )
+        self.assertIsNone(bo.score_one(card, hist, kind="breakout"))
+
+    def test_opt_spike_does_not_open_the_gate(self) -> None:
+        scores = [8] * 12  # in band, d10 0, long streak
+        row, _card = self._row(scores, extra={"rs63": 0.2, "opt_spike": True})
+        self.assertIsNone(row)
+
+    def test_breakdown_mirrors_gates(self) -> None:
+        ok = _pass_dn()
+        score2 = [8, 8, 8, 8, 7, 6, 5, 4, 3, 3, 2, 2]
+        score6 = [10, 10, 10, 10, 9, 8, 7, 7, 6, 6, 6, 6]  # 6 is still above 5
+        exact = [7, 7, 7, 7, 7, 6, 6, 5, 4, 4, 4, 4]  # d10 = -3
+        dead = [4] * 4 + [1] * 12
+        just = [9, 9, 9, 9, 8, 8, 7, 7, 6, 6, 5, 4]
+        baked = [8] * 6 + [4] * 16
+        self.assertIsNotNone(self._row(ok, kind="breakdown", extra={"rs63": -0.05})[0])
+        self.assertIsNotNone(self._row(score2, kind="breakdown", extra={"rs63": -0.05})[0])
+        # Score 6 is inside the band but has not broken below 5.
+        self.assertIsNone(self._row(score6, kind="breakdown", extra={"residual_20d": -0.03})[0])
+        self.assertIsNone(self._row(exact, kind="breakdown", extra={"rs63": -0.05})[0])
+        self.assertIsNone(self._row(dead, kind="breakdown", extra={"rs63": -0.4})[0])
+        self.assertIsNone(self._row(ok, kind="breakdown", extra={"rs63": 0.05})[0])
+        self.assertIsNone(self._row(ok, kind="breakdown")[0])
+        just_row, just_card = self._row(just, kind="breakdown", extra={"rs63": -0.04})
+        self.assertEqual(just_card["mom_streak"], 1)
+        self.assertEqual(just_card["mom_streak_side"], "below")
+        self.assertIsNotNone(just_row)
+        self.assertGreater(self._row(baked, kind="breakdown", extra={"rs63": -0.2})[1]["mom_streak"], 15)
+        self.assertIsNone(self._row(baked, kind="breakdown", extra={"rs63": -0.2})[0])
+
+    def test_gate_truth_table(self) -> None:
+        p = bo._passes_breakout
+        self.assertTrue(p(7, 3.01, 2, "above", 0.01))
+        self.assertTrue(p(10, 4, 15, "above", 0.01))
+        self.assertTrue(p(8, 4, 1, "above", 0.01))  # just crossed
+        self.assertFalse(p(6, 5, 4, "above", 0.05))
+        self.assertFalse(p(6.99, 5, 4, "above", 0.05))
+        self.assertFalse(p(11, 5, 4, "above", 0.05))
+        self.assertFalse(p(10.01, 5, 4, "above", 0.05))
+        self.assertFalse(p(8, 3, 4, "above", 0.05))
+        self.assertFalse(p(8, None, 4, "above", 0.05))
+        self.assertFalse(p(8, 5, 16, "above", 0.05))
+        self.assertFalse(p(8, 5, 0, "above", 0.05))
+        self.assertFalse(p(8, 5, 4, "below", 0.05))
+        self.assertFalse(p(8, 5, 4, "above", 0))
+        self.assertFalse(p(8, 5, 4, "above", None))
+        q = bo._passes_breakdown
+        self.assertTrue(q(2, -3.01, 2, "below", -0.01))
+        self.assertTrue(q(6, -4, 4, "below", -0.01))  # band allows 6; side must still be below
+        self.assertTrue(q(4, -4, 1, "below", -0.01))
+        self.assertTrue(q(4, -4, 15, "below", -0.01))
+        self.assertFalse(q(1, -6, 4, "below", -0.1))
+        self.assertFalse(q(1.99, -6, 4, "below", -0.1))
+        self.assertFalse(q(6.01, -6, 4, "below", -0.1))
+        self.assertFalse(q(4, -3, 4, "below", -0.1))
+        self.assertFalse(q(4, None, 4, "below", -0.1))
+        self.assertFalse(q(4, -5, 16, "below", -0.1))
+        self.assertFalse(q(4, -5, 4, "above", -0.1))
+        self.assertFalse(q(4, -5, 4, "below", 0))
+        self.assertFalse(q(4, -5, 4, "below", None))
+
+    def test_breakdown_sorts_most_negative_inflection_first(self) -> None:
+        soft = [8, 8, 7, 7, 6, 6, 5, 4, 4, 4, 4, 4]  # d10 = -4
+        hard = [12, 12, 9, 8, 7, 6, 5, 4, 3, 3, 3, 3]  # d10 = -9, score 3
+        h1, a = _hist_and_card("SOFT US Equity", soft, extra={"rs63": -0.02})
+        h2, b = _hist_and_card("HARD US Equity", hard, extra={"rs63": -0.12})
+        ranked = bo.rank_book([a, b], _merge_hist([h1, h2]))
+        names = [r["t"] for r in ranked["breakdown"]]
+        self.assertEqual(names, ["HARD", "SOFT"])
+        inflections = [r["inflection_score"] for r in ranked["breakdown"]]
+        self.assertEqual(inflections, sorted(inflections))
+        self.assertLess(inflections[0], inflections[1])
+        self.assertLess(inflections[0], 0)
+
+    def test_early_band_and_mid_streak_rank_higher(self) -> None:
+        early = bo._inflection_magnitude(
+            score=7, d10=5, streak=6, dispersion=0.05, card={}, kind="breakout"
+        )
+        late = bo._inflection_magnitude(
+            score=10, d10=5, streak=6, dispersion=0.05, card={}, kind="breakout"
+        )
+        self.assertGreater(early, late)
+        just = [3, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 8]
+        mid = [3, 3, 4, 4, 5, 5, 6, 7, 8, 8, 8, 8]
+        h1, a = _hist_and_card("JUST US Equity", just, extra={"rs63": 0.05})
+        h2, b = _hist_and_card("MID US Equity", mid, extra={"rs63": 0.05})
+        ranked = bo.rank_book([a, b], _merge_hist([h1, h2]))
+        self.assertEqual([r["t"] for r in ranked["breakout"]], ["MID", "JUST"])
 
 
 def _live_mom_script(cards: list[dict]) -> str:
@@ -407,7 +600,7 @@ class EmbedTests(unittest.TestCase):
 </nav>
 <article class="card" data-t="CLIMB">CLIMB</article>
 </body></html>"""
-        _h, climb = _hist_and_card("CLIMB US Equity", [6, 7, 8, 8, 9, 9, 10])
+        _h, climb = _hist_and_card("CLIMB US Equity", _pass_up(), extra={"rs63": 0.08})
         ranked = bo.rank_book([climb], _h)
         out = bo.ensure_embedded(html, ranked)
         self.assertRegex(out, r'<button\b[^>]*data-view=["\']breakout["\']')
@@ -421,6 +614,12 @@ class EmbedTests(unittest.TestCase):
         self.assertIn('id="breakdown-grid"', out)
         self.assertIn('class="grid dense"', out)
         self.assertIn('<div class="ph">Breakout</div>', out)
+        self.assertEqual(out.count(bo.note_html()), 2)
+        self.assertIn("streak 1–15d above 5", out)
+        self.assertIn("streak 1–15d below 5", out)
+        self.assertIn("not a trade signal", out)
+        self.assertNotIn("correct side of 5", out)
+        self.assertNotIn("beyond ±3", out)
         self.assertNotRegex(out, r'<article\b[^>]*fd-bb-card')
         self.assertNotIn('data-tab="sectors"', out)
         self.assertNotIn("&gt;", bo.embed_db(ranked))
@@ -561,12 +760,87 @@ function syncNav() {}
         self.assertIn('id="breakdown-grid"', host)
         self.assertIn('<div class="ph">Breakout</div>', host)
         self.assertIn('<div class="ph">Breakdown</div>', host)
+        self.assertEqual(host.count(bo.note_html()), 2)
+        self.assertIn("10d score Δ &gt; +3", host)
+        self.assertIn("10d score Δ &lt; −3", host)
+        self.assertNotIn("correct side of 5", host)
+        self.assertIn('class="fd-bb-note"', host)
+        self.assertIn('class="fd-bb-split"', host)
+        self.assertLess(host.find('id="breakout-grid"'), host.find("fd-bb-note"))
         self.assertIn('id="fd-bb-breakout"', host)
         self.assertIn("hidden", host)
         self.assertNotIn("CLIMB", host)
         self.assertNotIn("CRACK", host)
         self.assertNotIn("fd-bb-card", host)
         self.assertNotIn("No breakout names", host)
+
+    def test_side_note_stays_on_breakout_panes_not_momentum(self) -> None:
+        html = """<!DOCTYPE html><html><head></head><body>
+<nav><button>Momentum Down</button></nav>
+<div id="view-mom-up" class="view-pane hide"><div class="ph">Momentum Up</div><div class="grid dense" id="mom-up-grid"></div></div>
+<div id="view-breakout" class="view-pane hide"><div class="ph">Breakout</div><div class="grid dense" id="breakout-grid"></div></div>
+<div id="view-breakdown" class="view-pane hide"><div class="ph">Breakdown</div><div class="grid dense" id="breakdown-grid"></div></div>
+</body></html>"""
+        out = bo.ensure_embedded(html, None)
+
+        def chunk(view_id: str) -> str:
+            span = bo._find_tag_span(out, view_id)
+            self.assertIsNotNone(span)
+            return out[span[0] : span[1]]
+
+        for view_id, grid_id in (("view-breakout", "breakout-grid"), ("view-breakdown", "breakdown-grid")):
+            body = chunk(view_id)
+            self.assertIn(bo.note_html(), body)
+            self.assertIn("streak 1–15d below 5", body)
+            self.assertIn("fd-bb-split", body)
+            self.assertLess(body.find(grid_id), body.find("fd-bb-note"))
+        mom = chunk("view-mom-up")
+        self.assertNotIn("streak 1–15d below 5", mom)
+        self.assertNotIn(bo.note_html(), mom)
+        self.assertNotIn("fd-bb-note", mom)
+        self.assertNotIn("fd-bb-split", mom)
+
+    def test_ensure_embedded_refreshes_stale_side_note(self) -> None:
+        stale = (
+            '<aside class="fd-bb-note"><p>Breakout and Breakdown keep early inflections only. '
+            "a fresh streak vs 5 (1–15 days on the correct side of 5), beyond ±3.</p></aside>"
+        )
+        html = f"""<!DOCTYPE html><html><head></head><body>
+<nav><button>Momentum Down</button></nav>
+<div id="view-mom-up" class="view-pane hide"><div class="ph">Momentum Up</div><div class="grid dense" id="mom-up-grid"></div></div>
+<div id="view-breakout" class="view-pane hide"><div class="ph">Breakout</div>
+  <div class="fd-bb-split"><div class="grid dense" id="breakout-grid"></div>{stale}</div></div>
+<div id="view-breakdown" class="view-pane hide"><div class="ph">Breakdown</div>
+  <div class="fd-bb-split"><div class="grid dense" id="breakdown-grid"></div>{stale}</div></div>
+</body></html>"""
+        mom_before = bo._find_tag_span(html, "view-mom-up")
+        self.assertIsNotNone(mom_before)
+        mom_html = html[mom_before[0] : mom_before[1]]
+        out = bo.ensure_embedded(html, None)
+        fresh = bo.note_html()
+        self.assertEqual(out.count(fresh), 2)
+        self.assertNotIn("correct side", out)
+        self.assertNotIn("beyond ±3", out)
+
+        def chunk(view_id: str) -> str:
+            span = bo._find_tag_span(out, view_id)
+            self.assertIsNotNone(span)
+            return out[span[0] : span[1]]
+
+        for view_id in ("view-breakout", "view-breakdown"):
+            body = chunk(view_id)
+            self.assertEqual(body.count(fresh), 1)
+            self.assertIn("Breakout: score 7–10", body)
+            self.assertIn("Breakdown: score 2–6", body)
+            self.assertIn("streak 1–15d above 5", body)
+            self.assertIn("streak 1–15d below 5", body)
+            self.assertNotIn("correct side", body)
+        mom_after = bo._find_tag_span(out, "view-mom-up")
+        self.assertIsNotNone(mom_after)
+        self.assertEqual(out[mom_after[0] : mom_after[1]], mom_html)
+        again = bo.ensure_embedded(out, None)
+        self.assertEqual(again.count(fresh), 2)
+        self.assertNotIn("correct side", again)
 
     def test_ensure_embedded_none_does_not_wipe_ranked_panes(self) -> None:
         html = """<!DOCTYPE html><html><body>

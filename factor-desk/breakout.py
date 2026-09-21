@@ -1,14 +1,17 @@
 """Breakout / Breakdown ranking for Factor Desk home tabs.
 
-Breakout = emerging strength (mid scores climbing), **not** already-maxed MOM.
-Breakdown = mirror: mid-weak scores deteriorating, **not** already dead.
+Breakout = early long inflection (score just into 7–10, strong 10d lift,
+fresh above-5 streak, positive idio). Not an already-worked trend.
+Breakdown = the mirror. Not an already-dead name.
 
 Tune every threshold in the constants block below. Formula is documented in
-``docs/BREAKOUT-BREAKDOWN.md``. No extra DAPI stages.
+``docs/BREAKOUT-BREAKDOWN.md``. No extra DAPI stages. ``mom_score_d10`` comes
+from ``mom_streak`` (already on the card when hist is long enough).
 """
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -29,48 +32,49 @@ LOG = logging.getLogger("breakout")
 # Thresholds — tune here, then re-Refresh. See docs/BREAKOUT-BREAKDOWN.md.
 # ---------------------------------------------------------------------------
 
-# Score bands on the 0–13 MOM rank (card ``score`` / ``mom_score``).
-BREAKOUT_SCORE_MIN = 6.0
-BREAKOUT_SCORE_MAX = 11.0  # 12–13 already there
-BREAKOUT_SWEET_LOW = 7.0
-BREAKOUT_SWEET_HIGH = 10.0
-WEAK_ACCEL_MIN_SCORE = 4.0  # ≤5 still weak unless accelerating hard
-WEAK_ACCEL_MIN_DELTA = 2.0
-
+# Hard score bands on the 0–13 MOM rank (card ``score`` / ``mom_score``).
+# Outside the band is excluded — not a soft falloff.
+BREAKOUT_SCORE_MIN = 7.0
+BREAKOUT_SCORE_MAX = 10.0  # 11–13 already extended
 BREAKDOWN_SCORE_MIN = 2.0  # 0–1 already dead
-BREAKDOWN_SCORE_MAX = 7.0
-BREAKDOWN_SWEET_LOW = 3.0
-BREAKDOWN_SWEET_HIGH = 6.0
+BREAKDOWN_SCORE_MAX = 6.0
 
-# Rising / falling lookback in **trading days**. Prefer 5–10d; 7 is the default.
-DELTA_LOOKBACK_PREF = 7
-DELTA_LOOKBACK_MIN = 5
-DELTA_LOOKBACK_MAX = 10
-DELTA_CLIP = 4.0
+# 10-trading-day composite change. Strict: breakout needs > +3, breakdown < −3.
+# Missing ``mom_score_d10`` (series shorter than 11 prints) excludes the name.
+D10_BREAKOUT_MIN = 3.0
+D10_BREAKDOWN_MAX = -3.0
+D10_CLIP = 8.0  # rank weight only
 
-# Streak: short-to-medium just-flipped/climbing beats a 100d already-baked run.
+# Streak vs 5. 1 = just crossed today. 2–15 = fresh. N>15 is baked — out.
+STREAK_JUST_CROSSED = 1
 STREAK_FRESH_MIN = 2
-STREAK_FRESH_MAX = 20
-STREAK_PEAK = 12
-STREAK_BAKED = 100
+STREAK_FRESH_MAX = 15
+STREAK_PEAK_LO = 5
+STREAK_PEAK_HI = 12
 
-# Accel: last 3d Δ vs prior 3d Δ.
-ACCEL_SHORT = 3
+# Dispersion. Prefer enrich ``residual_20d`` (r_20d − β × r_mkt_20d). If that
+# field is absent, interim gate is RS63 > 0 / < 0 (card ``rs_63`` / ``rs63``,
+# or 63d return minus SPY when both series exist). Do not invent a residual.
+# A present residual of 0 does **not** fall through to RS63.
+DISPERSION_KEYS: tuple[str, ...] = (
+    "residual_20d",
+    "factor_residual",
+    "factor_resid",
+    "vs_group",
+    "vs_sleeve",
+)
+DISP_CLIP = 0.15  # rank weight only; gate is strictly > 0 or < 0
 
-# Composite weights.
+# Inflection rank weights. Gates already dropped non-inflections.
 W_BAND = 3.0
-W_DELTA = 1.6
+W_D10 = 1.6
 W_STREAK = 2.0
-W_BOOST_FLAGS = 0.8
-W_BOOST_HOP_LEADER = 0.5
-W_BOOST_OPT_SPIKE = 0.6
-W_BOOST_ACCEL = 0.5
-W_BOOST_OUTLIER = 0.4
-W_WEAK_ACCEL = 1.0  # names still ≤5 that only qualify via hard Δ
+W_DISP = 1.4
+W_STRUCTURE = 0.35  # FLAGS / hop / leader only — not an eligibility gate
 
-# Discerning cap: few cards, ranked by breakout_score / breakdown_score.
-RANK_CAP = 12
-MIN_COMPOSITE = 1.25  # do not fill the cap with junk
+# Display backstop. Selectivity comes from the gates, not this trim.
+RANK_CAP = 24
+MIN_COMPOSITE = 0.0  # unused as a junk filter; gates are the cut
 
 # Price stats on ranked rows (same closes Mom cards use: px_series / prices_long).
 R20_N = 20
@@ -105,6 +109,17 @@ VIEW_BREAKOUT_ID = "view-breakout"
 VIEW_BREAKDOWN_ID = "view-breakdown"
 GRID_BREAKOUT_ID = "breakout-grid"
 GRID_BREAKDOWN_ID = "breakdown-grid"
+NOTE_CLASS = "fd-bb-note"
+SPLIT_CLASS = "fd-bb-split"
+# Right-rail copy on both panes. Gates live in the constants above; this is display only.
+# Breakdown is the true opposite of Breakout — do not collapse them into "±3" / "correct side".
+NOTE_LINES: tuple[str, ...] = (
+    "Breakout / Breakdown = early inflections only (all four gates).",
+    "Breakout: score 7–10, 10d score Δ > +3, streak 1–15d above 5, dispersion > 0 (residual_20d else RS63).",
+    "Breakdown: score 2–6, 10d score Δ < −3, streak 1–15d below 5, dispersion < 0.",
+    "Ranked by inflection score (band edge, |Δ10d|, streak freshness, |dispersion|) — not a trade signal. Missing Δ fails.",
+)
+NOTE_COPY = "\n".join(NOTE_LINES)
 HID_CLASS = "fd-bb-hid"
 
 NAV_BREAKOUT_ID = "fd-nav-breakout"
@@ -763,122 +778,208 @@ def series_for(
     return rows
 
 
-def delta_over(
-    series: Sequence[tuple[Any, float]] | None,
-    lookback: int = DELTA_LOOKBACK_PREF,
-) -> tuple[float | None, int]:
-    """``(today - score N trading days ago, N used)``. Prefers 5–10d."""
-    rows = list(series or [])
-    if len(rows) < 2:
-        return None, 0
-    today = float(rows[-1][1])
-    n = max(DELTA_LOOKBACK_MIN, min(int(lookback), DELTA_LOOKBACK_MAX))
-    if len(rows) - 1 < DELTA_LOOKBACK_MIN:
-        n = len(rows) - 1
-        return today - float(rows[0][1]), n
-    idx = max(0, len(rows) - 1 - n)
-    used = (len(rows) - 1) - idx
-    return today - float(rows[idx][1]), used
-
-
-def accel_boost(series: Sequence[tuple[Any, float]] | None, *, up: bool) -> float:
-    rows = list(series or [])
-    need = ACCEL_SHORT * 2 + 1
-    if len(rows) < need:
-        return 0.0
-    recent = float(rows[-1][1]) - float(rows[-1 - ACCEL_SHORT][1])
-    prior = float(rows[-1 - ACCEL_SHORT][1]) - float(rows[-1 - 2 * ACCEL_SHORT][1])
-    if up and recent > prior and recent > 0:
-        return W_BOOST_ACCEL
-    if (not up) and recent < prior and recent < 0:
-        return W_BOOST_ACCEL
-    return 0.0
-
-
-def band_fit(score: float, lo: float, hi: float, sweet_lo: float, sweet_hi: float) -> float:
-    """1.0 in the sweet range, linear falloff to 0 just outside ``[lo, hi]``."""
-    if score < lo - 0.75 or score > hi + 0.75:
-        return 0.0
-    if sweet_lo <= score <= sweet_hi:
-        return 1.0
-    if lo <= score < sweet_lo:
-        span = max(sweet_lo - lo, 0.01)
-        return 0.45 + 0.55 * (score - lo) / span
-    if sweet_hi < score <= hi:
-        span = max(hi - sweet_hi, 0.01)
-        return 0.45 + 0.55 * (hi - score) / span
-    if lo - 0.75 <= score < lo:
-        return 0.25 * (score - (lo - 0.75)) / 0.75
-    return 0.25 * ((hi + 0.75) - score) / 0.75
-
-
-def streak_freshness(streak: int, side: str | None, want: str) -> float:
-    """1.0 for a short-to-medium run on ``want``; ~0 for a 100d baked run."""
-    if side != want:
-        return 0.0
-    n = max(int(streak or 0), 0)
-    if n <= 0:
-        return 0.0
-    if n < STREAK_FRESH_MIN:
-        return 0.35 * n / STREAK_FRESH_MIN
-    if n <= STREAK_PEAK:
-        return 1.0
-    if n <= STREAK_FRESH_MAX:
-        return 0.75
-    if n >= STREAK_BAKED:
-        return 0.05
-    span = float(STREAK_BAKED - STREAK_FRESH_MAX)
-    return max(0.05, 0.75 * (1.0 - (n - STREAK_FRESH_MAX) / span))
-
-
-def field_boosts(card: Mapping[str, Any] | None) -> float:
-    boost = 0.0
-    lists = card_lists(card)
-    if "FLAGS" in lists:
-        boost += W_BOOST_FLAGS
-    if has_hop_leader(card):
-        boost += W_BOOST_HOP_LEADER
-    if has_opt_spike(card):
-        boost += W_BOOST_OPT_SPIKE
-    if is_outlier_newbie(card):
-        boost += W_BOOST_OUTLIER
-    return boost
-
-
 def _clip(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
-def breakout_eligible(score: float | None, delta: float | None) -> bool:
-    if score is None:
-        return False
-    if score > BREAKOUT_SCORE_MAX:
-        return False
-    if delta is None or delta <= 0:
-        return False
-    if BREAKOUT_SCORE_MIN <= score <= BREAKOUT_SCORE_MAX:
-        return True
-    if score >= WEAK_ACCEL_MIN_SCORE and delta >= WEAK_ACCEL_MIN_DELTA:
-        return True
-    return False
+def _in_band(score: float | None, lo: float, hi: float) -> bool:
+    return score is not None and lo <= float(score) <= hi
 
 
-def breakdown_eligible(score: float | None, delta: float | None) -> bool:
-    if score is None:
-        return False
-    if score < BREAKDOWN_SCORE_MIN:
-        return False
-    if delta is None or delta >= 0:
-        return False
-    if BREAKDOWN_SCORE_MIN <= score <= BREAKDOWN_SCORE_MAX:
-        return True
-    return False
+def _d10_of(
+    card: Mapping[str, Any],
+    series: Sequence[tuple[Any, float]],
+    score: float | None,
+) -> float | None:
+    """Card ``mom_score_d10`` when attached; else the same 10-print helper."""
+    if "mom_score_d10" in card and card.get("mom_score_d10") not in (None, ""):
+        return _float_any(card.get("mom_score_d10"))
+    rec = mom_streak.score_change_d10(series, score)
+    if not rec:
+        return None
+    return _float_any(rec.get("mom_score_d10"))
 
 
-def _why(*, score: float, delta: float, used: int, streak: int, side: str | None, kind: str) -> str:
-    arrow = "+" if delta >= 0 else ""
-    side_bit = f" · {side or '—'} {int(streak)}d"
-    return f"{kind} {score:g} · {arrow}{delta:g} / {used}d{side_bit}"
+def _streak_of(
+    card: Mapping[str, Any],
+    series: Sequence[tuple[Any, float]],
+) -> tuple[int, str | None]:
+    side = card.get("mom_streak_side")
+    raw = card.get("mom_streak")
+    if side in ("above", "below", "at") and raw is not None and raw != "":
+        try:
+            return int(raw), str(side)
+        except (TypeError, ValueError):
+            pass
+    return mom_streak.streak_from_dated(series)
+
+
+def streak_is_fresh(streak: int, side: str | None, want: str) -> bool:
+    """Wanted side, and either just crossed (1d) or a fresh run of 2–15d."""
+    if side != want:
+        return False
+    n = int(streak or 0)
+    return STREAK_JUST_CROSSED <= n <= STREAK_FRESH_MAX
+
+
+def _present_float(src: Mapping[str, Any] | None, key: str) -> float | None:
+    if not isinstance(src, Mapping) or key not in src:
+        return None
+    raw = src.get(key)
+    if raw is None or raw == "":
+        return None
+    return _float_any(raw)
+
+
+def dispersion_of(
+    card: Mapping[str, Any] | None,
+    panel: Mapping[str, Any] | None = None,
+    *,
+    bench: Sequence[float] | None = None,
+) -> tuple[float | None, str]:
+    """``(value, field)`` for the idio gate.
+
+    Order: existing ~20d factor residual on the card or ``metrics``
+    (``residual_20d``, then ``factor_residual`` / ``vs_group`` / ``vs_sleeve``).
+    A present number, including 0, wins — no fall-through. If none of those
+    fields exist, interim RS63: card/metrics ``rs_63`` / ``rs63``, else 63d
+    return minus the benchmark when **both** series exist. A raw return with
+    no benchmark is not treated as RS63.
+    """
+    src = card if isinstance(card, Mapping) else {}
+    blobs: list[Mapping[str, Any]] = [src]
+    metrics = src.get("metrics")
+    if isinstance(metrics, Mapping):
+        blobs.append(metrics)
+    for blob in blobs:
+        for key in DISPERSION_KEYS:
+            val = _present_float(blob, key)
+            if val is not None:
+                return val, key
+    for blob in blobs:
+        for key in ("rs_63", "rs63", "RS63", "rs_63d"):
+            val = _present_float(blob, key)
+            if val is not None:
+                return val, "rs63"
+    name = str(src.get("ticker") or src.get("t") or src.get("name") or "")
+    closes = closes_from_card(src)
+    if len(closes) < RS63_N + 1:
+        closes = closes_from_panel(panel, name)
+    stock63 = ret_n(closes, RS63_N)
+    bench_closes = list(bench) if bench is not None else _bench_closes(panel, [src] if src else None)
+    bench63 = ret_n(bench_closes, RS63_N)
+    if stock63 is not None and bench63 is not None:
+        return round(stock63 - bench63, 4), "rs63"
+    return None, ""
+
+
+def band_early(score: float, *, kind: str) -> float:
+    """1.0 on the early edge of the gate band, lower toward the extended edge."""
+    if kind == "breakout":
+        if not _in_band(score, BREAKOUT_SCORE_MIN, BREAKOUT_SCORE_MAX):
+            return 0.0
+        span = max(BREAKOUT_SCORE_MAX - BREAKOUT_SCORE_MIN, 0.01)
+        return 1.0 - 0.45 * (float(score) - BREAKOUT_SCORE_MIN) / span
+    if not _in_band(score, BREAKDOWN_SCORE_MIN, BREAKDOWN_SCORE_MAX):
+        return 0.0
+    span = max(BREAKDOWN_SCORE_MAX - BREAKDOWN_SCORE_MIN, 0.01)
+    return 1.0 - 0.45 * (BREAKDOWN_SCORE_MAX - float(score)) / span
+
+
+def streak_freshness(streak: int) -> float:
+    """1.0 on a mid run (~5–12d). Just-crossed is lower. Baked (>15) is 0."""
+    n = int(streak or 0)
+    if n < STREAK_JUST_CROSSED or n > STREAK_FRESH_MAX:
+        return 0.0
+    if STREAK_PEAK_LO <= n <= STREAK_PEAK_HI:
+        return 1.0
+    if n < STREAK_PEAK_LO:
+        span = float(STREAK_PEAK_LO - STREAK_JUST_CROSSED)
+        return 0.35 + 0.65 * (n - STREAK_JUST_CROSSED) / span
+    span = float(STREAK_FRESH_MAX - STREAK_PEAK_HI)
+    return 1.0 - 0.35 * (n - STREAK_PEAK_HI) / span
+
+
+def structure_bonus(card: Mapping[str, Any] | None) -> float:
+    """Soft confirm only. Opt spike does not add rank and is not a gate."""
+    bonus = 0.0
+    lists = card_lists(card)
+    if "FLAGS" in lists:
+        bonus += 0.6
+    if has_hop_leader(card):
+        bonus += 0.4
+    return bonus
+
+
+def _inflection_magnitude(
+    *,
+    score: float,
+    d10: float,
+    streak: int,
+    dispersion: float,
+    card: Mapping[str, Any],
+    kind: str,
+) -> float:
+    return (
+        W_BAND * band_early(score, kind=kind)
+        + W_D10 * (_clip(abs(d10), 0.0, D10_CLIP) / D10_CLIP)
+        + W_STREAK * streak_freshness(streak)
+        + W_DISP * (_clip(abs(dispersion), 0.0, DISP_CLIP) / DISP_CLIP)
+        + W_STRUCTURE * structure_bonus(card)
+    )
+
+
+def _passes_breakout(
+    score: float | None,
+    d10: float | None,
+    streak: int,
+    side: str | None,
+    dispersion: float | None,
+) -> bool:
+    if not _in_band(score, BREAKOUT_SCORE_MIN, BREAKOUT_SCORE_MAX):
+        return False
+    if d10 is None or d10 <= D10_BREAKOUT_MIN:
+        return False
+    if not streak_is_fresh(streak, side, "above"):
+        return False
+    if dispersion is None or dispersion <= 0:
+        return False
+    return True
+
+
+def _passes_breakdown(
+    score: float | None,
+    d10: float | None,
+    streak: int,
+    side: str | None,
+    dispersion: float | None,
+) -> bool:
+    if not _in_band(score, BREAKDOWN_SCORE_MIN, BREAKDOWN_SCORE_MAX):
+        return False
+    if d10 is None or d10 >= D10_BREAKDOWN_MAX:
+        return False
+    if not streak_is_fresh(streak, side, "below"):
+        return False
+    if dispersion is None or dispersion >= 0:
+        return False
+    return True
+
+
+def _why(
+    *,
+    score: float,
+    d10: float,
+    streak: int,
+    side: str | None,
+    dispersion: float,
+    field: str,
+    kind: str,
+) -> str:
+    arrow = "+" if d10 >= 0 else ""
+    return (
+        f"{kind} {score:g} · {arrow}{d10:g}/10d · {side or '—'} {int(streak)}d"
+        f" · {field} {dispersion:g}"
+    )
 
 
 def score_one(
@@ -886,8 +987,10 @@ def score_one(
     hist: Mapping[str, Any] | None = None,
     *,
     kind: str,
+    panel: Mapping[str, Any] | None = None,
+    bench: Sequence[float] | None = None,
 ) -> dict[str, Any] | None:
-    """Return a ranked row or ``None`` if not eligible for ``kind``."""
+    """Return a ranked row or ``None`` if the name fails any hard gate."""
     ticker = mom_streak.card_ticker(card)
     if not ticker:
         return None
@@ -901,72 +1004,52 @@ def score_one(
             series = list(series[:-1]) + [(last_day, float(score))]
     elif score is not None and not series:
         series = [(mom_streak._today(), float(score))]
-    delta, used = delta_over(series)
+    d10 = _d10_of(card, series, score)
+    streak, side = _streak_of(card, series)
+    dispersion, field = dispersion_of(card, panel, bench=bench)
     if kind == "breakout":
-        if not breakout_eligible(score, delta):
+        if not _passes_breakout(score, d10, streak, side, dispersion):
             return None
-        assert score is not None and delta is not None
-        band = band_fit(score, BREAKOUT_SCORE_MIN, BREAKOUT_SCORE_MAX, BREAKOUT_SWEET_LOW, BREAKOUT_SWEET_HIGH)
-        streak = int(card.get("mom_streak") or 0)
-        side = card.get("mom_streak_side")
-        if not side:
-            streak, side = mom_streak.streak_from_dated(series)
-        fresh = streak_freshness(streak, side, "above")
-        weak_only = score < BREAKOUT_SCORE_MIN
-        composite = (
-            W_BAND * band
-            + W_DELTA * (_clip(delta, -DELTA_CLIP, DELTA_CLIP) / DELTA_CLIP)
-            + W_STREAK * fresh
-            + field_boosts(card)
-            + accel_boost(series, up=True)
-            + (W_WEAK_ACCEL if weak_only else 0.0)
-        )
-        if composite < MIN_COMPOSITE:
+    elif kind == "breakdown":
+        if not _passes_breakdown(score, d10, streak, side, dispersion):
             return None
-        return {
-            "t": _short(ticker),
-            "ticker": ticker,
-            "score": score,
-            "delta": round(delta, 4),
-            "lookback": used,
-            "streak": streak,
-            "side": side,
-            "label": card.get("mom_streak_label") or mom_streak.tag_label(streak, side),
-            "breakout_score": round(composite, 4),
-            "why": _why(score=score, delta=delta, used=used, streak=streak, side=side, kind="band"),
-        }
-    if kind == "breakdown":
-        if not breakdown_eligible(score, delta):
-            return None
-        assert score is not None and delta is not None
-        band = band_fit(score, BREAKDOWN_SCORE_MIN, BREAKDOWN_SCORE_MAX, BREAKDOWN_SWEET_LOW, BREAKDOWN_SWEET_HIGH)
-        streak = int(card.get("mom_streak") or 0)
-        side = card.get("mom_streak_side")
-        if not side:
-            streak, side = mom_streak.streak_from_dated(series)
-        fresh = streak_freshness(streak, side, "below")
-        composite = (
-            W_BAND * band
-            + W_DELTA * (_clip(-delta, -DELTA_CLIP, DELTA_CLIP) / DELTA_CLIP)
-            + W_STREAK * fresh
-            + field_boosts(card)
-            + accel_boost(series, up=False)
-        )
-        if composite < MIN_COMPOSITE:
-            return None
-        return {
-            "t": _short(ticker),
-            "ticker": ticker,
-            "score": score,
-            "delta": round(delta, 4),
-            "lookback": used,
-            "streak": streak,
-            "side": side,
-            "label": card.get("mom_streak_label") or mom_streak.tag_label(streak, side),
-            "breakdown_score": round(composite, 4),
-            "why": _why(score=score, delta=delta, used=used, streak=streak, side=side, kind="band"),
-        }
-    return None
+    else:
+        return None
+    assert score is not None and d10 is not None and dispersion is not None
+    magnitude = _inflection_magnitude(
+        score=score,
+        d10=d10,
+        streak=streak,
+        dispersion=dispersion,
+        card=card,
+        kind=kind,
+    )
+    signed = magnitude if kind == "breakout" else -magnitude
+    score_key = "breakout_score" if kind == "breakout" else "breakdown_score"
+    return {
+        "t": _short(ticker),
+        "ticker": ticker,
+        "score": score,
+        "delta": round(d10, 4),
+        "lookback": mom_streak.D10_LOOKBACK,
+        "mom_score_d10": round(d10, 4),
+        "streak": streak,
+        "side": side,
+        "label": card.get("mom_streak_label") or mom_streak.tag_label(streak, side),
+        "dispersion": round(dispersion, 4),
+        "dispersion_field": field,
+        "inflection_score": round(signed, 4),
+        score_key: round(magnitude, 4),
+        "why": _why(
+            score=score,
+            d10=d10,
+            streak=streak,
+            side=side,
+            dispersion=dispersion,
+            field=field,
+            kind="band",
+        ),
+    }
 
 
 def _dedupe_best(rows: list[dict[str, Any]], score_key: str) -> list[dict[str, Any]]:
@@ -995,13 +1078,17 @@ def rank_side(
     for card in cards or []:
         if not isinstance(card, Mapping):
             continue
-        row = score_one(card, hist, kind=kind)
+        row = score_one(card, hist, kind=kind, panel=panel, bench=bench)
         if row:
             row["_card"] = card
             attach_px_stats(row, card, panel, bench=bench)
             rows.append(row)
     rows = _dedupe_best(rows, score_key)
-    rows.sort(key=lambda r: float(r.get(score_key) or 0), reverse=True)
+    if kind == "breakdown":
+        # Most negative inflection first (mirror of breakout desc).
+        rows.sort(key=lambda r: float(r.get("inflection_score") or 0))
+    else:
+        rows.sort(key=lambda r: float(r.get("inflection_score") or 0), reverse=True)
     return rows[: max(0, int(cap))]
 
 
@@ -1013,7 +1100,10 @@ def rank_book(
     root: Any = None,
     prices: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Select at most ``cap`` (8–12) names per side, ranked by documented score."""
+    """Select names that clear every inflection gate, ranked by inflection score.
+
+    ``cap`` (default 24) is a display backstop. The gates are the real cut.
+    """
     src = [c for c in (cards or []) if isinstance(c, Mapping)]
     panel = prices
     if panel is None:
@@ -1075,6 +1165,10 @@ def slim_payload(
                 "label": row.get("label"),
                 score_key: row.get(score_key),
                 "why": row.get("why"),
+                "mom_score_d10": row.get("mom_score_d10", row.get("delta")),
+                "dispersion": row.get("dispersion"),
+                "dispersion_field": row.get("dispersion_field"),
+                "inflection_score": row.get("inflection_score"),
                 "day": stats.get("day"),
                 "r20": stats.get("r20"),
                 "rs63": stats.get("rs63"),
@@ -1120,6 +1214,40 @@ article.fd-bb-card, .fd-bb-card {{
 }}
 #view-breakout.hide, #view-breakdown.hide {{ display: none !important; }}
 .{HID_CLASS} {{ display: none !important; }}
+#view-breakout .{SPLIT_CLASS},
+#view-breakdown .{SPLIT_CLASS} {{
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}}
+#view-breakout .{SPLIT_CLASS} > .grid,
+#view-breakdown .{SPLIT_CLASS} > .grid {{
+  flex: 1 1 auto;
+  min-width: 0;
+}}
+#view-breakout .{NOTE_CLASS},
+#view-breakdown .{NOTE_CLASS} {{
+  flex: 0 0 280px;
+  width: 280px;
+  box-sizing: border-box;
+  margin: 2px 0 0;
+  padding: 8px 10px;
+  border: 1px solid #1f2937;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font: 11px/1.45 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  position: sticky;
+  top: 10px;
+}}
+#view-breakout .{NOTE_CLASS} p,
+#view-breakdown .{NOTE_CLASS} p {{
+  margin: 0 0 6px;
+}}
+#view-breakout .{NOTE_CLASS} p:last-child,
+#view-breakdown .{NOTE_CLASS} p:last-child {{
+  margin-bottom: 0;
+}}
 .fd-bb-empty {{
   grid-column: 1 / -1;
   color: #9ca3af;
@@ -1505,7 +1633,7 @@ def strip_js() -> str:
     if (!rows || !rows.length) {{
       var empty = document.createElement("p");
       empty.className = "fd-bb-empty";
-      empty.textContent = "No names this Refresh — mid-score climbers / crackers only.";
+      empty.textContent = "No early inflections this Refresh.";
       grid.appendChild(empty);
       return;
     }}
@@ -1649,27 +1777,78 @@ def strip_js() -> str:
 """.strip()
 
 
+def note_html() -> str:
+    """Same four lines on both panes. Not a help page."""
+    paras = "".join(f"<p>{html.escape(line)}</p>" for line in NOTE_LINES)
+    return f'<aside class="{NOTE_CLASS}">{paras}</aside>'
+
+
+def _pane_shell(view_id: str, title: str, grid_id: str, data_view: str) -> str:
+    return "\n".join(
+        [
+            f'<div id="{view_id}" class="view-pane hide" data-view="{data_view}">',
+            f'  <div class="ph">{html.escape(title)}</div>',
+            f'  <div class="{SPLIT_CLASS}">',
+            f'    <div class="grid dense" id="{grid_id}"></div>',
+            f"    {note_html()}",
+            "  </div>",
+            "</div>",
+        ]
+    )
+
+
 def panes_html(ranked: Mapping[str, Any] | None = None, article_html=None) -> str:
     """Momentum-style view shells. Grids are filled by live ``cardHTML(momCard)``.
 
     ``ranked`` / ``article_html`` are unused (kept for call-site compatibility).
     Legacy ``#fd-bb-*`` stay empty so old CSS cannot paint stub articles.
+    A right-hand note sits beside each grid. It is inside the view pane, so it
+    shows only while that tab is open.
     """
     _ = (ranked, article_html)
     return "\n".join(
         [
-            f'<div id="{VIEW_BREAKOUT_ID}" class="view-pane hide" data-view="breakout">',
-            '  <div class="ph">Breakout</div>',
-            f'  <div class="grid dense" id="{GRID_BREAKOUT_ID}"></div>',
-            "</div>",
-            f'<div id="{VIEW_BREAKDOWN_ID}" class="view-pane hide" data-view="breakdown">',
-            '  <div class="ph">Breakdown</div>',
-            f'  <div class="grid dense" id="{GRID_BREAKDOWN_ID}"></div>',
-            "</div>",
+            _pane_shell(VIEW_BREAKOUT_ID, "Breakout", GRID_BREAKOUT_ID, "breakout"),
+            _pane_shell(VIEW_BREAKDOWN_ID, "Breakdown", GRID_BREAKDOWN_ID, "breakdown"),
             f'<div id="{PANE_BREAKOUT_ID}" class="fd-bb-pane hide" hidden aria-hidden="true"></div>',
             f'<div id="{PANE_BREAKDOWN_ID}" class="fd-bb-pane hide" hidden aria-hidden="true"></div>',
         ]
     )
+
+
+_NOTE_ASIDE_RE = re.compile(
+    rf'<aside\b[^>]*\bclass=["\'][^"\']*\b{re.escape(NOTE_CLASS)}\b[^"\']*["\'][^>]*>.*?</aside>',
+    re.I | re.S,
+)
+
+
+def _refresh_side_note(html_text: str, span: tuple[int, int]) -> str | None:
+    """Replace a stale ``<aside class="fd-bb-note">`` inside this pane. ``None`` if absent."""
+    chunk = html_text[span[0] : span[1]]
+    if not _NOTE_ASIDE_RE.search(chunk):
+        return None
+    note = note_html()
+    new_chunk = _NOTE_ASIDE_RE.sub(lambda _m: note, chunk)
+    return html_text[: span[0]] + new_chunk + html_text[span[1] :]
+
+
+def _ensure_side_note(html_text: str, view_id: str, grid_id: str) -> str:
+    """Insert or replace the right-rail note. Mom panes are not passed in."""
+    span = _find_tag_span(html_text, view_id)
+    if not span:
+        return html_text
+    refreshed = _refresh_side_note(html_text, span)
+    if refreshed is not None:
+        return refreshed
+    grid = _find_tag_span(html_text, grid_id)
+    note = note_html()
+    if grid and span[0] <= grid[0] < span[1]:
+        wrapped = f'<div class="{SPLIT_CLASS}">\n{html_text[grid[0] : grid[1]]}\n{note}\n</div>'
+        return html_text[: grid[0]] + wrapped + html_text[grid[1] :]
+    close = html_text.rfind("</div>", span[0], span[1])
+    if close < 0:
+        return html_text
+    return html_text[:close] + "\n" + note + "\n" + html_text[close:]
 
 
 def _ensure_css(html_text: str) -> str:
@@ -2006,5 +2185,7 @@ def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> 
             text = _ensure_db(text, {"breakout": [], "breakdown": []}, live_map=live_map)
         elif live_map:
             text = _enrich_existing_db(text, live_map)
+    text = _ensure_side_note(text, VIEW_BREAKOUT_ID, GRID_BREAKOUT_ID)
+    text = _ensure_side_note(text, VIEW_BREAKDOWN_ID, GRID_BREAKDOWN_ID)
     text = _ensure_js(text)
     return text
