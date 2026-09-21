@@ -1812,6 +1812,60 @@ console.log(JSON.stringify({ empty: empty, cards: cards }));
         self.assertEqual(report["cards"], [])
         self.assertEqual(report["empty"], "No early inflections (0 of 2 passed)")
 
+    def test_jsdom_div_card_paints_breakout_clone(self) -> None:
+        """Live Factor Desk cards are <div class="card">, not <article class="card">."""
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        self.assertIn("div.card", bo.strip_js())
+        mom = """
+<div id="view-mom-up"><div class="grid dense" id="mom-up-grid">
+  <div class="card" data-t="MXL">
+    <header><h2>MXL</h2><span class="sc">9</span></header>
+    <span data-mom-score-d10="5">+5</span>
+    <span class="badge" data-key="mom-streak">↑3d&gt;5</span>
+    <div class="stats">
+      <span><b>1.2%</b> Day</span>
+      <span><b>8.4%</b> R20</span>
+      <span><b>2.3</b> ATR%</span>
+      <span><b>0.17</b> RS63</span>
+    </div>
+  </div>
+</div></div>
+<div id="view-mom-down"></div>
+"""
+        html = (
+            "<!DOCTYPE html><body>"
+            + mom
+            + "<div id=\"view-breakout\"><div id=\"breakout-grid\"></div></div>"
+            "<div id=\"view-breakdown\"><div id=\"breakdown-grid\"></div></div>"
+            "<script id=\"fd-breakout-js\">\n"
+            + bo.strip_js()
+            + "\n</script></body>"
+        )
+        report = _run_jsdom(
+            html,
+            r"""
+window.__FD_BB_SHOW__("breakout");
+const clones = Array.from(document.querySelectorAll("#breakout-grid .card")).filter(function (el) {
+  return el.getAttribute("data-fd-bb-clone") === "1";
+});
+const empty = (document.querySelector("#breakout-grid .fd-bb-empty") || {}).textContent || "";
+console.log(JSON.stringify({
+  tags: clones.map(function (el) { return el.tagName; }),
+  names: clones.map(function (el) { return el.getAttribute("data-t"); }),
+  empty: empty,
+  n: (window.__FD_BB_DISPERSION_OF__ && window.__FD_BB_DISPERSION_OF__({}, document.querySelector("#mom-up-grid .card")))
+}));
+""",
+        )
+        self.assertEqual(report["tags"], ["DIV"])
+        self.assertEqual(report["names"], ["MXL"])
+        self.assertEqual(report["empty"], "")
+        self.assertAlmostEqual(report["n"], 0.17)
+        stamped = bo.stamp_dispersion_html(mom, book={})
+        self.assertRegex(stamped, r'<div class="card" data-t="MXL"[^>]*data-dispersion="0\.17"')
+        self.assertIn("<b>0.17</b> RS63", stamped)
+
 
 class PaperNavIgnoreTests(unittest.TestCase):
     def test_native_views_omit_paper_and_kindof_returns_empty(self) -> None:

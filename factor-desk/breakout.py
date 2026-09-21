@@ -105,7 +105,7 @@ PX_SERIES_KEYS: tuple[str, ...] = (
 DB_SCRIPT_ID = "fd-breakout-db"
 DISP_DB_ID = "fd-dispersion-db"
 JS_SCRIPT_ID = "fd-breakout-js"
-JS_VER = "pr32-dispersion-dom"
+JS_VER = "pr32-div-card"
 CSS_STYLE_ID = "fd-breakout-css"
 PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
@@ -1258,8 +1258,10 @@ article.fd-bb-card, .fd-bb-card {{
   font-size: 12px;
   margin: 8px 0;
 }}
-#breakout-grid article.card .stats,
-#breakdown-grid article.card .stats {{
+#breakout-grid .card .stats,
+#breakout-grid .fd-card .stats,
+#breakdown-grid .card .stats,
+#breakdown-grid .fd-card .stats {{
   display: flex !important;
   flex-wrap: wrap;
   gap: 6px 12px;
@@ -1267,8 +1269,10 @@ article.fd-bb-card, .fd-bb-card {{
   color: #d1d5db;
   margin-top: 6px;
 }}
-#breakout-grid article.card .stats span,
-#breakdown-grid article.card .stats span {{
+#breakout-grid .card .stats span,
+#breakout-grid .fd-card .stats span,
+#breakdown-grid .card .stats span,
+#breakdown-grid .fd-card .stats span {{
   white-space: nowrap;
 }}
 .nav-btn[data-view="breakout"].is-on,
@@ -1712,16 +1716,18 @@ def strip_js() -> str:
       if (v && typeof v === "object" && (v.t || v.ticker || v.d || v.mom_score != null || v.score != null)) list.push(v);
     }}
   }}
+  var MOM_CARD_SEL = "article.card, article.fd-card, div.card, .card[data-t], .fd-card";
   function momArticles() {{
     var ids = ["view-mom-up", "view-mom-down", "mom-up-grid", "mom-down-grid"];
     var nodes = [];
     var seen = [];
     function take(root) {{
       if (!root || !root.querySelectorAll) return;
-      var found = root.querySelectorAll("article.card, article.fd-card");
+      var found = root.querySelectorAll(MOM_CARD_SEL);
       for (var i = 0; i < found.length; i++) {{
         var node = found[i];
         if (node.closest && node.closest("#view-breakout, #view-breakdown, #breakout-grid, #breakdown-grid, #fd-bb-breakout, #fd-bb-breakdown")) continue;
+        if (node.parentElement && node.parentElement.closest && node.parentElement.closest(MOM_CARD_SEL)) continue;
         if (seen.indexOf(node) >= 0) continue;
         seen.push(node);
         nodes.push(node);
@@ -2176,7 +2182,7 @@ def strip_js() -> str:
   }}
   function oursOf(b, kind) {{
     if (!b || !b.getAttribute) return false;
-    if (b.closest && b.closest("article.card, #breakout-grid, #breakdown-grid, #view-breakout, #view-breakdown") && !(b.closest("#topnav, nav, .topnav"))) return false;
+    if (b.closest && b.closest(MOM_CARD_SEL + ", #breakout-grid, #breakdown-grid, #view-breakout, #view-breakdown") && !(b.closest("#topnav, nav, .topnav"))) return false;
     var view = (b.getAttribute("data-view") || "");
     return view === kind || (kind === "breakout" && (b.getAttribute("data-fd-breakout") === "1" || b.id === "fd-nav-breakout")) ||
       (kind === "breakdown" && (b.getAttribute("data-fd-breakdown") === "1" || b.id === "fd-nav-breakdown"));
@@ -2683,6 +2689,11 @@ def _enrich_existing_db(html_text: str, live_map: Mapping[str, Any] | None) -> s
 
 _SCRIPT_MASK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
 _ARTICLE_BLOCK_RE = re.compile(r"<article\b([^>]*)>(.*?)</article>", re.I | re.S)
+_CARD_OPEN_RE = re.compile(
+    r"<(article|div)\b([^>]*\bclass\s*=\s*[\"'][^\"']*\b(?:card|fd-card)\b[^\"']*[\"'][^>]*)>",
+    re.I,
+)
+_NEST_TAG_RE = re.compile(r"<(/?)(article|div)\b([^>]*)>", re.I)
 _RS_LABEL_RE = re.compile(r"RS[\s_\-]*63", re.I)
 _STAT_NUM_RE = re.compile(r"(-?\d+(?:\.\d+)?|\.\d+)\s*(%)?")
 _OTHER_STAT_RE = re.compile(r"\b(?:DAY|R20|ATR%?)\b", re.I)
@@ -2987,12 +2998,52 @@ def _embed_dispersion_db(html_text: str, db: Mapping[str, Any]) -> str:
     return text + tag
 
 
+def _matching_close(html: str, open_end: int, tag: str) -> tuple[int, int] | None:
+    """``(close_start, close_end)`` for the ``tag`` opened just before ``open_end``."""
+    depth = 1
+    for match in _NEST_TAG_RE.finditer(html, open_end):
+        name = match.group(2).lower()
+        if name != tag:
+            continue
+        closing = bool(match.group(1))
+        self_close = (not closing) and match.group(3).rstrip().endswith("/")
+        if closing:
+            depth -= 1
+            if depth == 0:
+                return match.start(), match.end()
+        elif not self_close:
+            depth += 1
+    return None
+
+
+def _card_spans(html: str) -> list[tuple[int, int, int, int]]:
+    """``(open_start, open_end, close_start, close_end)`` for Mom card nodes."""
+    spans: list[tuple[int, int, int, int]] = []
+    pos = 0
+    while True:
+        match = _CARD_OPEN_RE.search(html, pos)
+        if not match:
+            break
+        attrs = match.group(2)
+        if not _is_mom_card_attrs(attrs):
+            pos = match.end()
+            continue
+        closed = _matching_close(html, match.end(), match.group(1).lower())
+        if closed is None:
+            pos = match.end()
+            continue
+        close_start, close_end = closed
+        spans.append((match.start(), match.end(), close_start, close_end))
+        pos = match.end()
+    return spans
+
+
 def stamp_dispersion_html(
     html_text: str,
     root: Any = None,
     book: Mapping[str, Any] | None = None,
 ) -> str:
-    """Write ``data-dispersion`` onto Mom ``<article class="card">`` nodes.
+    """Write ``data-dispersion`` onto Mom ``article.card`` / ``div.card`` nodes.
 
     Preference per name: factor residual, then enrich ``residual_20d``, then
     ``data-vs-group``, then RS63 read from that card. Names with none of those
@@ -3003,26 +3054,27 @@ def stamp_dispersion_html(
         book = load_dispersion_book(root)
     masked, blocks = _mask_scripts(html_text or "")
     db: dict[str, dict[str, Any]] = {}
-
-    def repl(match: re.Match[str]) -> str:
-        attrs, inner = match.group(1), match.group(2)
-        if not _is_mom_card_attrs(attrs):
-            return match.group(0)
+    pieces: list[tuple[int, int, str]] = []
+    for open_start, open_end, close_start, close_end in _card_spans(masked):
+        open_tag = masked[open_start:open_end]
+        inner = masked[open_end:close_start]
+        attrs = open_tag.split(">", 1)[0]
+        attrs = re.sub(r"^<\s*(?:article|div)\b", "", attrs, count=1, flags=re.I)
         ticker = _ticker_from_article(attrs, inner)
         if not ticker:
-            return match.group(0)
-        chosen = dispersion_for_card(ticker, match.group(0), book)
+            continue
+        chosen = dispersion_for_card(ticker, open_tag + inner, book)
         if chosen is None:
-            return match.group(0)
+            continue
         value, field = chosen
         short = _short(ticker) or ticker
         db[short] = {"v": float(value), "f": field}
-        open_end = match.start(2) - match.start(0)
-        open_tag = _upsert_attr(match.group(0)[:open_end], "data-dispersion", _fmt_disp(value))
-        open_tag = _upsert_attr(open_tag, "data-dispersion-field", field)
-        return open_tag + inner + "</article>"
-
-    stamped = _ARTICLE_BLOCK_RE.sub(repl, masked)
+        stamped_open = _upsert_attr(open_tag, "data-dispersion", _fmt_disp(value))
+        stamped_open = _upsert_attr(stamped_open, "data-dispersion-field", field)
+        pieces.append((open_start, open_end, stamped_open))
+    stamped = masked
+    for open_start, open_end, stamped_open in reversed(pieces):
+        stamped = stamped[:open_start] + stamped_open + stamped[open_end:]
     if isinstance(book, Mapping):
         for key, rec in book.items():
             if not isinstance(rec, tuple) or len(rec) != 2 or rec[0] is None:
