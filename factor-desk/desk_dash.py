@@ -615,6 +615,913 @@ def _ensure_options_refresh_ui(html_text: str) -> str:
     return html_text
 
 
+# Badge strings from momentum_screen.status_badge. Direction-specific chips only.
+# Range-bound / In transition / Neutral are not direction-specific — leave them out.
+MOM_STATUS_UP = ("Strong momentum", "Momentum building", "Constructive")
+MOM_STATUS_DOWN = ("Weak / fading", "Softening")
+_STATUS_JS_ID = "fd-mom-status-js"
+_STATUS_CSS_ID = "fd-mom-status-css"
+_SCRIPT_TAG_RE = re.compile(r"(<script\b)([^>]*)>(.*?)</script>", re.I | re.S)
+
+
+def _skip_js_string(src: str, i: int) -> int:
+    """Index just past the string/template that starts at ``src[i]``."""
+    q = src[i]
+    i += 1
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if q == "`" and ch == "$" and i + 1 < n and src[i + 1] == "{":
+            end = _match_js_bracket(src, i + 1)
+            i = n if end < 0 else end + 1
+            continue
+        if ch == q:
+            return i + 1
+        i += 1
+    return n
+
+
+def _match_js_bracket(src: str, open_idx: int) -> int:
+    """Index of the bracket matching ``src[open_idx]``, or -1."""
+    pairs = {"(": ")", "{": "}", "[": "]"}
+    open_ch = src[open_idx]
+    close_ch = pairs.get(open_ch)
+    if not close_ch:
+        return -1
+    depth = 0
+    i = open_idx
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        if ch in "\"'`":
+            i = _skip_js_string(src, i)
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _split_js_args(src: str, open_idx: int, close_idx: int) -> list[tuple[int, int]]:
+    """Top-level comma spans inside ``src[open_idx:close_idx+1]`` (brackets included)."""
+    spans: list[tuple[int, int]] = []
+    i = open_idx + 1
+    start = i
+    stack: list[str] = []
+    n = close_idx
+    while i < n:
+        ch = src[i]
+        if ch in "\"'`":
+            i = _skip_js_string(src, i)
+            continue
+        if ch == "/" and i + 1 < len(src) and src[i + 1] == "/":
+            nl = src.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < len(src) and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch in "([{":
+            stack.append(ch)
+        elif ch in ")]}" and stack:
+            stack.pop()
+        elif ch == "," and not stack:
+            spans.append((start, i))
+            start = i + 1
+        i += 1
+    spans.append((start, n))
+    return [(a, b) for a, b in spans if src[a:b].strip()]
+
+
+def _js_string_literals(src: str) -> list[tuple[int, int, str]]:
+    out: list[tuple[int, int, str]] = []
+    i = 0
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        if ch in "\"'":
+            j = _skip_js_string(src, i)
+            content = src[i + 1 : j - 1].replace("\\" + ch, ch).replace("\\\\", "\\")
+            out.append((i, j, content))
+            i = j
+            continue
+        if ch == "`":
+            i = _skip_js_string(src, i)
+            continue
+        i += 1
+    return out
+
+
+def _full_js_string(text: str) -> str | None:
+    s = text.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        q = s[0]
+        return s[1:-1].replace("\\" + q, q).replace("\\\\", "\\")
+    return None
+
+
+def _js_quote(text: str, quote: str = '"') -> str:
+    if quote == "'":
+        return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _status_label_for(tags_label: str) -> str:
+    if tags_label.isupper():
+        return "STATUS"
+    if tags_label[:1].isupper():
+        return "Status"
+    return "status"
+
+
+def _has_status_key(inner: str) -> bool:
+    return re.search(r"(^|[,{])\s*[\"']?status[\"']?\s*:", inner) is not None
+
+
+def _is_filt_state(inner: str) -> bool:
+    has_score = re.search(r"(^|[,{])\s*[\"']?score[\"']?\s*:", inner) is not None
+    has_tags = re.search(r"(^|[,{])\s*[\"']?tags?[\"']?\s*:", inner) is not None
+    return has_score and has_tags
+
+
+def _patch_viewfilt(src: str) -> str:
+    """Give mom-up / mom-down filter state ``status:"all"``. Shared assigns too."""
+    if "viewFilt" not in src:
+        return src
+    braces: list[int] = []
+    patterns = (
+        re.compile(r"""(["'])mom-up\1\s*:\s*\{"""),
+        re.compile(r"""(["'])mom-down\1\s*:\s*\{"""),
+        re.compile(r"""viewFilt\s*\[\s*(["'])mom-up\1\s*\]\s*=\s*\{"""),
+        re.compile(r"""viewFilt\s*\[\s*(["'])mom-down\1\s*\]\s*=\s*\{"""),
+        re.compile(r"""viewFilt\s*\[\s*[A-Za-z_$][\w$]*\s*\]\s*=\s*\{"""),
+    )
+    for pat in patterns:
+        for m in pat.finditer(src):
+            brace = src.find("{", m.start())
+            if brace >= 0:
+                braces.append(brace)
+    for brace in sorted(set(braces), reverse=True):
+        end = _match_js_bracket(src, brace)
+        if end < 0 or end - brace > 2500:
+            continue
+        inner = src[brace + 1 : end]
+        if not _is_filt_state(inner) or _has_status_key(inner):
+            continue
+        src = src[: brace + 1] + 'status:"all",' + src[brace + 1 :]
+    return src
+
+
+def _function_bodies(src: str, name: str) -> list[tuple[int, int, str]]:
+    patterns = (
+        re.compile(rf"\bfunction\s+{name}\s*\(([^)]*)\)\s*\{{"),
+        re.compile(rf"\b{name}\s*=\s*function\s*\(([^)]*)\)\s*\{{"),
+        re.compile(rf"\b(?:var|let|const)\s+{name}\s*=\s*function\s*\(([^)]*)\)\s*\{{"),
+        re.compile(rf"\b{name}\s*=\s*\(([^)]*)\)\s*=>\s*\{{"),
+        re.compile(rf"\b(?:var|let|const)\s+{name}\s*=\s*\(([^)]*)\)\s*=>\s*\{{"),
+    )
+    found: dict[int, tuple[int, int, str]] = {}
+    for pat in patterns:
+        for m in pat.finditer(src):
+            brace = m.end() - 1
+            if brace < 0 or brace >= len(src) or src[brace] != "{":
+                brace = src.find("{", m.start())
+            if brace < 0:
+                continue
+            close = _match_js_bracket(src, brace)
+            if close < 0:
+                continue
+            found[brace] = (brace, close, m.group(1))
+    return [found[k] for k in sorted(found)]
+
+
+def _patch_named_function(src: str, name: str, patcher: Any) -> str:
+    bodies = _function_bodies(src, name)
+    for brace, close, params in reversed(bodies):
+        body = src[brace + 1 : close]
+        new_body = patcher(body, params, src)
+        if new_body != body:
+            src = src[: brace + 1] + new_body + src[close:]
+    return src
+
+
+def _vf_name(body: str) -> str | None:
+    """Local that holds the view's filter state (``vf.status``)."""
+    m = re.search(
+        r"\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*[^;]*\bviewFilt\b",
+        body,
+    )
+    if m:
+        return m.group(1)
+    m = re.search(
+        r"\b([A-Za-z_$][\w$]*)\s*=\s*[^;\n]*\bviewFilt\b",
+        body,
+    )
+    if m and m.group(1) not in {"if", "return", "function", "typeof"}:
+        return m.group(1)
+    fields_by_name: dict[str, set[str]] = {}
+    for name, field in re.findall(
+        r"\b([A-Za-z_$][\w$]*)\.(score|tags|flows|sort)\b",
+        body,
+    ):
+        fields_by_name.setdefault(name, set()).add(field)
+    callback_names = set(
+        re.findall(
+            r"\.filter\s*\(\s*(?:function\s*\(\s*)?\(?\s*([A-Za-z_$][\w$]*)",
+            body,
+        )
+    )
+    ranked = sorted(
+        (
+            (name, fields)
+            for name, fields in fields_by_name.items()
+            if name not in callback_names and len(fields) >= 2
+        ),
+        key=lambda item: len(item[1]),
+        reverse=True,
+    )
+    if ranked:
+        return ranked[0][0]
+    return None
+
+
+def _filter_callbacks(body: str) -> list[tuple[int, str, int, int]]:
+    """(insert_at, card_param, brace, close) for ``.filter`` callbacks with a block body."""
+    patterns = (
+        re.compile(r"\.filter\s*\(\s*function\s*\(\s*([A-Za-z_$][\w$]*)\b[^)]*\)\s*\{"),
+        re.compile(r"\.filter\s*\(\s*\(\s*([A-Za-z_$][\w$]*)\b[^)]*\)\s*=>\s*\{"),
+        re.compile(r"\.filter\s*\(\s*([A-Za-z_$][\w$]*)\s*=>\s*\{"),
+    )
+    found: dict[int, tuple[int, str, int, int]] = {}
+    for pat in patterns:
+        for m in pat.finditer(body):
+            brace = m.end() - 1
+            if brace < 0 or body[brace] != "{":
+                continue
+            close = _match_js_bracket(body, brace)
+            if close < 0:
+                continue
+            found[brace] = (m.end(), m.group(1), brace, close)
+    return [found[k] for k in sorted(found)]
+
+
+def _patch_apply_body(body: str, _params: str, _script: str) -> str:
+    if "fd-status-pred" in body:
+        return body
+    vf = _vf_name(body)
+    if not vf:
+        return body
+    callbacks = _filter_callbacks(body)
+    if not callbacks:
+        return body
+
+    def rank(item: tuple[int, str, int, int]) -> int:
+        _ins, _card, brace, close = item
+        chunk = body[brace:close]
+        score = 0
+        for key in (vf, "score", "tags", "flows", "pills", "outlier", "sort"):
+            if key and key in chunk:
+                score += 1
+        return score
+
+    chosen = max(callbacks, key=rank)
+    if rank(chosen) <= 0 and len(callbacks) != 1:
+        return body
+    insert_at, card, _brace, _close = chosen
+    pred = (
+        " /* fd-status-pred */ if ("
+        + vf
+        + " && "
+        + vf
+        + '.status && '
+        + vf
+        + '.status !== "all" && '
+        + card
+        + ".status !== "
+        + vf
+        + ".status) return false;"
+    )
+    return body[:insert_at] + pred + body[insert_at:]
+
+
+def _lookup_js_array(script: str, name: str) -> str | None:
+    m = re.search(rf"\b(?:var|let|const)\s+{re.escape(name)}\s*=\s*\[", script)
+    if not m:
+        m = re.search(rf"\b{re.escape(name)}\s*=\s*\[", script)
+    if not m:
+        return None
+    idx = script.find("[", m.start())
+    end = _match_js_bracket(script, idx)
+    if end < 0:
+        return None
+    return script[idx : end + 1]
+
+
+def _arg_role(raw: str, script: str) -> str:
+    s = raw.strip()
+    lit = _full_js_string(s)
+    if lit in ("TAGS", "Tags"):
+        return "label"
+    if lit == "tags":
+        return "key"
+    if re.search(r"\.tags\b", s) or re.search(r"\[\s*['\"]tags['\"]\s*\]", s):
+        return "state"
+    if "OUTLIER" in s and ("NEW" in s or "All" in s or "all" in s):
+        return "chips"
+    if re.fullmatch(r"[A-Za-z_$][\w$]*", s):
+        arr = _lookup_js_array(script, s)
+        if arr and "OUTLIER" in arr:
+            return "chips"
+    return ""
+
+
+def _replace_js_lit(src: str, start: int, end: int, content: str) -> str:
+    quote = src[start] if src[start] in "\"'" else '"'
+    return src[:start] + _js_quote(content, quote) + src[end:]
+
+
+def _normalize_all_chip(el: str) -> str:
+    lits = _js_string_literals(el)
+    if any(content == "all" for _a, _b, content in lits):
+        return el.strip()
+    for start, end, content in lits:
+        if content.lower() == "all":
+            return _replace_js_lit(el, start, end, "all").strip()
+    return el.strip()
+
+
+def _fill_badge_chip(el: str, value: str, label: str) -> str | None:
+    lits = _js_string_literals(el)
+    if not lits:
+        return None
+    if len(lits) >= 2:
+        el = _replace_js_lit(el, lits[1][0], lits[1][1], label)
+        lits = _js_string_literals(el)
+        el = _replace_js_lit(el, lits[0][0], lits[0][1], value)
+        return el.strip()
+    return _replace_js_lit(el, lits[0][0], lits[0][1], value).strip()
+
+
+def _array_from_template(arr: str, badges: tuple[str, ...] | list[str]) -> str | None:
+    if not arr.startswith("["):
+        return None
+    close = _match_js_bracket(arr, 0)
+    if close < 0:
+        return None
+    elements = [arr[a:b].strip() for a, b in _split_js_args(arr, 0, close)]
+    all_el = None
+    badge_el = None
+    for el in elements:
+        contents = [content for _a, _b, content in _js_string_literals(el)]
+        if any(content.lower() == "all" for content in contents):
+            all_el = el
+        if any(content.upper() == "OUTLIER" for content in contents):
+            badge_el = el
+    if all_el is None or badge_el is None:
+        return None
+    parts = [_normalize_all_chip(all_el)]
+    for badge in badges:
+        filled = _fill_badge_chip(badge_el, badge, badge)
+        if not filled:
+            return None
+        parts.append(filled)
+    return "[" + ",".join(parts) + "]"
+
+
+def _chips_expr(raw: str, script: str, view: str) -> str | None:
+    s = raw.strip()
+    if re.fullmatch(r"[A-Za-z_$][\w$]*", s):
+        found = _lookup_js_array(script, s)
+        if not found:
+            return None
+        s = found
+    brace = s.find("[")
+    if brace < 0:
+        return None
+    s = s[brace:]
+    up = _array_from_template(s, MOM_STATUS_UP)
+    down = _array_from_template(s, MOM_STATUS_DOWN)
+    if not up or not down:
+        return None
+    return f'({view}==="mom-down"?{down}:{up})'
+
+
+def _find_label_call(src: str, labels: tuple[str, ...]) -> tuple[int, int, str, list[tuple[int, int]]] | None:
+    """First call whose string arg equals ``labels``. End index is past ``)``."""
+    want = set(labels)
+    i = 0
+    n = len(src)
+    while i < n:
+        m = re.search(r"\b([A-Za-z_$][\w$]*)\s*\(", src[i:])
+        if not m:
+            return None
+        name_start = i + m.start(1)
+        paren = i + m.end() - 1
+        close = _match_js_bracket(src, paren)
+        if close < 0:
+            i = paren + 1
+            continue
+        args = _split_js_args(src, paren, close)
+        if any(_full_js_string(src[a:b]) in want for a, b in args):
+            return (name_start, close + 1, m.group(1), args)
+        i = paren + 1
+    return None
+
+
+def _status_call(src: str, call: tuple[int, int, str, list[tuple[int, int]]], view: str, script: str) -> str | None:
+    _start, _end, name, args = call
+    new_args: list[str] = []
+    replaced = False
+    for a, b in args:
+        raw = src[a:b]
+        role = _arg_role(raw, script)
+        if role == "label":
+            lit = _full_js_string(raw.strip()) or "TAGS"
+            quote = raw.strip()[0]
+            new_args.append(_js_quote(_status_label_for(lit), quote))
+        elif role == "key":
+            quote = raw.strip()[0]
+            new_args.append(_js_quote("status", quote))
+        elif role == "state":
+            updated = re.sub(r"\.tags\b", ".status", raw)
+            updated = re.sub(
+                r"\[\s*(['\"])tags\1\s*\]",
+                lambda m: "[" + m.group(1) + "status" + m.group(1) + "]",
+                updated,
+            )
+            new_args.append(updated)
+        elif role == "chips":
+            expr = _chips_expr(raw, script, view)
+            if not expr:
+                return None
+            lead = re.match(r"\s*", raw).group(0)  # type: ignore[union-attr]
+            trail = re.search(r"\s*$", raw).group(0)  # type: ignore[union-attr]
+            new_args.append(lead + expr + trail)
+            replaced = True
+        else:
+            new_args.append(raw)
+    if not replaced:
+        return None
+    return name + "(" + ",".join(new_args) + ")"
+
+
+def _split_js_statements(src: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    n = len(src)
+    i = 0
+    start = 0
+    stack: list[str] = []
+    while i < n:
+        ch = src[i]
+        if ch in "\"'`":
+            i = _skip_js_string(src, i)
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch in "([{":
+            stack.append(ch)
+        elif ch in ")]}" and stack:
+            stack.pop()
+        elif ch == ";" and not stack:
+            spans.append((start, i + 1))
+            start = i + 1
+        i += 1
+    if start < n and src[start:].strip():
+        spans.append((start, n))
+    return spans
+
+
+def _span_containing(spans: list[tuple[int, int]], idx: int) -> tuple[int, int] | None:
+    for span in spans:
+        if span[0] <= idx < span[1]:
+            return span
+    return None
+
+
+def _view_param(params: str, body: str) -> str:
+    m = re.search(r"\b([A-Za-z_$][\w$]*)\s*===?\s*['\"]mom-up['\"]", body)
+    if m:
+        return m.group(1)
+    first = params.split(",")[0].split("=")[0].strip()
+    if re.fullmatch(r"[A-Za-z_$][\w$]*", first):
+        return first
+    return "viewKey"
+
+
+def _patch_build_body(body: str, params: str, script: str) -> str:
+    if "Strong momentum" in body and "Weak / fading" in body:
+        return body
+    tags = _find_label_call(body, ("TAGS", "Tags"))
+    sort = _find_label_call(body, ("SORT", "Sort"))
+    if not tags or not sort or not (tags[1] <= sort[0]):
+        return body
+    view = _view_param(params, body)
+    new_call = _status_call(body, tags, view, script)
+    if not new_call:
+        return body
+    cond = f'({view}==="mom-up"||{view}==="mom-down")'
+    spans = _split_js_statements(body)
+    tags_stmt = _span_containing(spans, tags[0])
+    sort_stmt = _span_containing(spans, sort[0])
+    if tags_stmt and sort_stmt and tags_stmt == sort_stmt:
+        gap = body[tags[1] : sort[0]]
+        expr = "(" + cond + "?" + new_call + ':"")'
+        if re.match(r"\s*,", gap):
+            return body[: tags[1]] + ", " + expr + body[tags[1] :]
+        if re.match(r"\s*\+", gap):
+            return body[: tags[1]] + " + " + expr + body[tags[1] :]
+        return body
+    if not tags_stmt:
+        return body
+    start, end = tags_stmt
+    rel = tags[0] - start
+    cloned = body[start:end][:rel] + new_call + body[start:end][rel + (tags[1] - tags[0]) :]
+    cloned = cloned.strip()
+    if not cloned.endswith(";"):
+        cloned += ";"
+    inject = " if (" + cond + ") { " + cloned + " }"
+    return body[:end] + inject + body[end:]
+
+
+def _patch_mom_filt_script(src: str) -> str:
+    src = _patch_viewfilt(src)
+    src = _patch_named_function(src, "applyMomFilters", _patch_apply_body)
+    src = _patch_named_function(src, "buildFiltBar", _patch_build_body)
+    return src
+
+
+def _patch_status_scripts(html_text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        attrs = match.group(2)
+        body = match.group(3)
+        if re.search(r"\bid\s*=\s*['\"]fd-mom-status-js['\"]", attrs, re.I):
+            return match.group(0)
+        if re.search(r"\btype\s*=\s*['\"]application/(?:ld\+)?json['\"]", attrs, re.I):
+            return match.group(0)
+        if "viewFilt" not in body and "applyMomFilters" not in body and "buildFiltBar" not in body:
+            return match.group(0)
+        try:
+            patched = _patch_mom_filt_script(body)
+        except Exception:
+            LOG.warning("mom status filter patch skipped", exc_info=True)
+            return match.group(0)
+        return match.group(1) + attrs + ">" + patched + "</script>"
+
+    return _SCRIPT_TAG_RE.sub(repl, html_text)
+
+
+def _fallback_js() -> str:
+    up = json.dumps(list(MOM_STATUS_UP), ensure_ascii=False)
+    down = json.dumps(list(MOM_STATUS_DOWN), ensure_ascii=False)
+    return r"""
+(function () {
+  if (window.__FD_MOM_STATUS_BOUND__) return;
+  window.__FD_MOM_STATUS_BOUND__ = 1;
+  var UP = __UP__;
+  var DOWN = __DOWN__;
+  var sel = {};
+  sel["mom-up"] = "all";
+  sel["mom-down"] = "all";
+
+  function otherScripts() {
+    var t = "";
+    var nodes = document.getElementsByTagName("script");
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].id === "fd-mom-status-js") continue;
+      t += nodes[i].textContent || "";
+    }
+    return t;
+  }
+  function sourcePatched() {
+    var t = otherScripts();
+    if (t.indexOf("buildFiltBar") < 0) return false;
+    if (t.indexOf("Strong momentum") < 0 || t.indexOf("Momentum building") < 0) return false;
+    if (t.indexOf("Constructive") < 0 || t.indexOf("Weak / fading") < 0) return false;
+    if (t.indexOf("Softening") < 0 || t.indexOf("fd-status-pred") < 0) return false;
+    return true;
+  }
+  function shown(el) {
+    if (!el) return false;
+    if (el.classList && (el.classList.contains("hide") || el.classList.contains("hidden"))) return false;
+    if (el.hasAttribute && el.hasAttribute("hidden")) return false;
+    try {
+      var st = window.getComputedStyle(el);
+      if (st && (st.display === "none" || st.visibility === "hidden")) return false;
+    } catch (e0) {}
+    return true;
+  }
+  function viewOf() {
+    var up = document.getElementById("view-mom-up");
+    var down = document.getElementById("view-mom-down");
+    var u = shown(up), d = shown(down);
+    if (u && !d) return "mom-up";
+    if (d && !u) return "mom-down";
+    var marked = document.querySelectorAll("[data-view]");
+    for (var i = 0; i < marked.length; i++) {
+      var v = marked[i].getAttribute("data-view") || "";
+      if ((v === "mom-up" || v === "mom-down") && shown(marked[i]) && marked[i].tagName !== "BUTTON") return v;
+    }
+    var heads = document.querySelectorAll("h1, h2, h3, .title, .view-title");
+    for (var h = 0; h < heads.length; h++) {
+      if (!shown(heads[h])) continue;
+      var tx = (heads[h].textContent || "").replace(/\s+/g, " ").trim().toUpperCase();
+      if (tx === "MOMENTUM UP") return "mom-up";
+      if (tx === "MOMENTUM DOWN") return "mom-down";
+    }
+    return "";
+  }
+  function smallest(root, pred) {
+    var nodes = root.querySelectorAll("div, section, nav, header, ul, ol");
+    var best = null;
+    var bestLen = 1e15;
+    for (var i = 0; i < nodes.length; i++) {
+      if (!pred(nodes[i])) continue;
+      var len = (nodes[i].textContent || "").length;
+      if (len < bestLen) { best = nodes[i]; bestLen = len; }
+    }
+    return best;
+  }
+  function isBar(el) {
+    if (el.closest && el.closest("article, .card")) return false;
+    if (el.getAttribute && el.getAttribute("data-fd-status-row")) return false;
+    var t = el.textContent || "";
+    if (t.indexOf("OUTLIER") < 0 || t.indexOf("NEW") < 0) return false;
+    if (t.indexOf("5+") < 0 && t.indexOf("6+") < 0 && t.indexOf("7+") < 0) return false;
+    if (t.indexOf("SCORE") < 0 && t.indexOf("Score") < 0 && t.indexOf("FLOWS") < 0 && t.indexOf("TAGS") < 0 && t.indexOf("Tags") < 0) return false;
+    return true;
+  }
+  function isTags(el) {
+    if (el.getAttribute && el.getAttribute("data-fd-status-row")) return false;
+    var t = el.textContent || "";
+    if (t.indexOf("OUTLIER") < 0 || t.indexOf("NEW") < 0) return false;
+    if (t.indexOf("5+") >= 0 || t.indexOf("6+") >= 0) return false;
+    if (t.indexOf("Big flow") >= 0 || t.indexOf("OPT SPIKE") >= 0) return false;
+    return true;
+  }
+  function barHasForeignStatus(bar) {
+    if (bar.querySelector("[data-fd-status-row]")) return false;
+    var nodes = bar.querySelectorAll("span, label, b, h3, h4, p");
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].children.length) continue;
+      var tx = (nodes[i].textContent || "").replace(/\s+/g, " ").trim();
+      if (tx === "STATUS" || tx === "Status") return true;
+    }
+    return false;
+  }
+  function isSort(el) {
+    if (el.getAttribute && el.getAttribute("data-fd-status-row")) return false;
+    var t = el.textContent || "";
+    if (t.indexOf("NEW") >= 0 || t.indexOf("OUTLIER") >= 0) return false;
+    var hasName = t.indexOf("Name") >= 0;
+    var hasRS = t.indexOf("RS") >= 0 || t.indexOf("Opt") >= 0;
+    return hasName && hasRS;
+  }
+  function chipEls(group) {
+    var nodes = group.querySelectorAll("button, a, [class*='chip'], [class*='Chip']");
+    var out = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var tx = (nodes[i].textContent || "").replace(/\s+/g, " ").trim();
+      if (!tx || tx.length > 40) continue;
+      if (nodes[i].querySelector("button, a")) continue;
+      out.push(nodes[i]);
+    }
+    return out;
+  }
+  function relabel(group) {
+    var nodes = group.querySelectorAll("*");
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].children.length) continue;
+      var tx = (nodes[i].textContent || "").replace(/\s+/g, " ").trim();
+      if (tx === "TAGS") { nodes[i].textContent = "STATUS"; return; }
+      if (tx === "Tags") { nodes[i].textContent = "Status"; return; }
+    }
+  }
+  function cardStatus(el) {
+    var s = el.querySelector(".status, .badge-status, [data-status]");
+    if (s) {
+      var attr = s.getAttribute && s.getAttribute("data-status");
+      if (attr) return String(attr).replace(/\s+/g, " ").trim();
+      return (s.textContent || "").replace(/\s+/g, " ").trim();
+    }
+    var own = el.getAttribute && el.getAttribute("data-status");
+    return own ? String(own).replace(/\s+/g, " ").trim() : "";
+  }
+  function cardsIn(view) {
+    var root = document.getElementById(view === "mom-down" ? "view-mom-down" : "view-mom-up") || document.body;
+    var nodes = root.querySelectorAll("article, .card");
+    var out = [];
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].closest && nodes[i].closest("[data-fd-status-row]")) continue;
+      if (nodes[i].querySelector("article, .card")) continue;
+      out.push(nodes[i]);
+    }
+    return out;
+  }
+  function clearHide() {
+    var nodes = document.querySelectorAll(".fd-status-hid");
+    for (var i = 0; i < nodes.length; i++) nodes[i].classList.remove("fd-status-hid");
+  }
+  function applyHide(view) {
+    if (view !== "mom-up" && view !== "mom-down") { clearHide(); return; }
+    var want = sel[view] || "all";
+    var cards = cardsIn(view);
+    for (var i = 0; i < cards.length; i++) {
+      var st = cardStatus(cards[i]);
+      var hide = !!(want && want !== "all" && st !== want);
+      cards[i].classList.toggle("fd-status-hid", hide);
+    }
+  }
+  function remember(view, val) {
+    sel[view] = val;
+    try {
+      if (window.viewFilt && window.viewFilt[view] && typeof window.viewFilt[view] === "object") {
+        window.viewFilt[view].status = val;
+      }
+    } catch (e1) {}
+  }
+  function paint(view) {
+    var root = document.getElementById(view === "mom-down" ? "view-mom-down" : "view-mom-up") || document.body;
+    var bar = smallest(root, isBar);
+    if (!bar) return;
+    if (barHasForeignStatus(bar)) return;
+    var existing = bar.querySelector("[data-fd-status-row]");
+    if (existing && existing.getAttribute("data-fd-status-row") === view) {
+      markRow(existing, view);
+      return;
+    }
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    var tags = smallest(bar, isTags);
+    var sort = smallest(bar, isSort);
+    if (!tags) return;
+    var g = tags.cloneNode(true);
+    g.setAttribute("data-fd-status-row", view);
+    relabel(g);
+    var chips = chipEls(g);
+    if (!chips.length) return;
+    var parent = chips[0].parentNode;
+    var onCls = chips[0].className || "";
+    var offCls = onCls;
+    var sample = chips[0];
+    for (var i = 0; i < chips.length; i++) {
+      var tx = (chips[i].textContent || "").replace(/\s+/g, " ").trim();
+      if (tx === "All" || tx === "ALL") onCls = chips[i].className || onCls;
+      else offCls = chips[i].className || offCls;
+    }
+    for (var j = chips.length - 1; j >= 0; j--) {
+      if (chips[j].parentNode) chips[j].parentNode.removeChild(chips[j]);
+    }
+    var list = view === "mom-down" ? DOWN : UP;
+    var items = [{v: "all", l: "All"}];
+    for (var k = 0; k < list.length; k++) items.push({v: list[k], l: list[k]});
+    var cur = sel[view] || "all";
+    for (var n = 0; n < items.length; n++) {
+      (function (val, lab) {
+        var b = sample.cloneNode(false);
+        b.className = (val === cur) ? onCls : offCls;
+        b.textContent = lab;
+        b.setAttribute("data-fd-status-val", val);
+        if (b.tagName === "BUTTON" && !b.getAttribute("type")) b.type = "button";
+        b.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          remember(view, val);
+          applyHide(view);
+          var row = bar.querySelector("[data-fd-status-row]");
+          if (row) markRow(row, view);
+        });
+        parent.appendChild(b);
+      })(items[n].v, items[n].l);
+    }
+    if (sort && sort.parentNode) sort.parentNode.insertBefore(g, sort);
+    else if (tags.parentNode) tags.parentNode.insertBefore(g, tags.nextSibling);
+    else bar.appendChild(g);
+  }
+  function markRow(row, view) {
+    var cur = sel[view] || "all";
+    var chips = chipEls(row);
+    var onCls = "", offCls = "";
+    for (var i = 0; i < chips.length; i++) {
+      var cls = chips[i].className || "";
+      if (!offCls) offCls = cls;
+      if ((chips[i].textContent || "").replace(/\s+/g, " ").trim() === "All") onCls = cls;
+    }
+    if (!onCls) onCls = offCls;
+    for (var j = 0; j < chips.length; j++) {
+      var val = chips[j].getAttribute("data-fd-status-val") || "";
+      if (onCls && offCls && onCls !== offCls) chips[j].className = (val === cur) ? onCls : offCls;
+    }
+  }
+  function tick() {
+    var view = viewOf();
+    if (view !== "mom-up" && view !== "mom-down") { clearHide(); return; }
+    paint(view);
+    applyHide(view);
+  }
+  var scheduled = false;
+  function schedule() {
+    if (scheduled) return;
+    scheduled = true;
+    window.setTimeout(function () { scheduled = false; tick(); }, 0);
+  }
+  var booted = false;
+  function boot() {
+    if (booted) return;
+    booted = true;
+    if (sourcePatched()) return;
+    tick();
+    if (window.MutationObserver && document.documentElement) {
+      var obs = new MutationObserver(function () { schedule(); });
+      obs.observe(document.documentElement, {childList: true, subtree: true});
+    }
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+""".replace("__UP__", up).replace("__DOWN__", down).strip()
+
+
+def _html_has_mom_filt(html_text: str) -> bool:
+    for match in _SCRIPT_TAG_RE.finditer(html_text):
+        attrs = match.group(2)
+        if re.search(r"\bid\s*=\s*['\"]fd-mom-status-js['\"]", attrs, re.I):
+            continue
+        body = match.group(3)
+        if "buildFiltBar" in body or "applyMomFilters" in body or "viewFilt" in body:
+            return True
+    return False
+
+
+def _inject_status_fallback(html_text: str) -> str:
+    css = (
+        f'<style id="{_STATUS_CSS_ID}">\n'
+        ".fd-status-hid { display: none !important; }\n"
+        "</style>\n"
+    )
+    js = f'<script id="{_STATUS_JS_ID}">\n{_fallback_js()}\n</script>\n'
+    html_text, _n_css = re.subn(
+        rf'<style\b[^>]*\bid=["\']{_STATUS_CSS_ID}["\'][^>]*>.*?</style>\s*',
+        lambda _m: css,
+        html_text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    if f'id="{_STATUS_CSS_ID}"' not in html_text and f"id='{_STATUS_CSS_ID}'" not in html_text:
+        if "</head>" in html_text:
+            html_text = html_text.replace("</head>", css + "</head>", 1)
+        else:
+            html_text = css + html_text
+    html_text, _n_js = re.subn(
+        rf'<script\b[^>]*\bid=["\']{_STATUS_JS_ID}["\'][^>]*>.*?</script>\s*',
+        lambda _m: js,
+        html_text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    if f'id="{_STATUS_JS_ID}"' not in html_text and f"id='{_STATUS_JS_ID}'" not in html_text:
+        if "</body>" in html_text:
+            html_text = html_text.replace("</body>", js + "</body>", 1)
+        else:
+            html_text += js
+    return html_text
+
+
+def ensure_mom_status_filter(html_text: str) -> str:
+    """Patch embedded ``viewFilt`` / ``applyMomFilters`` / ``buildFiltBar``.
+
+    Mom Up gains All + Strong momentum + Momentum building + Constructive.
+    Mom Down gains All + Weak / fading + Softening. Single-select, after Tags
+    and before Sort. Outliers keeps no Status row. Does not restyle the bar.
+    """
+    if not html_text:
+        return html_text
+    html_text = _patch_status_scripts(html_text)
+    if not _html_has_mom_filt(html_text):
+        return html_text
+    return _inject_status_fallback(html_text)
+
+
 def _pack_views(
     cards: list[MutableMapping[str, Any]],
     *,
@@ -782,7 +1689,7 @@ def render_html(
     html_text = desk_hitch.ensure_embedded(html_text, hitch_map)
     html_text = paper_trade.ensure_embedded(html_text, paper_marks)
     html_text = s_score.ensure_embedded(html_text, ss_ranked)
-    return _ensure_options_refresh_ui(html_text)
+    return ensure_mom_status_filter(_ensure_options_refresh_ui(html_text))
 
 
 def write_combined(
@@ -852,6 +1759,7 @@ def write_combined(
     text = desk_hitch.ensure_embedded(text, hitch_map)
     text = paper_trade.ensure_embedded(text, paper_marks)
     text = s_score.ensure_embedded(text, ss_ranked)
+    text = ensure_mom_status_filter(text)
     dest.write_text(text, encoding="utf-8")
     try:
         book_delta.write_snapshot(snap, root=base)
