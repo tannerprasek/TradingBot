@@ -63,6 +63,49 @@ class BoomSession(de.RefDataSession):
         raise RuntimeError("dapi down")
 
 
+class TickerMatchTests(unittest.TestCase):
+    def test_yellow_key_case_and_exchange_collapse(self) -> None:
+        self.assertEqual(de.canonical_ticker("AAPL US Equity"), "AAPL US Equity")
+        self.assertEqual(de.canonical_ticker("aapl"), "AAPL US Equity")
+        self.assertEqual(de.canonical_ticker("aapl us"), "AAPL US Equity")
+        self.assertEqual(de.canonical_ticker("AAPL US EQUITY"), "AAPL US Equity")
+        self.assertEqual(de.canonical_ticker("aapl us equity"), "AAPL US Equity")
+        self.assertEqual(de.name_key("SPX Index"), "SPX Index")
+        self.assertEqual(de.name_key("SPX INDEX"), "SPX INDEX")
+
+    def test_yellow_suffix_is_not_a_symbol(self) -> None:
+        self.assertEqual(de.canonical_ticker("APFD"), "APFD US Equity")
+        self.assertEqual(de.canonical_ticker("ACORP"), "ACORP US Equity")
+
+    def test_lookup_finds_canonical_and_bare_symbol(self) -> None:
+        book = {"names": {"AAPL US Equity": {"ticker": "AAPL US Equity", "name": "Apple"}}}
+        self.assertEqual(de.lookup_name(book, "AAPL US EQUITY")["name"], "Apple")
+        self.assertEqual(de.lookup_name(book, "aapl")["ticker"], "AAPL US Equity")
+
+    def test_search_ranks_symbol_prefix_then_name(self) -> None:
+        universe = {
+            "names": {
+                "AAPL US Equity": {"ticker": "AAPL US Equity", "name": "Apple", "t": "AAPL"},
+                "AMGN US Equity": {"ticker": "AMGN US Equity", "name": "Amgen", "t": "AMGN"},
+                "TSEM US Equity": {
+                    "ticker": "TSEM US Equity",
+                    "name": "Tower Semiconductor",
+                    "t": "TSEM",
+                },
+            }
+        }
+        self.assertEqual([h["t"] for h in de.search_symbols("", universe)], [])
+        exact = de.search_symbols("aapl us equity", universe)
+        self.assertEqual([h["t"] for h in exact], ["AAPL"])
+        prefix = [h["t"] for h in de.search_symbols("aa", universe)]
+        self.assertEqual(prefix, ["AAPL"])
+        self.assertIn("AMGN", [h["t"] for h in de.search_symbols("am", universe)])
+        named = de.search_symbols("tower", universe)
+        self.assertEqual([h["t"] for h in named], ["TSEM"])
+        self.assertEqual(de.search_symbols("semi", universe)[0]["t"], "TSEM")
+        self.assertEqual(de.search_symbols("equity", universe), [])
+
+
 class CardUniverseTests(unittest.TestCase):
     def test_extras_and_residual_only_names_become_cards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -114,6 +157,11 @@ class CardUniverseTests(unittest.TestCase):
             self.assertIn("TSEM", shorts)
             self.assertIn("AAPL", shorts)
             self.assertIn('"t":"TSEM"', match.group(1))
+            self.assertIn('id="fd-symbol-q"', text)
+            self.assertIn("window.__FD_SEARCH__", text)
+            hits = desk_dash.search_desk("apple", root=root)["hits"]
+            self.assertEqual(hits[0]["t"], "AAPL")
+            self.assertEqual(desk_dash.search_desk("tsem", root=root)["hits"][0]["ticker"], "TSEM US Equity")
 
 
 class AddPathTests(unittest.TestCase):
@@ -193,6 +241,24 @@ class AddPathTests(unittest.TestCase):
             self.assertEqual(rec.get("px_last"), 42.5)
             self.assertEqual(rec.get("beta"), 1.2)
             self.assertTrue(rec.get("enrich_pills"))
+
+    def test_do_add_canonicalizes_mixed_case_and_false_yellow_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            equity = add_server.do_add("aapl us equity", root=root, session=BoomSession(), rebuild=False)
+            preferred = add_server.do_add("APFD", root=root, session=BoomSession(), rebuild=False)
+            self.assertTrue(equity["ok"], msg=equity)
+            self.assertEqual(equity["ticker"], "AAPL US Equity")
+            self.assertEqual(equity["short"], "AAPL")
+            self.assertTrue(preferred["ok"], msg=preferred)
+            self.assertEqual(preferred["ticker"], "APFD US Equity")
+            book = json.loads((root / "dapi_enrichment.json").read_text(encoding="utf-8"))
+            self.assertIn("AAPL US Equity", book["names"])
+            self.assertNotIn("AAPL us Equity", book["names"])
+            self.assertNotIn("APFD", book["names"])
+            self.assertIn("APFD US Equity", book["names"])
+            found = de.search_symbols("apfd", book)
+            self.assertEqual(found[0]["ticker"], "APFD US Equity")
 
 
 if __name__ == "__main__":

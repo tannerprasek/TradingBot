@@ -404,16 +404,40 @@ def cards_from_enrichment(
 
 SEARCH_BOOK_ID = "fd-search-book"
 SEARCH_BOOK_JS_ID = "fd-search-book-js"
+SYMBOL_BAR_ID = "fd-symbol-bar"
 
+_SYMBOL_BAR = """
+<style id="fd-symbol-css">
+.fd-symbol-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 12px}
+.fd-symbol-bar input[type="search"]{font:14px/1.2 "Segoe UI","DejaVu Sans","Noto Sans",sans-serif;padding:4px 8px;min-width:200px;border-radius:3px;border:1px solid #4b5563;background:#0b0f14;color:#e5e7eb}
+#fd-symbol-add{font:650 11px/1.2 "Segoe UI","DejaVu Sans",sans-serif;letter-spacing:.04em;padding:4px 10px;border-radius:3px;border:1px solid #4b5563;color:#e5e7eb;background:#1f2937;cursor:pointer}
+#fd-search-hits{list-style:none;margin:0;padding:4px 0;flex:1 0 100%}
+#fd-search-hits li{padding:2px 0;cursor:pointer}
+#fd-search-hits li:hover{color:#93c5fd}
+.fd-symbol-status{flex:1 0 100%;margin:0;color:#e5e7eb;font-size:13px}
+</style>
+<form id="fd-symbol-bar" class="fd-symbol-bar" autocomplete="off" action="#" onsubmit="return false">
+  <input id="fd-symbol-q" class="fd-symbol-search" type="search" placeholder="Search symbol" aria-label="Search symbol" />
+  <button type="submit" id="fd-symbol-add">Add</button>
+  <ul id="fd-search-hits" hidden></ul>
+  <p id="fd-symbol-status" class="fd-symbol-status" aria-live="polite"></p>
+</form>
+""".strip()
+
+# Matcher stays aligned with dapi_enrich.search_symbols (exact, prefix, name word).
 _SEARCH_BOOK_JS = r"""
 (function () {
   var el = document.getElementById("fd-search-book");
   if (!el || window.__FD_SEARCH_BOOK_BOUND__) return;
   window.__FD_SEARCH_BOOK_BOUND__ = true;
+  var ORIGINS = ["http://127.0.0.1:8765", "http://localhost:8765"];
   function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
   function read() {
     try { return JSON.parse(el.textContent || "{}") || {}; }
     catch (e) { return {}; }
+  }
+  function symbolOf(rec, k) {
+    return shortOf(rec.t || rec.ticker || rec.symbol || k || "");
   }
   function rowsOf(payload) {
     var names = (payload && payload.names) || {};
@@ -421,15 +445,18 @@ _SEARCH_BOOK_JS = r"""
     var seen = {};
     Object.keys(names).forEach(function (k) {
       var rec = names[k] || {};
-      var t = shortOf(rec.t || rec.short_name || k);
+      var t = symbolOf(rec, k);
       if (!t || seen[t]) return;
       seen[t] = true;
+      var name = rec.name || "";
+      if (!name || shortOf(name) === t && String(name).indexOf(" ") < 0) name = rec.short_name || t;
+      if (shortOf(name) === t && String(name).indexOf(" ") < 0) name = t;
       out.push({
         t: t,
         d: rec.d || t,
         ticker: rec.ticker || k,
-        name: rec.name || rec.short_name || t,
-        short_name: rec.short_name || t,
+        name: name || t,
+        short_name: t,
         px_last: rec.px_last,
         gics_sector_name: rec.gics_sector_name,
         limited_history: !!rec.limited_history
@@ -442,7 +469,7 @@ _SEARCH_BOOK_JS = r"""
     if (Array.isArray(bag)) {
       for (var i = 0; i < bag.length; i++) {
         var c = bag[i] || {};
-        if (shortOf(c.t || c.ticker || c.d || c.name || c.symbol) === t) return true;
+        if (shortOf(c.t || c.ticker || c.d || c.symbol) === t) return true;
       }
       return false;
     }
@@ -487,15 +514,183 @@ _SEARCH_BOOK_JS = r"""
       pushArr(window.MOM_CARDS, row);
     });
     window.__FD_SEARCH_BOOK__ = payload;
+    return rows;
   }
-  merge();
-  document.addEventListener("input", function (ev) {
-    var node = ev.target;
+  function nameHit(q, name) {
+    if (!q || q.length < 2 || !name) return false;
+    var folded = String(name).toLowerCase();
+    if (folded.indexOf(q) === 0) return true;
+    var words = folded.split(/[^0-9a-z]+/);
+    for (var i = 0; i < words.length; i++) {
+      if (words[i] && words[i].indexOf(q) === 0) return true;
+    }
+    return false;
+  }
+  function scoreRow(row, query) {
+    var q = String(query || "").trim();
+    if (!q) return -1;
+    var qu = q.toUpperCase();
+    var qf = q.toLowerCase();
+    var short = shortOf(row.t || row.ticker);
+    var yellow = String(row.ticker || "").toUpperCase();
+    var name = (row.name && shortOf(row.name) !== short) ? row.name : "";
+    if (String(row.name || "").indexOf(" ") >= 0) name = row.name;
+    if (short === qu || yellow === qu) return 0;
+    if ((short && short.indexOf(qu) === 0) || (yellow && yellow.indexOf(qu) === 0)) return 1;
+    if (nameHit(qf, name)) return 2;
+    return -1;
+  }
+  function searchSymbols(query) {
+    var rows = merge();
+    var scored = [];
+    rows.forEach(function (row) {
+      var s = scoreRow(row, query);
+      if (s >= 0) scored.push({ s: s, row: row });
+    });
+    scored.sort(function (a, b) {
+      if (a.s !== b.s) return a.s - b.s;
+      return a.row.t < b.row.t ? -1 : (a.row.t > b.row.t ? 1 : 0);
+    });
+    return scored.map(function (item) { return item.row; });
+  }
+  window.__FD_SEARCH__ = searchSymbols;
+  function hitsEl() { return document.getElementById("fd-search-hits"); }
+  function boxEl() { return document.getElementById("fd-symbol-q"); }
+  function statusEl() { return document.getElementById("fd-symbol-status"); }
+  function setStatus(text) {
+    var node = statusEl();
+    if (node) node.textContent = text || "";
+  }
+  function renderHits(query) {
+    var list = hitsEl();
+    if (!list) return;
+    var hits = searchSymbols(query);
+    list.innerHTML = "";
+    if (!String(query || "").trim() || !hits.length) {
+      list.hidden = true;
+      return;
+    }
+    hits.slice(0, 12).forEach(function (row) {
+      var li = document.createElement("li");
+      li.setAttribute("data-t", row.t);
+      li.setAttribute("data-ticker", row.ticker || row.t);
+      var label = row.t;
+      if (row.name && row.name !== row.t) label += "  " + row.name;
+      li.textContent = label;
+      list.appendChild(li);
+    });
+    list.hidden = false;
+  }
+  function remember(row) {
+    if (!row || !row.t) return;
+    var payload = read();
+    payload.names = payload.names || {};
+    var entry = {
+      t: row.t,
+      d: row.t,
+      ticker: row.ticker || row.t,
+      name: row.name || row.t,
+      short_name: row.t,
+      px_last: row.px_last,
+      limited_history: !!row.limited_history
+    };
+    payload.names[row.t] = entry;
+    if (entry.ticker && entry.ticker !== row.t) payload.names[entry.ticker] = entry;
+    el.textContent = JSON.stringify(payload);
+    merge();
+  }
+  var remoteTimer = null;
+  function scheduleRemote(query) {
+    if (remoteTimer) clearTimeout(remoteTimer);
+    var q = String(query || "");
+    if (!q.trim()) return;
+    remoteTimer = setTimeout(function () {
+      var url = ORIGINS[0] + "/api/search?q=" + encodeURIComponent(q.trim());
+      fetch(url).then(function (r) { return r.json(); }).then(function (body) {
+        var box = boxEl();
+        if (box && box.value !== q) return;
+        var hits = (body && body.hits) || [];
+        hits.forEach(remember);
+        renderHits(q);
+      }).catch(function () {});
+    }, 180);
+  }
+  function onQuery(node) {
     if (!node) return;
     var blob = String(node.id || "") + " " + String(node.className || "") + " " +
       String((node.getAttribute && node.getAttribute("placeholder")) || "");
-    if (/search|ticker|symbol/i.test(blob)) merge();
+    if (!/search|ticker|symbol/i.test(blob)) return;
+    var q = node.value || "";
+    renderHits(q);
+    scheduleRemote(q);
+  }
+  document.addEventListener("input", function (ev) { onQuery(ev.target); }, true);
+  document.addEventListener("click", function (ev) {
+    var li = ev.target && ev.target.closest ? ev.target.closest("#fd-search-hits li") : null;
+    if (!li) return;
+    var box = boxEl();
+    if (box) box.value = li.getAttribute("data-t") || "";
+    setStatus(li.textContent || "");
+    renderHits(box ? box.value : "");
   }, true);
+  var form = document.getElementById("fd-symbol-bar");
+  if (form) {
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var box = boxEl();
+      var q = box ? String(box.value || "").trim() : "";
+      if (!q) {
+        setStatus("Symbol is required.");
+        return;
+      }
+      var btn = document.getElementById("fd-symbol-add");
+      if (btn) btn.disabled = true;
+      setStatus("Adding " + q.toUpperCase() + "…");
+      var payload = JSON.stringify({ ticker: q });
+      var paths = ["/api/add", "/add"];
+      var i = 0;
+      function tryAdd() {
+        if (i >= paths.length) return Promise.reject(new Error("sidecar offline"));
+        return fetch(ORIGINS[0] + paths[i++], {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload
+        }).then(function (r) {
+          if (r.status === 202 || r.ok) return r.json();
+          if (r.status === 404 || r.status === 405) throw new Error("try next");
+          return r.json().then(function (j) {
+            var err = new Error((j && (j.message || j.error)) || String(r.status));
+            err.body = j;
+            throw err;
+          });
+        }).catch(function (err) {
+          if (err && err.body) throw err;
+          return tryAdd();
+        });
+      }
+      function finish(msg, reload) {
+        setStatus(msg || "");
+        if (btn) btn.disabled = false;
+        if (reload) setTimeout(function () { window.location.reload(); }, 1800);
+      }
+      tryAdd().then(function () {
+        var n = 0;
+        function poll() {
+          fetch(ORIGINS[0] + "/status").then(function (r) { return r.json(); }).then(function (st) {
+            if (st && st.busy && n++ < 80) { setTimeout(poll, 400); return; }
+            var last = (st && st.last) || {};
+            if (last.short) remember({ t: last.short, ticker: last.ticker, name: last.short });
+            if (last.ok) finish(last.message || ("Added " + (last.short || q)), true);
+            else finish(last.message || (st && st.error) || "Add did not land in the book.", false);
+          }).catch(function () { finish("sidecar offline", false); });
+        }
+        poll();
+      }).catch(function (err) {
+        finish((err && err.message) || "sidecar offline", false);
+      });
+    });
+  }
+  merge();
 })();
 """.strip()
 
@@ -506,16 +701,20 @@ def search_book_payload(cards: Iterable[Mapping[str, Any]] | None) -> dict[str, 
     for card in cards or []:
         if not isinstance(card, Mapping):
             continue
-        ticker = str(card.get("ticker") or card.get("name") or "").strip()
-        short = dapi_enrich.short_symbol(str(card.get("t") or card.get("short_name") or ticker))
+        raw = str(card.get("ticker") or "").strip()
+        ticker = dapi_enrich.canonical_ticker(raw) if raw else ""
+        short = dapi_enrich.short_symbol(str(card.get("t") or "") or ticker)
         if not short:
             continue
+        if not ticker:
+            ticker = dapi_enrich.canonical_ticker(short)
+        label = dapi_enrich._company_label(card, ticker, short) or short
         entry = {
             "t": short,
             "d": short,
             "ticker": ticker or short,
-            "name": card.get("name") or card.get("short_name") or short,
-            "short_name": card.get("short_name") or short,
+            "name": label,
+            "short_name": short,
             "px_last": card.get("px_last"),
             "gics_sector_name": card.get("gics_sector_name"),
             "limited_history": bool(card.get("limited_history")),
@@ -526,17 +725,16 @@ def search_book_payload(cards: Iterable[Mapping[str, Any]] | None) -> dict[str, 
     return {"names": names}
 
 
-def ensure_search_book(html_text: str, cards: Iterable[Mapping[str, Any]] | None = None) -> str:
-    """Embed ``#fd-search-book`` and merge those names into BOOK / NAMES / MOM search.
+def search_desk(query: str, root: Path | None = None) -> dict[str, Any]:
+    """Search the card universe (enrich names ∪ extras ∪ residual-last)."""
+    base = Path(root) if root is not None else HERE
+    book = load_enrichment(base)
+    cards = cards_from_enrichment(book, root=base)
+    q = " ".join((query or "").split())
+    return {"ok": True, "q": q, "hits": dapi_enrich.search_symbols(q, cards)}
 
-    Live ``write_combined`` patches fat chrome and does not rebuild the
-    desktop card array. Without this payload a residual-only Add never
-    appears in search. Not a ``__PAYLOAD__`` splice.
-    """
-    payload = search_book_payload(cards)
-    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=True, default=str).replace("</", "<\\/")
-    tag = f'<script type="application/json" id="{SEARCH_BOOK_ID}">{blob}</script>'
-    script = f'<script id="{SEARCH_BOOK_JS_ID}">\n{_SEARCH_BOOK_JS}\n</script>'
+
+def _strip_symbol_ui(html_text: str) -> str:
     text = html_text or ""
     text = re.sub(
         rf'<script\b[^>]*\bid=["\']{re.escape(SEARCH_BOOK_ID)}["\'][^>]*>.*?</script>\s*',
@@ -552,6 +750,49 @@ def ensure_search_book(html_text: str, cards: Iterable[Mapping[str, Any]] | None
         count=1,
         flags=re.I | re.S,
     )
+    text = re.sub(
+        r'<style\b[^>]*\bid=["\']fd-symbol-css["\'][^>]*>.*?</style>\s*',
+        "",
+        text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    text = re.sub(
+        rf'<form\b[^>]*\bid=["\']{re.escape(SYMBOL_BAR_ID)}["\'][^>]*>.*?</form>\s*',
+        "",
+        text,
+        count=1,
+        flags=re.I | re.S,
+    )
+    return text
+
+
+def _insert_symbol_bar(html_text: str) -> str:
+    """Put the search/add bar after the first nav, or at the start of body."""
+    bar = _SYMBOL_BAR + "\n"
+    nav = re.search(r"</nav\s*>", html_text, flags=re.I)
+    if nav:
+        at = nav.end()
+        return html_text[:at] + "\n" + bar + html_text[at:]
+    body = re.search(r"<body\b[^>]*>", html_text, flags=re.I)
+    if body:
+        at = body.end()
+        return html_text[:at] + "\n" + bar + html_text[at:]
+    return bar + html_text
+
+
+def ensure_search_book(html_text: str, cards: Iterable[Mapping[str, Any]] | None = None) -> str:
+    """Embed ``#fd-search-book``, the search/add bar, and the match script.
+
+    Live ``write_combined`` patches fat chrome and does not rebuild the
+    desktop card array. Without this payload a residual-only Add never
+    appears in search. Not a ``__PAYLOAD__`` splice.
+    """
+    payload = search_book_payload(cards)
+    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=True, default=str).replace("</", "<\\/")
+    tag = f'<script type="application/json" id="{SEARCH_BOOK_ID}">{blob}</script>'
+    script = f'<script id="{SEARCH_BOOK_JS_ID}">\n{_SEARCH_BOOK_JS}\n</script>'
+    text = _insert_symbol_bar(_strip_symbol_ui(html_text or ""))
     block = tag + "\n" + script + "\n"
     if "</body>" in text:
         return text.replace("</body>", block + "</body>", 1)

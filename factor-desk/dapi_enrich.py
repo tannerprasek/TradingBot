@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -434,30 +435,35 @@ def first_success(
     return None, None, "no_candidate_resolved"
 
 
+_YELLOW_TOKENS = frozenset(
+    {"EQUITY", "INDEX", "COMDTY", "CURNCY", "CORP", "GOVT", "MTGE", "MUNI", "PFD"}
+)
+_EXCH_TOKENS = frozenset({"US", "UW", "UN"})
+
+
 def normalize_ticker(ticker: str, default_yellow: str = "US Equity") -> str:
-    text = (ticker or "").strip()
+    """Canonical yellow key.
+
+    A yellow key counts only when it is its own token. ``APFD`` is a symbol,
+    not a ``PFD`` key. ``aapl us equity`` and ``AAPL US EQUITY`` both become
+    ``AAPL US Equity``. Other yellow spellings (``Index``, ``INDEX``) stay
+    as written aside from uppercasing the symbol and exchange.
+    """
+    text = " ".join((ticker or "").split())
     if not text:
         return text
-    upper = text.upper()
-    yellow = (
-        "EQUITY",
-        "INDEX",
-        "COMDTY",
-        "CURNCY",
-        "CORP",
-        "GOVT",
-        "MTGE",
-        "MUNI",
-        "PFD",
-    )
-    if any(upper.endswith(" " + y) or upper.endswith(y) for y in yellow):
-        # Canonicalize "Equity" spelling only; leave other yellow keys.
-        if upper.endswith(" EQUITY"):
-            return text[: -len("Equity")] + "Equity" if text.endswith("equity") else text
-        return text
-    if upper.endswith(" US") or upper.endswith(" UW") or upper.endswith(" UN"):
-        return text + " Equity"
-    return f"{text} {default_yellow}"
+    parts = text.split(" ")
+    upper = [part.upper() for part in parts]
+    if upper[-1] in _YELLOW_TOKENS:
+        if upper[-1] == "EQUITY":
+            parts[-1] = "Equity"
+        for i in range(len(parts) - 1):
+            parts[i] = upper[i]
+        return " ".join(parts)
+    if upper[-1] in _EXCH_TOKENS:
+        return " ".join(upper) + " Equity"
+    parts[0] = upper[0]
+    return f"{' '.join(parts)} {default_yellow}"
 
 
 def name_key(ticker: str) -> str:
@@ -473,13 +479,106 @@ def short_symbol(ticker: str) -> str:
 
 
 def canonical_ticker(ticker: str) -> str:
-    """Yellow key with an uppercased symbol. ``tsem`` → ``TSEM US Equity``."""
-    text = (ticker or "").strip()
-    if not text:
-        return ""
-    parts = text.split()
-    parts[0] = parts[0].upper()
-    return name_key(" ".join(parts))
+    """Yellow key. ``tsem``, ``TSEM US EQUITY``, and ``tsem us`` → ``TSEM US Equity``."""
+    return name_key(ticker)
+
+
+def _company_label(row: Mapping[str, Any], ticker: str, short: str) -> str:
+    """Company name for search. The yellow key and the bare symbol are not names."""
+    for field in ("name", "short_name"):
+        label = str(row.get(field) or "").strip()
+        if not label:
+            continue
+        if label.casefold() == short.casefold():
+            continue
+        if name_key(label) == ticker:
+            continue
+        return label
+    return ""
+
+
+def _name_matches(query_fold: str, name: str) -> bool:
+    if len(query_fold) < 2 or not name:
+        return False
+    folded = name.casefold()
+    if folded.startswith(query_fold):
+        return True
+    for word in re.split(r"[^0-9a-z]+", folded):
+        if word.startswith(query_fold):
+            return True
+    return False
+
+
+def _search_rows(universe: Any) -> list[Mapping[str, Any]]:
+    if universe is None:
+        return []
+    if isinstance(universe, Mapping):
+        if ("ticker" in universe or "t" in universe) and not isinstance(universe.get("names"), Mapping):
+            return [universe]
+        names = universe.get("names") if isinstance(universe.get("names"), Mapping) else None
+        if names is None:
+            names = {k: v for k, v in universe.items() if isinstance(v, Mapping)}
+        rows: list[Mapping[str, Any]] = []
+        for key, rec in names.items():
+            row = dict(rec) if isinstance(rec, Mapping) else {}
+            row.setdefault("ticker", row.get("ticker") or key)
+            rows.append(row)
+        return rows
+    if isinstance(universe, Iterable) and not isinstance(universe, (str, bytes)):
+        return [rec for rec in universe if isinstance(rec, Mapping)]
+    return []
+
+
+def search_symbols(query: str, universe: Any) -> list[dict[str, Any]]:
+    """Find book rows by short symbol, yellow key, or company name.
+
+    Exact symbol or yellow key ranks first, then a prefix, then a company-name
+    word/prefix (at least two characters). An empty query matches nothing.
+    """
+    q = " ".join((query or "").split())
+    if not q:
+        return []
+    q_upper = q.upper()
+    q_fold = q.casefold()
+    ranked: list[tuple[int, str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for row in _search_rows(universe):
+        raw_ticker = str(row.get("ticker") or row.get("t") or row.get("symbol") or "")
+        short = short_symbol(str(row.get("t") or raw_ticker))
+        if not short or short in seen:
+            continue
+        ticker = canonical_ticker(raw_ticker) if raw_ticker else canonical_ticker(short)
+        if not ticker:
+            continue
+        name = _company_label(row, ticker, short)
+        yellow = ticker.upper()
+        score: int | None
+        if short == q_upper or yellow == q_upper:
+            score = 0
+        elif short.startswith(q_upper) or yellow.startswith(q_upper):
+            score = 1
+        elif _name_matches(q_fold, name):
+            score = 2
+        else:
+            continue
+        seen.add(short)
+        ranked.append(
+            (
+                score,
+                short,
+                {
+                    "t": short,
+                    "ticker": ticker,
+                    "name": name or short,
+                    "short_name": short,
+                    "px_last": row.get("px_last"),
+                    "gics_sector_name": row.get("gics_sector_name"),
+                    "limited_history": bool(row.get("limited_history")),
+                },
+            )
+        )
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in ranked]
 
 
 # ---------------------------------------------------------------------------
@@ -1679,7 +1778,24 @@ def lookup_name(book: Mapping[str, Any] | None, ticker: str) -> dict[str, Any] |
     names = book.get("names") if isinstance(book, Mapping) else None
     if not isinstance(names, dict):
         return None
-    return names.get(ticker) or names.get(name_key(ticker))
+    hit = names.get(ticker) or names.get(name_key(ticker))
+    if hit:
+        return hit
+    text = " ".join((ticker or "").split())
+    if len(text.split(" ")) != 1:
+        return None
+    short = short_symbol(text)
+    found = [
+        rec
+        for key, rec in names.items()
+        if isinstance(rec, Mapping) and short_symbol(str(key)) == short
+    ]
+    if len(found) == 1:
+        return found[0]
+    for rec in found:
+        if str(rec.get("ticker") or "").upper().endswith(" US EQUITY"):
+            return rec
+    return found[0] if found else None
 
 
 def dapi_fields_resolved(rec: Mapping[str, Any] | None) -> bool:

@@ -689,7 +689,7 @@ Source of truth is this folder. Copy the Python files below into the live tree. 
 1. `POST /api/add` → `add_server.do_add`: history (if `pull_blpapi_live.pull_history` / `pull_hist` / `fetch_history` / `add_history` exists) → price merge (if `pull_blpapi_live.merge_prices` or `clean_ingest.merge_prices` exists) → append `universe_extra.txt` → merge the ticker into `dapi_enrichment.json` (name / short_name / GICS / pills / px when DAPI or the price file has them; otherwise a stub `names[ticker]`) → `run_rebuild`.
 2. A missing Bloomberg helper is skipped. A DAPI failure still leaves the name in the book. The status says so (`TSEM is in the book. … still searchable.`) and does not report Add failed.
 3. `desk_dash.cards_from_enrichment` unions enrich names with `universe_extra.txt` and `v0/residual_last.csv` (same snapshot names as `residual_last.csv`). Limited-history cards are fine.
-4. `write_combined` embeds `#fd-search-book` (short symbol `t`, yellow `ticker`) and a boot script that merges those rows into `window.BOOK` / `window.NAMES` / `window.MOM.search`. Fat chrome is patched, not replaced.
+4. `write_combined` embeds `#fd-search-book` (short symbol `t`, yellow `ticker`) and `#fd-symbol-bar`. The boot script merges those rows into `window.BOOK` / `window.NAMES` / `window.MOM.search` and filters them as you type (`window.__FD_SEARCH__`: exact symbol, prefix, or company-name word). Add posts to `POST /api/add`. `aapl us equity` and `AAPL US EQUITY` store as `AAPL US Equity`. A symbol that merely ends in `PFD` / `CORP` / `INDEX` is not treated as a yellow key. Fat chrome is patched, not replaced.
 
 `discover_tickers` also reads `universe_extra.txt`, so the next Refresh re-enriches added names instead of dropping the stub.
 
