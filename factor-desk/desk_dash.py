@@ -1457,6 +1457,29 @@ def _rewrite_change_chips(src: str, call: tuple[int, int, str, list[tuple[int, i
     return src[:start] + name + "(" + ",".join(new_args) + ")" + src[end:]
 
 
+def _is_js_function_expr(text: str) -> bool:
+    """True when a call arg is a function or an explicit ``undefined`` map."""
+    s = text.strip()
+    if s in {"undefined", "void 0"}:
+        return True
+    return s.startswith("function") or "=>" in s
+
+
+def _drop_change_value_args(body: str) -> str:
+    """``mkGrp(label, items, key, map)`` — never pass ``vf.change`` as ``map``."""
+    calls = _find_all_label_calls(body, _CHANGE_LABELS)
+    for start, end, name, args in reversed(calls):
+        if len(args) <= 3:
+            continue
+        kept: list[str] = []
+        for i, (a, b) in enumerate(args):
+            raw = body[a:b]
+            if i < 3 or _is_js_function_expr(raw):
+                kept.append(raw)
+        body = body[:start] + name + "(" + ",".join(kept) + ")" + body[end:]
+    return body
+
+
 def _enclosing_brace(src: str, start: int) -> int | None:
     """Index of the ``{`` that contains ``start``, scanning from the beginning of ``src``."""
     n = len(src)
@@ -1506,9 +1529,8 @@ def _inject_granular_change(body: str, params: str) -> str:
     if not score:
         return body
     view = _view_param(params, body)
-    vf = _vf_name(body) or "vf"
     name = score[2]
-    new_call = f'{name}("CHANGE",{_CHANGE_CHIPS},"change",{vf}.change)'
+    new_call = f'{name}("CHANGE",{_CHANGE_CHIPS},"change")'
     cond = f'({view}==="mom-up"||{view}==="mom-down")'
     spans = _split_js_statements(body)
     score_stmt = _span_containing(spans, score[0])
@@ -1549,7 +1571,8 @@ def _patch_change_build_body(body: str, params: str, _script: str) -> str:
         else:
             body = _remove_call_expr(body, keep[0], keep[1])
     body = _strip_up_plus_statements(body)
-    return _inject_granular_change(body, params)
+    body = _inject_granular_change(body, params)
+    return _drop_change_value_args(body)
 
 
 def _change_click_js() -> str:
@@ -1558,7 +1581,7 @@ def _change_click_js() -> str:
 if (typeof document !== "undefined") document.addEventListener("click", function (ev) {
   if (ev.__fdChangeClick) return;
   var t = ev.target;
-  var b = t && t.closest ? t.closest("[data-k='change']") : null;
+  var b = t && t.closest ? t.closest("[data-fk='change'], [data-k='change']") : null;
   if (!b) return;
   var view = "";
   var host = b.closest ? b.closest("#view-mom-up, #view-mom-down") : null;
@@ -1579,7 +1602,8 @@ if (typeof document !== "undefined") document.addEventListener("click", function
   }
   if (view !== "mom-up" && view !== "mom-down") return;
   ev.__fdChangeClick = 1;
-  var val = b.getAttribute("data-v") || "all";
+  var val = b.getAttribute("data-fv");
+  if (val == null || val === "") val = b.getAttribute("data-v") || "all";
   if (val === "+>3") val = "gt3";
   else if (val === "+\u22643") val = "le3";
   else if (val === "Flat") val = "flat";
@@ -2064,12 +2088,13 @@ def _fallback_js() -> str:
     if (ev.__fdChangeClick) return;
     var t = ev.target;
     if (!t || !t.closest) return;
-    var b = t.closest("[data-k='change'], [data-fd-change-val]");
+    var b = t.closest("[data-fk='change'], [data-k='change'], [data-fd-change-val]");
     if (!b) return;
     var view = viewFromEl(b);
     if (view !== "mom-up" && view !== "mom-down") return;
     ev.__fdChangeClick = 1;
-    var raw = b.getAttribute("data-v");
+    var raw = b.getAttribute("data-fv");
+    if (raw == null || raw === "") raw = b.getAttribute("data-v");
     if (raw == null || raw === "") raw = b.getAttribute("data-fd-change-val") || "";
     var val = normChange(raw);
     rememberChange(view, val);

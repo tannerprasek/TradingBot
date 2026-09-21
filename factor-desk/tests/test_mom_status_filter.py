@@ -385,7 +385,7 @@ class MomStatusPatchTests(unittest.TestCase):
             got["allNames"],
             ["BIG", "THREE", "SMALL", "FLAT", "N3", "N2", "N4", "MISS", "BLANK", "NAN"],
         )
-        self.assertEqual(got["on"], 1)
+        self.assertEqual(got["on"], 0)
         self.assertTrue(got["hasGt"] and got["hasLe"] and got["hasFlat"] and got["hasNle"] and got["hasNgt"])
         self.assertFalse(got["outChange"])
 
@@ -1104,6 +1104,128 @@ var document = {
         self.assertEqual(got["afterFlat"]["change"], "flat")
         self.assertEqual(got["afterFlat"]["shown"], ["0"])
         self.assertEqual(got["afterFlat"]["paints"], ["mom-up", "mom-up"])
+
+    def test_mkgrp_change_omits_value_map_and_click_sets_gt3(self) -> None:
+        """Live mkGrp(label, items, key, map) must not receive vf.change as map."""
+        js = _patched_script(r"""
+var viewFilt = {
+  "mom-up": { score: "all", tags: "all", change: "all" },
+  "mom-down": { score: "all", tags: "all", change: "all" }
+};
+var DATA = [
+  {t:"+5", mom_score_d10: 5},
+  {t:"0", mom_score_d10: 0},
+  {t:"null", mom_score_d10: null}
+];
+var __changeMap;
+function mkGrp(label, items, key, map) {
+  if (key === "change") __changeMap = map;
+  var h = '<div class="fgrp"><span class="flab">' + label + '</span>';
+  for (var i = 0; i < items.length; i++) {
+    h += '<button type="button" class="fchip" data-fk="' + key + '" data-fv="' + items[i][0] + '">' + items[i][1] + '</button>';
+  }
+  return h + '</div>';
+}
+function applyMomFilters(cards, viewKey) {
+  var vf = viewFilt[viewKey] || {};
+  return (cards || []).filter(function (c) { return true; });
+}
+function buildFiltBar(view) {
+  var vf = viewFilt[view] || {};
+  var host = { html: "" };
+  host.appendChild = function (node) { host.html += node; };
+  host.appendChild(mkGrp("SCORE", [["all","All"],["5+","5+"]], "score", function (v) { return +v; }));
+  if (view === "mom-up" || view === "mom-down") {
+    host.appendChild(mkGrp("Change", [["all","All"],["up","Up (+)"],["down","Down (\u2212)"],["flat","Flat"]], "change", vf.change));
+  }
+  return host.html;
+}
+function paintView(view) {
+  __shown = applyMomFilters(DATA, view).map(function (c) { return c.t; });
+}
+""")
+        build = js.split("function buildFiltBar", 1)[1].split("function paintView", 1)[0]
+        calls = desk_dash._find_all_label_calls(build, ("CHANGE", "Change"))
+        self.assertEqual(len(calls), 1)
+        _start, _end, _name, args = calls[0]
+        self.assertLessEqual(len(args), 4)
+        self.assertGreaterEqual(len(args), 3)
+        if len(args) == 4:
+            fourth = build[args[3][0] : args[3][1]]
+            self.assertTrue(
+                desk_dash._is_js_function_expr(fourth),
+                fourth,
+            )
+        self.assertNotRegex(build, r"""['"]change['"]\s*,\s*[A-Za-z_$][\w$]*\.change\b""")
+        expr = r"""
+(function () {
+  var threw = false;
+  var err = "";
+  try {
+    buildFiltBar("mom-up");
+    var map = __changeMap;
+    var val = "gt3";
+    viewFilt["mom-up"].change = map ? map(val) : val;
+    paintView("mom-up");
+  } catch (e) {
+    threw = true;
+    err = String(e && e.message || e);
+  }
+  return {
+    threw: threw,
+    err: err,
+    mapType: typeof __changeMap,
+    change: viewFilt["mom-up"].change,
+    shown: (typeof __shown === "undefined") ? null : __shown
+  };
+})()
+"""
+        got = _node_eval(js, expr)
+        self.assertFalse(got["threw"], got["err"])
+        self.assertEqual(got["mapType"], "undefined")
+        self.assertEqual(got["change"], "gt3")
+        self.assertEqual(got["shown"], ["+5"])
+        prelude = r"""
+var window = {};
+var document = {
+  _handlers: [],
+  getElementById: function (id) {
+    if (id === "view-mom-up") return { id: id, classList: { contains: function () { return false; } }, hasAttribute: function () { return false; } };
+    if (id === "view-mom-down") return { id: id, classList: { contains: function (c) { return c === "hide"; } }, hasAttribute: function () { return false; } };
+    return null;
+  },
+  addEventListener: function (_type, fn) { document._handlers.push(fn); }
+};
+"""
+        click_expr = r"""
+(function () {
+  var chip = {
+    getAttribute: function (k) {
+      if (k === "data-fv") return "gt3";
+      if (k === "data-fk") return "change";
+      return null;
+    },
+    closest: function (sel) {
+      if (String(sel).indexOf("view-mom-up") >= 0) return { id: "view-mom-up" };
+      return null;
+    }
+  };
+  var ev = {
+    target: {
+      closest: function (sel) {
+        var s = String(sel);
+        if (s.indexOf("data-fk") >= 0 || s.indexOf("data-k") >= 0) return chip;
+        return null;
+      }
+    }
+  };
+  document._handlers[0](ev);
+  return { change: viewFilt["mom-up"].change, paints: window.__paintViews || null, shown: (typeof __shown === "undefined") ? null : __shown };
+})()
+"""
+        clicked = _node_eval_prelude(prelude, js, click_expr)
+        self.assertEqual(clicked["change"], "gt3")
+        self.assertEqual(clicked["shown"], ["+5"])
 
     def test_css_hide_does_not_blank_score_d10_cards(self) -> None:
         node = shutil.which("node")
