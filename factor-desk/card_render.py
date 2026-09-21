@@ -23,7 +23,7 @@ from typing import Any, Mapping, MutableMapping
 
 CSS_STYLE_ID = "fd-card-css"
 JS_SCRIPT_ID = "fd-card-js"
-JS_VER = "pr23-div-card"
+JS_VER = "pr24-bake-sym"
 DB_SCRIPT_ID = "fd-chg-1d-db"
 CO_DB_SCRIPT_ID = "fd-co-name-db"
 
@@ -823,7 +823,7 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
-  var CARD_VER = "pr23-div-card";
+  var CARD_VER = "pr24-bake-sym";
   if (window.__FD_CARD_BOUND__ === CARD_VER) return;
   window.__FD_CARD_BOUND__ = CARD_VER;
 
@@ -1262,8 +1262,9 @@ def strip_js() -> str:
       return p && p.key !== "mom-score-d10";
     });
     return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(c.ticker || t) + '">' +
-      "<header><h2>" + title + chg1dHTML(c) + '</h2><span class="sc score">' + esc(String(score)) + near + "</span>" +
-      '<div class="pills">' + pillsHTML(pills) + "</div></header>" +
+      '<div class="top"><span class="sym">' + title + "</span>" + chg1dHTML(c) +
+      '<span class="sc score">' + esc(String(score)) + near + "</span></div>" +
+      '<div class="pills">' + pillsHTML(pills) + "</div>" +
       '<div class="stats"><span>Day ' + esc(day) + "</span><span>R20 " + esc(r20) + "</span><span>RS63 " + esc(rs63) + "</span><span>ATR% " + esc(atr) + "</span></div>" +
       "</article>";
   }
@@ -1976,6 +1977,326 @@ def _ensure_js(html_text: str) -> str:
     return text + script
 
 
+_SKIP_BLOCK_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.I | re.S)
+_SYM_TAG_RE = re.compile(
+    r"""(<(?P<tag>span|div|b|strong)\b[^>]*\bclass\s*=\s*(?P<q>["'])(?P<cls>[^"']*\bsym\b[^"']*)(?P=q)[^>]*>)"""
+    r"""(?P<body>[^<]*)"""
+    r"""(</(?P=tag)>)""",
+    re.I,
+)
+_SYM_CONCAT_RE = re.compile(
+    r"""(?P<open><(?P<tag>span|div|b|strong)\b[^>]*\bclass\s*=\s*(?P<cq>["'])[^"']*\bsym\b[^"']*(?P=cq)[^>]*>)"""
+    r"""(?P<oq>["'])\s*\+\s*(?P<expr>[^+\n]{1,180}?)\s*\+\s*(?P=oq)"""
+    r"""</(?P=tag)>""",
+    re.I,
+)
+_SYM_TMPL_RE = re.compile(
+    r"`(?P<open><(?P<tag>span|div|b|strong)\b[^>`]*\bclass=[\"'][^\"']*\bsym\b[^\"']*[\"'][^>]*>)"
+    r"\$\{(?P<expr>[^}]+)\}"
+    r"</(?P=tag)>`",
+    re.I,
+)
+_SYM_ASSIGN_RE = re.compile(
+    r"""(?P<lhs>[A-Za-z_$][\w$.\[\]'"]*\.querySelector\(\s*(?P<q>["'])\.sym\2\s*\))"""
+    r"""\.(?:textContent|innerText|innerHTML)\s*=\s*(?P<expr>[^;]{1,200});""",
+)
+_HARVEST_CO_RE = re.compile(
+    r'"(?:t|d|ticker|symbol)"\s*:\s*"(?P<tick>[A-Za-z][A-Za-z0-9.]{0,11})"'
+    r"[^}]{0,500}?"
+    r'"(?:short_name|SHORT_NAME|name|nm|company|company_name|NAME|LONG_COMP_NAME)"\s*:\s*"(?P<co>[^"]+)"',
+    re.I,
+)
+_HARVEST_CO_REV_RE = re.compile(
+    r'"(?:short_name|SHORT_NAME|name|nm|company|company_name|NAME|LONG_COMP_NAME)"\s*:\s*"(?P<co>[^"]+)"'
+    r"[^}]{0,500}?"
+    r'"(?:t|d|ticker|symbol)"\s*:\s*"(?P<tick>[A-Za-z][A-Za-z0-9.]{0,11})"',
+    re.I,
+)
+_HARVEST_DAY_RE = re.compile(
+    r'"(?:t|d|ticker|symbol)"\s*:\s*"(?P<tick>[A-Za-z][A-Za-z0-9.]{0,11})"'
+    r"[^}]{0,700}?"
+    r'"(?P<key>day|ret_1d|day_pct|r1_pct|CHG_PCT_1D|chg_pct_1d)"\s*:\s*(?P<num>-?\d+(?:\.\d+)?)',
+    re.I,
+)
+
+
+def _lookup_map(mapping: Mapping[str, Any] | None, ticker: str) -> Any:
+    if not mapping or not ticker:
+        return None
+    short = _short(ticker)
+    if ticker in mapping and mapping[ticker] not in (None, ""):
+        return mapping[ticker]
+    if short and short in mapping and mapping[short] not in (None, ""):
+        return mapping[short]
+    for key, val in mapping.items():
+        if short and _short(key) == short and val not in (None, ""):
+            return val
+    return None
+
+
+def _harvest_live_cards(html_text: str) -> tuple[dict[str, str], dict[str, float]]:
+    """Pull company / 1d already sitting on live card objects (``t`` + ``name``)."""
+    companies: dict[str, str] = {}
+    days: dict[str, float] = {}
+    for rx in (_HARVEST_CO_RE, _HARVEST_CO_REV_RE):
+        for match in rx.finditer(html_text or ""):
+            tick = _short(match.group("tick"))
+            co = _clean_company(tick, match.group("co"))
+            if tick and co and tick not in companies:
+                companies[tick] = co
+    for match in _HARVEST_DAY_RE.finditer(html_text or ""):
+        tick = _short(match.group("tick"))
+        if not tick or tick in days:
+            continue
+        try:
+            num = float(match.group("num"))
+        except ValueError:
+            continue
+        key = match.group("key").lower()
+        if key in {"chg_pct_1d"}:
+            num = num / 100.0
+        days[tick] = num
+    return companies, days
+
+
+def _sym_title(ticker: str, co_map: Mapping[str, Any]) -> str:
+    sym = _short(ticker)
+    if not sym:
+        return ""
+    co = _clean_company(sym, str(_lookup_map(co_map, sym) or ""))
+    if sym and co:
+        return f"{sym} | {co}"
+    return sym
+
+
+def _sym_chip(ticker: str, day_map: Mapping[str, Any]) -> str:
+    raw = _lookup_map(day_map, ticker)
+    dec = _as_float(raw)
+    if dec is None:
+        return ""
+    label, side = format_chg_1d(dec)
+    attr = html.escape(f"{dec:.8g}", quote=True)
+    return (
+        f'<span class="px-1d chg-1d {side}" data-key="chg-1d" data-chg-1d="{attr}" '
+        f'title="1d CHG_PCT_1D">{html.escape(label)}</span>'
+    )
+
+
+def _bake_sym_region(region: str, day_map: Mapping[str, Any], co_map: Mapping[str, Any]) -> str:
+    def repl(match: re.Match[str]) -> str:
+        body = " ".join((match.group("body") or "").split())
+        if not body or looks_like_chrome_title(body):
+            return match.group(0)
+        if " | " in body:
+            sym = _short(body.split(" | ", 1)[0])
+        else:
+            sym = _short(body)
+            if not sym or not re.fullmatch(r"[A-Z][A-Z0-9.]{0,9}", sym):
+                return match.group(0)
+        title = _sym_title(sym, co_map) or sym
+        chip = _sym_chip(sym, day_map)
+        open_tag = match.group(1)
+        close_tag = match.group(6)
+        shown = html.escape(title if " | " not in body else body)
+        if " | " in body:
+            shown = html.escape(body)
+        elif title:
+            shown = html.escape(title)
+        else:
+            shown = html.escape(sym)
+        tail = region[match.end() : match.end() + 180]
+        has_chip = bool(re.match(r"\s*<span\b[^>]*\b(?:px-1d|chg-1d)\b", tail, re.I))
+        extra = "" if has_chip or not chip else chip
+        return f"{open_tag}{shown}{close_tag}{extra}"
+
+    return _SYM_TAG_RE.sub(repl, region)
+
+
+def looks_like_chrome_title(text: str) -> bool:
+    t = " ".join(str(text or "").split()).strip().upper()
+    if not t or len(t) > 80:
+        return True
+    return t in {"DETAIL", "HOME", "FLAGS", "WATCH", "OUTLIERS", "OPTIONS", "EXPERIMENTAL", "PAPER", "FACTOR DESK"} or t.startswith(
+        ("MOMENTUM", "BREAKOUT", "BREAKDOWN")
+    )
+
+
+def _splice_sym_js(script: str) -> str:
+    """Point live ``.sym`` builders at the baked title + 1d chip."""
+
+    def concat_repl(match: re.Match[str]) -> str:
+        expr = match.group("expr").strip()
+        if "__fdSymTitle" in expr or "__fdApplySym" in expr:
+            return match.group(0)
+        quote = match.group("oq")
+        tag = match.group("tag")
+        open_tag = match.group("open")
+        return (
+            f"{open_tag}{quote} + window.__fdSymTitle({expr}) + {quote}</{tag}>{quote}"
+            f" + window.__fdChgSpan({expr}) + {quote}"
+        )
+
+    def tmpl_repl(match: re.Match[str]) -> str:
+        expr = match.group("expr").strip()
+        if "__fdSymTitle" in expr:
+            return match.group(0)
+        tag = match.group("tag")
+        open_tag = match.group("open")
+        return f"`{open_tag}${{window.__fdSymTitle({expr})}}</{tag}>${{window.__fdChgSpan({expr})}}`"
+
+    def assign_repl(match: re.Match[str]) -> str:
+        expr = match.group("expr").strip()
+        if "__fdApplySym" in expr or "__fdSymTitle" in expr:
+            return match.group(0)
+        return f"window.__fdApplySym({match.group('lhs')}, {expr});"
+
+    text = _SYM_CONCAT_RE.sub(concat_repl, script)
+    text = _SYM_TMPL_RE.sub(tmpl_repl, text)
+    text = _SYM_ASSIGN_RE.sub(assign_repl, text)
+    return text
+
+
+def _splice_sym_scripts(html_text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        block = match.group(0)
+        head = block[:240].lower()
+        if "fd-card-js" in head or "fd-sym-helpers" in head or "__fd_card_bound__" in block.lower():
+            return block
+        open_end = block.find(">")
+        if open_end < 0:
+            return block
+        inner = block[open_end + 1 :]
+        close_at = inner.lower().rfind("</script>")
+        if close_at < 0:
+            return block
+        body = inner[:close_at]
+        spliced = _splice_sym_js(body)
+        if spliced == body:
+            return block
+        return block[: open_end + 1] + spliced + inner[close_at:]
+
+    return re.sub(r"<script\b[^>]*>.*?</script>", repl, html_text, flags=re.I | re.S)
+
+
+def sym_helper_js() -> str:
+    """Globals the spliced live ``cardHTML`` calls. Reads the baked name/1d maps."""
+    return r"""
+(function () {
+  function shortOf(t) { return String(t || "").trim().split(/\s+/)[0].toUpperCase(); }
+  function readDb(id) {
+    var el = document.getElementById(id);
+    if (!el) return {};
+    try { return JSON.parse(el.textContent || "{}") || {}; } catch (e) { return {}; }
+  }
+  function lookup(db, sym) {
+    if (!db) return null;
+    var raw = String(sym || "").trim();
+    var short = shortOf(raw);
+    if (raw && db[raw] != null && db[raw] !== "") return db[raw];
+    if (short && db[short] != null && db[short] !== "") return db[short];
+    var keys = Object.keys(db);
+    for (var i = 0; i < keys.length; i++) {
+      if (short && shortOf(keys[i]) === short && db[keys[i]] != null && db[keys[i]] !== "") return db[keys[i]];
+    }
+    return null;
+  }
+  window.__fdSymTitle = function (sym) {
+    var s = shortOf(sym);
+    if (!s) return String(sym == null ? "" : sym);
+    var co = lookup(readDb("fd-co-name-db"), s);
+    co = co == null ? "" : String(co).replace(/\s+/g, " ").trim();
+    if (!co || co.toUpperCase() === s) return s;
+    if (co.toUpperCase().indexOf(s + " | ") === 0) return s + " | " + co.slice(s.length + 3).trim();
+    return s + " | " + co;
+  };
+  window.__fdChgSpan = function (sym) {
+    var dec = lookup(readDb("fd-chg-1d-db"), sym);
+    var n = Number(dec);
+    if (dec == null || !isFinite(n)) return "";
+    var rounded = Math.round(n * 1000) / 10;
+    var label, side;
+    if (rounded === 0) { label = "0.0%"; side = "flat"; }
+    else if (rounded > 0) { label = "+" + rounded.toFixed(1) + "%"; side = "up"; }
+    else { label = "\u2212" + Math.abs(rounded).toFixed(1) + "%"; side = "down"; }
+    return '<span class="px-1d chg-1d ' + side + '" data-key="chg-1d" title="1d CHG_PCT_1D">' + label + "</span>";
+  };
+  window.__fdApplySym = function (el, sym) {
+    if (!el) return el;
+    el.textContent = window.__fdSymTitle(sym);
+    var parent = el.parentNode;
+    if (!parent) return el;
+    var html = window.__fdChgSpan(sym);
+    var chip = el.nextElementSibling;
+    var isChip = chip && chip.classList && (chip.classList.contains("px-1d") || chip.classList.contains("chg-1d"));
+    if (!html) {
+      if (isChip) parent.removeChild(chip);
+      return el;
+    }
+    var hold = document.createElement("div");
+    hold.innerHTML = html;
+    var node = hold.firstChild;
+    if (!node) return el;
+    if (isChip) parent.replaceChild(node, chip);
+    else if (el.nextSibling) parent.insertBefore(node, el.nextSibling);
+    else parent.appendChild(node);
+    return el;
+  };
+})();
+""".strip()
+
+
+def _ensure_sym_helpers(html_text: str) -> str:
+    tag = f'<script id="fd-sym-helpers">\n{sym_helper_js()}\n</script>\n'
+    text = re.sub(
+        r'<script\b[^>]*\bid=["\']fd-sym-helpers["\'][^>]*>.*?</script>\s*',
+        "",
+        html_text or "",
+        flags=re.I | re.S,
+    )
+    return _insert_early(text, tag)
+
+
+def _insert_early(html_text: str, tag: str) -> str:
+    match = re.search(r"<head[^>]*>", html_text or "", re.I)
+    if match:
+        at = match.end()
+        return html_text[:at] + "\n" + tag + html_text[at:]
+    return tag + (html_text or "")
+
+
+def bake_dense_headers(
+    html_text: str,
+    day_map: Mapping[str, Any] | None = None,
+    co_map: Mapping[str, Any] | None = None,
+) -> str:
+    """Write ``SYMBOL | company`` and the 1d chip into dense ``.sym`` markup.
+
+    ``paintTitle`` no-ops when that title equals the ticker already in ``.sym``
+    and the page has no company / 1d to add. This rewrites the HTML string
+    ``write_dash`` saves, and retargets a live ``cardHTML`` that concatenates
+    the ticker into ``.sym``.
+    """
+    text = html_text or ""
+    harvested_co, harvested_day = _harvest_live_cards(text)
+    companies = dict(harvested_co)
+    days = dict(harvested_day)
+    if co_map:
+        companies.update({str(k): str(v) for k, v in co_map.items() if v not in (None, "")})
+    if day_map:
+        for key, val in day_map.items():
+            num = _as_float(val)
+            if num is not None:
+                days[str(key)] = num
+    parts: list[str] = []
+    last = 0
+    for block in _SKIP_BLOCK_RE.finditer(text):
+        parts.append(_bake_sym_region(text[last : block.start()], days, companies))
+        parts.append(block.group(0))
+        last = block.end()
+    parts.append(_bake_sym_region(text[last:], days, companies))
+    return _splice_sym_scripts("".join(parts))
+
+
 def embed_chg_db(mapping: Mapping[str, Any] | None) -> str:
     blob = json.dumps(dict(mapping or {}), separators=(",", ":"), ensure_ascii=True)
     blob = blob.replace("</", "<\\/")
@@ -1987,18 +2308,14 @@ def _ensure_chg_db(html_text: str, day_map: Mapping[str, Any] | None) -> str:
     if day_map is None and re.search(rf"""\bid=["']{DB_SCRIPT_ID}["']""", html_text or "", re.I):
         return html_text or ""
     tag = embed_chg_db(day_map or {})
-    text, n = re.subn(
+    text = re.sub(
         rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
-        lambda _m: tag,
+        "",
         html_text or "",
         count=1,
         flags=re.I | re.S,
     )
-    if n:
-        return text
-    if "</body>" in text:
-        return text.replace("</body>", tag + "</body>", 1)
-    return text + tag
+    return _insert_early(text, tag)
 
 
 def embed_co_db(mapping: Mapping[str, Any] | None) -> str:
@@ -2012,18 +2329,14 @@ def _ensure_co_db(html_text: str, co_map: Mapping[str, Any] | None) -> str:
     if co_map is None and re.search(rf"""\bid=["']{CO_DB_SCRIPT_ID}["']""", html_text or "", re.I):
         return html_text or ""
     tag = embed_co_db(co_map or {})
-    text, n = re.subn(
+    text = re.sub(
         rf'<script\b[^>]*\bid=["\']{CO_DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
-        lambda _m: tag,
+        "",
         html_text or "",
         count=1,
         flags=re.I | re.S,
     )
-    if n:
-        return text
-    if "</body>" in text:
-        return text.replace("</body>", tag + "</body>", 1)
-    return text + tag
+    return _insert_early(text, tag)
 
 
 def ensure_embedded(
@@ -2042,5 +2355,7 @@ def ensure_embedded(
     text = _ensure_css(text)
     text = _ensure_chg_db(text, day_map)
     text = _ensure_co_db(text, co_map)
+    text = bake_dense_headers(text, day_map, co_map)
+    text = _ensure_sym_helpers(text)
     text = _ensure_js(text)
     return text

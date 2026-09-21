@@ -253,11 +253,11 @@ def _article_html(card: Mapping[str, Any], cache: Mapping[str, Any] | None = Non
     px_attr = f' data-px="{mark}"' if mark is not None else ""
     return f"""
             <article class="card" data-t="{ticker}" data-ticker="{ticker}" data-gics-sector="{sector_attr}"{px_attr}>
-              <header>
-                <h2>{title}{chg_html}</h2>
+              <div class="top">
+                <span class="sym">{title}</span>{chg_html}
                 {score_html}
-                <div class="pills">{pills}</div>
-              </header>
+              </div>
+              <div class="pills">{pills}</div>
               {spark}
               <dl>
                 <div><dt>si_ratio</dt><dd>{_fmt(card.get("si_ratio"))}</dd></div>

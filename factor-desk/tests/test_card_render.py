@@ -505,8 +505,9 @@ class Chg1dHeaderTests(unittest.TestCase):
         html = desk_dash._article_html(card)
         self.assertRegex(
             html,
-            r"<h2>MSTR<span class=\"px-1d chg-1d up\"[^>]*title=\"1d CHG_PCT_1D\">\+1\.2%</span></h2>",
+            r'<span class="sym">MSTR</span><span class="px-1d chg-1d up"[^>]*title="1d CHG_PCT_1D">\+1\.2%</span>',
         )
+        self.assertIn('class="top"', html)
         score_at = html.find('<span class="score sc">')
         pills_at = html.find('<div class="pills">', score_at)
         score_html = html[score_at:pills_at]
@@ -527,7 +528,7 @@ class Chg1dHeaderTests(unittest.TestCase):
         html = desk_dash._article_html(both)
         self.assertRegex(
             html,
-            r"<h2>MSTR \| STRATEGY INC<span class=\"px-1d chg-1d up\"[^>]*title=\"1d CHG_PCT_1D\">\+1\.2%</span></h2>",
+            r'<div class="top">\s*<span class="sym">MSTR \| STRATEGY INC</span><span class="px-1d chg-1d up"[^>]*title="1d CHG_PCT_1D">\+1\.2%</span>',
         )
         self.assertIn('data-t="MSTR"', html)
         self.assertNotIn('data-t="MSTR |', html)
@@ -543,8 +544,8 @@ class Chg1dHeaderTests(unittest.TestCase):
         )
         self.assertEqual(cr.header_title({"d": "MSTR", "NAME": "STRATEGY INC"}), "MSTR | STRATEGY INC")
         symbol_only = desk_dash._article_html({"ticker": "MSTR", "name": "MSTR", "ret_1d": 0.012, "mom_score": 10})
-        self.assertRegex(symbol_only, r"<h2>MSTR<span class=\"px-1d chg-1d up\"")
-        self.assertNotIn("|", symbol_only.split("<h2>", 1)[1].split("</h2>", 1)[0].split("<span", 1)[0])
+        self.assertRegex(symbol_only, r'<span class="sym">MSTR</span><span class="px-1d chg-1d up"')
+        self.assertNotIn("|", symbol_only.split('class="sym">', 1)[1].split("</span>", 1)[0])
         self.assertEqual(cr.header_title({"ticker": "MSTR US Equity", "name": "MSTR US Equity"}), "MSTR")
         self.assertEqual(cr.header_title({"ticker": "MSTR", "name": "MSTR", "short_name": "MSTR"}), "MSTR")
         self.assertEqual(cr.company_of({"ticker": "MSTR", "name": "MSTR US Equity"}), "")
@@ -774,6 +775,56 @@ console.log(JSON.stringify(report));
             self.assertEqual(lulu_dense["chipParent"], "top")
             self.assertTrue(lulu_dense["chipAfterSym"])
             self.assertEqual(lulu_dense["chipCount"], 1)
+
+    def test_write_combined_bakes_pipe_and_1d_into_dense_sym(self) -> None:
+        live = """<!DOCTYPE html><html><head></head><body>
+<nav>
+  <button id="refresh">Refresh</button>
+  <button>Momentum Up</button>
+  <button>Momentum Down</button>
+  <button>Outliers</button>
+  <button>Options</button>
+</nav>
+<div id="mom-up-grid" class="grid dense">
+  <div class="card" data-t="MSTR US Equity"><div class="top"><span class="sym">MSTR</span><span class="score hi">10</span></div></div>
+  <div class="card" data-t="LULU US Equity"><div class="top"><span class="sym">LULU</span><span class="score hi">4</span></div></div>
+</div>
+<script>
+function cardHTML(c) {
+  var t = c.t || "";
+  return '<div class="card"><div class="top"><span class="sym">' + t + '</span><span class="score hi"></span></div></div>';
+}
+</script>
+</body></html>"""
+        cards = [
+            {"ticker": "MSTR US Equity", "short_name": "STRATEGY INC", "day": 0.012, "mom_score": 10},
+            {"ticker": "LULU US Equity", "day": -0.008, "mom_score": 4},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "factorbook.html"
+            dest.write_text(live, encoding="utf-8")
+            out = desk_dash.write_combined(
+                dest,
+                root=root,
+                cards=cards,
+                book={"asof": "2026-09-21", "names": {}, "meta": {}},
+            )
+            text = out.read_text(encoding="utf-8")
+        self.assertIn("MSTR | STRATEGY INC", text)
+        self.assertIn('class="px-1d chg-1d up"', text)
+        self.assertIn("+1.2%", text)
+        self.assertIn('class="sym">LULU</span>', text)
+        self.assertNotIn("LULU |", text)
+        self.assertIn("\u22120.8%", text)
+        self.assertIn("window.__fdSymTitle", text)
+        self.assertIn('id="fd-co-name-db"', text)
+        self.assertIn("STRATEGY INC", text)
+        self.assertIn('id="fd-sym-helpers"', text)
+        rendered = desk_dash._article_html(cards[0])
+        self.assertIn(" | ", rendered)
+        self.assertIn("px-1d", rendered)
+        self.assertIn('class="sym"', rendered)
 
 
 if __name__ == "__main__":
