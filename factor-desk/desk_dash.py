@@ -1451,6 +1451,9 @@ def _rewrite_change_chips(src: str, call: tuple[int, int, str, list[tuple[int, i
             new_args.append(lead + _CHANGE_CHIPS + trail)
             replaced = True
             continue
+        # mkGrp's 4th arg is a transform. vf.change is a string and throws on click.
+        if replaced and not _is_js_function_expr(raw) and len(new_args) >= 3:
+            continue
         new_args.append(raw)
     if not replaced:
         return None

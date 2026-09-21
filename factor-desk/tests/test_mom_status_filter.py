@@ -1227,6 +1227,40 @@ var document = {
         self.assertEqual(clicked["change"], "gt3")
         self.assertEqual(clicked["shown"], ["+5"])
 
+    def test_already_patched_change_mkgrp_strips_vf_change_map(self) -> None:
+        """A live 4-arg mkGrp("CHANGE", chips, "change", vf.change) loses the map on re-run."""
+        page = r"""<!DOCTYPE html><html><body><script>
+var viewFilt = {
+  "mom-up": { score: "all", tags: "all", change: "all" },
+  "mom-down": { score: "all", tags: "all", change: "all" }
+};
+function mkGrp(label, items, key, map) { return ""; }
+function applyMomFilters(cards, viewKey) {
+  var vf = viewFilt[viewKey] || {};
+  return (cards || []).filter(function (c) { return true; });
+}
+function buildFiltBar(view) {
+  var vf = viewFilt[view] || {};
+  var host = { appendChild: function () {} };
+  host.appendChild(mkGrp("SCORE", [["all","All"],["5+","5+"]], "score", function (v) { return +v; }));
+  if (view === "mom-up" || view === "mom-down") {
+    host.appendChild(mkGrp("CHANGE",[["all","All"],["gt3","+>3"],["le3","+\u22643"],["flat","Flat"],["nle3","\u2212\u22643"],["ngt3","\u2212>3"]],"change",vf.change));
+  }
+}
+function paintView(view) {}
+</script></body></html>"""
+        out = desk_dash.ensure_mom_status_filter(page)
+        build = out.split("function buildFiltBar", 1)[1].split("function paintView", 1)[0]
+        self.assertIn('mkGrp("CHANGE",', build)
+        self.assertNotIn(",vf.change)", build)
+        self.assertNotIn(", vf.change)", build)
+        self.assertNotIn(",{vf}.change)", build)
+        self.assertRegex(build, r'mkGrp\("CHANGE",\[\["all","All"\].*\],"change"\)')
+        inject = Path(desk_dash.__file__).read_text(encoding="utf-8")
+        inject = inject.split("def _inject_granular_change", 1)[1].split("\ndef ", 1)[0]
+        self.assertNotIn("{vf}.change", inject)
+        self.assertIn('("CHANGE",{_CHANGE_CHIPS},"change")', inject)
+
     def test_css_hide_does_not_blank_score_d10_cards(self) -> None:
         node = shutil.which("node")
         if not node:
