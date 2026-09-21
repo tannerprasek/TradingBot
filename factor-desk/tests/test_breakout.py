@@ -1610,11 +1610,207 @@ console.log(JSON.stringify({ bo: bo, bd: bd, show: typeof window.__FD_BB_SHOW__ 
         )
         self.assertEqual(report["show"], "function")
         self.assertEqual(report["bo"]["cards"], [])
-        self.assertEqual(report["bo"]["empty"], "No early inflections this Refresh.")
+        self.assertEqual(report["bo"]["empty"], "No early inflections (0 of 2 passed)")
         self.assertFalse(report["bo"]["ghost"])
         self.assertEqual(report["bd"]["cards"], [])
-        self.assertEqual(report["bd"]["empty"], "No early inflections this Refresh.")
+        self.assertEqual(report["bd"]["empty"], "No early inflections (0 of 2 passed)")
         self.assertFalse(report["bd"]["ghost"])
+
+
+class DispersionDomTests(unittest.TestCase):
+    """Live Mom chrome shows RS63 with the number before the label. Parse that."""
+
+    def test_rs63_from_fragment_live_shapes(self) -> None:
+        value_then_label = """
+        <article class="card" data-t="MXL">
+          <header><h2>MXL</h2><span class="sc">9</span></header>
+          <span data-mom-score-d10="5">+5</span>
+          <span class="badge" data-key="mom-streak">↑3d&gt;5</span>
+          <div class="stats">
+            <span><b>1.2%</b> Day</span>
+            <span><b>8.4%</b> R20</span>
+            <span><b>2.3</b> ATR%</span>
+            <span><b>0.17</b> RS63</span>
+          </div>
+        </article>
+        """
+        self.assertAlmostEqual(bo.rs63_from_fragment(value_then_label), 0.17)
+        spaced = '<article class="card" data-t="AMD"><span class="k">RS 63</span><span class="v">−0.06</span></article>'
+        self.assertAlmostEqual(bo.rs63_from_fragment(spaced), -0.06)
+        percent = '<span>RS63 4.0%</span>'
+        self.assertAlmostEqual(bo.rs63_from_fragment(percent), 0.04)
+        data_k = '<span class="stat" data-k="rs63"><span class="v">0.17</span></span>'
+        self.assertAlmostEqual(bo.rs63_from_fragment(data_k), 0.17)
+        self.assertIsNone(bo.rs63_from_fragment('<article class="card" data-t="NONE"><span class="sc">9</span></article>'))
+
+    def test_stamp_writes_data_dispersion_and_skips_missing(self) -> None:
+        html = """<!DOCTYPE html><body>
+        <article class="card" data-t="MXL"><span><b>0.17</b> RS63</span></article>
+        <article class="card" data-t="NONE"><span class="sc">8</span></article>
+        <script>function cardHTML(){ return '<article class="card" data-t="'+t+'">RS63 9.9</article>'; }</script>
+        </body>"""
+        out = bo.stamp_dispersion_html(html, book={})
+        self.assertIn('data-t="MXL"', out)
+        self.assertRegex(out, r'data-t="MXL"[^>]*data-dispersion="0\.17"')
+        self.assertRegex(out, r'data-t="MXL"[^>]*data-dispersion-field="rs63"')
+        none = re.search(r'<article\b[^>]*data-t="NONE"[^>]*>', out)
+        self.assertIsNotNone(none)
+        self.assertNotIn("data-dispersion", none.group(0))
+        self.assertIn('id="fd-dispersion-db"', out)
+        self.assertIn('"MXL":{"v":0.17,"f":"rs63"}', out)
+        self.assertIn("RS63 9.9", out)
+        self.assertNotIn('data-dispersion="9.9"', out)
+
+    def test_stamp_prefers_factor_residual_then_residual_20d(self) -> None:
+        card = '<article class="card" data-t="MXL"><span><b>0.17</b> RS63</span></article>'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "residual_last.csv").write_text(
+                "ticker,residual\nMXL US Equity,-0.02\n",
+                encoding="utf-8",
+            )
+            (root / "dapi_enrichment.json").write_text(
+                json.dumps({"names": {"MXL US Equity": {"residual_20d": 0.05}}}),
+                encoding="utf-8",
+            )
+            out = bo.stamp_dispersion_html(card, root=root)
+        self.assertIn('data-dispersion="-0.02"', out)
+        self.assertIn('data-dispersion-field="factor_residual"', out)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "dapi_enrichment.json").write_text(
+                json.dumps({"names": {"AMD US Equity": {"residual_20d": -0.04}}}),
+                encoding="utf-8",
+            )
+            amd = '<article class="card" data-t="AMD"><span><b>0.11</b> RS63</span></article>'
+            out = bo.stamp_dispersion_html(amd, root=root)
+        self.assertIn('data-dispersion="-0.04"', out)
+        self.assertIn('data-dispersion-field="residual_20d"', out)
+
+    def test_jsdom_value_before_label_fills_breakout(self) -> None:
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        mom = """
+<div id="view-mom-up"><div class="grid dense" id="mom-up-grid">
+  <article class="card" data-t="MXL" data-status="Strong momentum">
+    <header><h2>MXL</h2><span class="sc">9</span></header>
+    <span data-mom-score-d10="5">+5</span>
+    <span class="badge" data-key="mom-streak">↑3d&gt;5</span>
+    <div class="stats">
+      <span><b>1.2%</b> Day</span>
+      <span><b>8.4%</b> R20</span>
+      <span><b>2.3</b> ATR%</span>
+      <span><b>0.17</b> RS63</span>
+    </div>
+  </article>
+  <article class="card" data-t="AMD">
+    <header><h2>AMD</h2><span class="sc">9</span></header>
+    <span data-mom-score-d10="5">+5</span>
+    <span class="badge" data-key="mom-streak">↑3d&gt;5</span>
+    <div class="stats"><span><b>-0.06</b> RS63</span></div>
+  </article>
+  <article class="card" data-t="NONE">
+    <header><h2>NONE</h2><span class="sc">8</span></header>
+    <span data-mom-score-d10="4">+4</span>
+    <span class="badge" data-key="mom-streak">↑2d&gt;5</span>
+    <div class="stats"><span>Day 1.0%</span></div>
+  </article>
+</div></div>
+<div id="view-mom-down"><div class="grid dense" id="mom-down-grid">
+  <article class="card" data-t="SOFT">
+    <header><h2>SOFT</h2><span class="sc">4</span></header>
+    <span data-mom-score-d10="-5">−5</span>
+    <span class="badge" data-key="mom-streak">↓4d&lt;5</span>
+    <span class="stat" data-k="rs63"><span class="v">-0.06</span></span>
+  </article>
+</div></div>
+"""
+        html = (
+            "<!DOCTYPE html><body><nav id=\"topnav\">"
+            "<button type=\"button\" class=\"btn nav-btn\" id=\"fd-nav-breakout\" data-view=\"breakout\">Breakout</button>"
+            "<button type=\"button\" class=\"btn nav-btn\" id=\"fd-nav-breakdown\" data-view=\"breakdown\">Breakdown</button>"
+            "</nav>"
+            + mom
+            + "<div id=\"view-breakout\"><div id=\"breakout-grid\"></div></div>"
+            "<div id=\"view-breakdown\"><div id=\"breakdown-grid\"></div></div>"
+            "<script id=\"fd-breakout-js\">\n"
+            + bo.strip_js()
+            + "\n</script></body>"
+        )
+        self.assertNotIn("data-dispersion", mom)
+        report = _run_jsdom(
+            html,
+            r"""
+function names(id) {
+  return Array.from(document.querySelectorAll("#" + id + " article.card")).map(function (el) {
+    return el.getAttribute("data-t");
+  });
+}
+const mxl = document.querySelector('[data-t="MXL"]');
+const none = document.querySelector('[data-t="NONE"]');
+const mxlDisp = window.__FD_BB_DISPERSION_OF__({}, mxl);
+const noneDisp = window.__FD_BB_DISPERSION_OF__({}, none);
+const amdDisp = window.__FD_BB_DISPERSION_OF__({}, document.querySelector('[data-t="AMD"]'));
+const softDisp = window.__FD_BB_DISPERSION_OF__({}, document.querySelector('[data-t="SOFT"]'));
+window.__FD_BB_SHOW__("breakout");
+const boNames = names("breakout-grid");
+const boEmpty = (document.querySelector("#breakout-grid .fd-bb-empty") || {}).textContent || "";
+window.__FD_BB_SHOW__("breakdown");
+const bdNames = names("breakdown-grid");
+console.log(JSON.stringify({
+  mxlDisp: mxlDisp, noneDisp: noneDisp, amdDisp: amdDisp, softDisp: softDisp,
+  boNames: boNames, boEmpty: boEmpty, bdNames: bdNames
+}));
+""",
+        )
+        self.assertAlmostEqual(report["mxlDisp"], 0.17)
+        self.assertIsNone(report["noneDisp"])
+        self.assertAlmostEqual(report["amdDisp"], -0.06)
+        self.assertAlmostEqual(report["softDisp"], -0.06)
+        self.assertEqual(report["boNames"], ["MXL"])
+        self.assertEqual(report["boEmpty"], "")
+        self.assertEqual(report["bdNames"], ["SOFT"])
+
+    def test_jsdom_missing_dispersion_empty_count(self) -> None:
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        mom = """
+<div id="view-mom-up"><div id="mom-up-grid">
+  <article class="card" data-t="NONE">
+    <header><h2>NONE</h2><span class="sc">8</span></header>
+    <span data-mom-score-d10="4">+4</span>
+    <span class="badge" data-key="mom-streak">↑2d&gt;5</span>
+  </article>
+  <article class="card" data-t="WIDE">
+    <header><h2>WIDE</h2><span class="sc">12</span></header>
+    <span data-mom-score-d10="6">+6</span>
+    <span class="badge" data-key="mom-streak">↑2d&gt;5</span>
+    <span>RS63 0.20</span>
+  </article>
+</div></div>
+"""
+        html = (
+            "<!DOCTYPE html><body>"
+            + mom
+            + "<div id=\"view-breakout\"><div id=\"breakout-grid\"></div></div>"
+            "<div id=\"view-breakdown\"><div id=\"breakdown-grid\"></div></div>"
+            "<script>\n"
+            + bo.strip_js()
+            + "\n</script></body>"
+        )
+        report = _run_jsdom(
+            html,
+            r"""
+window.__FD_BB_SHOW__("breakout");
+const empty = (document.querySelector("#breakout-grid .fd-bb-empty") || {}).textContent || "";
+const cards = Array.from(document.querySelectorAll("#breakout-grid article.card")).map(function (el) {
+  return el.getAttribute("data-t");
+});
+console.log(JSON.stringify({ empty: empty, cards: cards }));
+""",
+        )
+        self.assertEqual(report["cards"], [])
+        self.assertEqual(report["empty"], "No early inflections (0 of 2 passed)")
 
 
 class PaperNavIgnoreTests(unittest.TestCase):

@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import sys
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 HERE = __import__("pathlib").Path(__file__).resolve().parent
@@ -52,10 +53,12 @@ STREAK_FRESH_MAX = 15
 STREAK_PEAK_LO = 5
 STREAK_PEAK_HI = 12
 
-# Dispersion. Prefer enrich ``residual_20d`` (r_20d − β × r_mkt_20d). If that
-# field is absent, interim gate is RS63 > 0 / < 0 (card ``rs_63`` / ``rs63``,
-# or 63d return minus SPY when both series exist). Do not invent a residual.
-# A present residual of 0 does **not** fall through to RS63.
+# Dispersion. Prefer a true factor residual (residual panel / residual_last),
+# then enrich ``residual_20d``, then ``vs_group``. A present 0 does **not**
+# fall through. If none of those exist, the portable filter reads RS63 off the
+# live Mom card (labeled stat, ``data-rs63``, or ``metrics.rs_63``). Embed
+# stamps that number onto ``data-dispersion`` so the next Refresh keeps it.
+# A name with no residual and no RS63 is skipped — missing is not a pass.
 DISPERSION_KEYS: tuple[str, ...] = (
     "residual_20d",
     "factor_residual",
@@ -100,8 +103,9 @@ PX_SERIES_KEYS: tuple[str, ...] = (
 )
 
 DB_SCRIPT_ID = "fd-breakout-db"
+DISP_DB_ID = "fd-dispersion-db"
 JS_SCRIPT_ID = "fd-breakout-js"
-JS_VER = "pr32-mom-filter"
+JS_VER = "pr32-dispersion-dom"
 CSS_STYLE_ID = "fd-breakout-css"
 PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
@@ -1810,7 +1814,150 @@ def strip_js() -> str:
     if (!el) return null;
     return numOf(el.getAttribute("data-mom-score-d10"));
   }}
-  function dispersionOf(card, node) {{
+  function dispersionDb() {{
+    var el = $("fd-dispersion-db");
+    if (!el) return {{}};
+    try {{ return JSON.parse(el.textContent || "{{}}") || {{}}; }} catch (e) {{ return {{}}; }}
+  }}
+  function dispersionRec(t) {{
+    var db = dispersionDb();
+    if (!t) return null;
+    if (db[t]) return db[t];
+    var keys = Object.keys(db);
+    for (var i = 0; i < keys.length; i++) {{
+      if (shortOf(keys[i]) === t) return db[keys[i]];
+    }}
+    return null;
+  }}
+  function isRs63Label(text) {{
+    var s = String(text || "").replace(/[\s_\-]+/g, "").toUpperCase();
+    return s === "RS63";
+  }}
+  function otherStatLabel(text) {{
+    var u = String(text || "").toUpperCase();
+    return /\bDAY\b/.test(u) || /\bR20\b/.test(u) || /\bATR\b/.test(u);
+  }}
+  function parseStatNum(text) {{
+    var s = String(text || "").replace(/\u2212/g, "-").replace(/\u2013/g, "-").replace(/\u2014/g, "-").replace(/,/g, "").trim();
+    if (!s || s === "—" || s === "-" || s === "–" || s === "−") return null;
+    var m = s.match(/(-?\d+(?:\.\d+)?|\.\d+)\s*(%)?/);
+    if (!m) return null;
+    var n = parseFloat(m[1]);
+    if (!isFinite(n)) return null;
+    if (m[2]) n = n / 100;
+    return n;
+  }}
+  function closestStatNum(left, right) {{
+    var re = /(-?\d+(?:\.\d+)?|\.\d+)\s*(%)?/g;
+    var m, last = null;
+    while ((m = re.exec(left || ""))) last = m;
+    var rightRe = /(-?\d+(?:\.\d+)?|\.\d+)\s*(%)?/;
+    var first = rightRe.exec(right || "");
+    function distLeft(match) {{
+      return (left || "").length - (match.index + match[0].length);
+    }}
+    function valueOf(match) {{
+      var n = parseFloat(match[1]);
+      if (!isFinite(n)) return null;
+      if (match[2]) n = n / 100;
+      return n;
+    }}
+    if (last && first) {{
+      var dl = distLeft(last);
+      var dr = first.index;
+      if (dr < dl) return valueOf(first);
+      if (dl < dr) return valueOf(last);
+      return valueOf(first);
+    }}
+    if (first) return valueOf(first);
+    if (last) return valueOf(last);
+    return null;
+  }}
+  function cellAroundRs(text) {{
+    var s = String(text || "").replace(/\u2212/g, "-").replace(/\u2013/g, "-").replace(/\u2014/g, "-");
+    s = s.replace(/\d+\s*d\s*[<>]\s*5/gi, " ");
+    var re = /RS[\s_\-]*63/ig;
+    var m, found = null;
+    while ((m = re.exec(s))) found = m;
+    if (!found) return null;
+    var left = s.slice(0, found.index);
+    var right = s.slice(found.index + found[0].length);
+    var leftParts = left.split(/\b(?:DAY|R20|ATR%?)\b/i);
+    var rightParts = right.split(/\b(?:DAY|R20|ATR%?)\b/i);
+    return closestStatNum(leftParts[leftParts.length - 1], rightParts[0]);
+  }}
+  function ownText(el) {{
+    var t = "";
+    if (!el || !el.firstChild) return "";
+    for (var n = el.firstChild; n; n = n.nextSibling) {{
+      if (n.nodeType === 3) t += n.textContent;
+    }}
+    return t;
+  }}
+  function attrNum(el, name) {{
+    if (!el || !el.getAttribute) return null;
+    var raw = el.getAttribute(name);
+    if (raw == null || raw === "") return null;
+    return parseStatNum(raw);
+  }}
+  function rs63FromNode(node) {{
+    if (!node || !node.querySelectorAll) return null;
+    var direct = attrNum(node, "data-rs63");
+    if (direct == null) direct = attrNum(node, "data-rs-63");
+    if (direct == null) direct = attrNum(node, "data-rs_63");
+    if (direct != null) return direct;
+    var els = node.querySelectorAll("[data-k],[data-stat],[data-field],[data-label],[data-rs63],[data-rs-63],span,div,b,i,small,em,dt,dd,td,label");
+    var i, el, attrLabel, own, full, n;
+    for (i = 0; i < els.length; i++) {{
+      el = els[i];
+      if (el === node) continue;
+      attrLabel = el.getAttribute("data-k") || el.getAttribute("data-stat") || el.getAttribute("data-field") || el.getAttribute("data-label") || el.getAttribute("title") || el.getAttribute("aria-label") || "";
+      own = ownText(el);
+      full = String(el.textContent || "");
+      if (isRs63Label(attrLabel)) {{
+        n = attrNum(el, "data-v");
+        if (n == null) n = attrNum(el, "data-val");
+        if (n == null) n = attrNum(el, "data-value");
+        if (n == null) n = attrNum(el, "data-n");
+        if (n == null) n = attrNum(el, "data-rs63");
+        if (n == null) n = attrNum(el, "data-rs-63");
+        if (n == null && !otherStatLabel(full)) n = parseStatNum(full);
+        if (n == null && el.nextElementSibling && !otherStatLabel(el.nextElementSibling.textContent || "")) n = parseStatNum(el.nextElementSibling.textContent);
+        if (n == null && el.previousElementSibling && !otherStatLabel(el.previousElementSibling.textContent || "")) n = parseStatNum(el.previousElementSibling.textContent);
+        if (n != null) return n;
+        continue;
+      }}
+      if (otherStatLabel(full) && !isRs63Label(own) && !isRs63Label(String(full).replace(/\s+/g, ""))) continue;
+      if (isRs63Label(own) || isRs63Label(String(full).replace(/\s+/g, " ").trim())) {{
+        if (!otherStatLabel(full)) {{
+          n = parseStatNum(full);
+          if (n != null) return n;
+        }}
+        if (el.nextElementSibling && !otherStatLabel(el.nextElementSibling.textContent || "")) {{
+          n = parseStatNum(el.nextElementSibling.textContent);
+          if (n != null) return n;
+        }}
+        if (el.previousElementSibling && !otherStatLabel(el.previousElementSibling.textContent || "")) {{
+          n = parseStatNum(el.previousElementSibling.textContent);
+          if (n != null) return n;
+        }}
+        if (el.parentElement && el.parentElement !== node) {{
+          var parentText = String(el.parentElement.textContent || "");
+          if (!otherStatLabel(parentText.replace(/RS[\s_\-]*63/ig, " "))) {{
+            n = parseStatNum(parentText);
+            if (n != null) return n;
+          }}
+        }}
+        continue;
+      }}
+      if (/RS[\s_\-]*63/i.test(full) && !otherStatLabel(full) && (!el.children || el.children.length <= 6)) {{
+        n = cellAroundRs(full);
+        if (n != null) return n;
+      }}
+    }}
+    return cellAroundRs(node.textContent || "");
+  }}
+  function residualFrom(card) {{
     var metrics = (card && card.metrics && typeof card.metrics === "object") ? card.metrics : null;
     var keys = ["residual_20d", "factor_residual", "factor_resid", "vs_group", "vs_sleeve"];
     var blobs = [card, metrics];
@@ -1822,7 +1969,13 @@ def strip_js() -> str:
         if (n != null) return n;
       }}
     }}
+    return null;
+  }}
+  function rsFromCard(card) {{
+    var metrics = (card && card.metrics && typeof card.metrics === "object") ? card.metrics : null;
     var rsKeys = ["rs_63", "rs63", "RS63", "rs_63d"];
+    var blobs = [card, metrics];
+    var b, i, n;
     for (b = 0; b < blobs.length; b++) {{
       if (!blobs[b]) continue;
       for (i = 0; i < rsKeys.length; i++) {{
@@ -1830,14 +1983,47 @@ def strip_js() -> str:
         if (n != null) return n;
       }}
     }}
-    if (!node) return null;
-    var blob = String(node.textContent || "").replace(/\u2212/g, "-");
-    var m = blob.match(/RS\s*63[^0-9\-]*(-?\d+(?:\.\d+)?)\s*(%)?/i);
-    if (!m) return null;
-    n = numOf(m[1]);
-    if (n == null) return null;
-    if (m[2]) n = n / 100;
-    return n;
+    return null;
+  }}
+  function residualField(name) {{
+    var f = String(name || "");
+    return f === "residual_20d" || f === "factor_residual" || f === "factor_resid" || f === "vs_group" || f === "vs_sleeve";
+  }}
+  function dispersionOf(card, node) {{
+    var residual = residualFrom(card);
+    if (residual != null) return residual;
+    var field = node && node.getAttribute ? (node.getAttribute("data-dispersion-field") || "") : "";
+    if (node && residualField(field)) {{
+      var stampedResidual = attrNum(node, "data-dispersion");
+      if (stampedResidual != null) return stampedResidual;
+    }}
+    if (node) {{
+      var rAttr = attrNum(node, "data-residual-20d");
+      if (rAttr == null) rAttr = attrNum(node, "data-residual_20d");
+      if (rAttr == null) rAttr = attrNum(node, "data-factor-residual");
+      if (rAttr == null) rAttr = attrNum(node, "data-factor_residual");
+      if (rAttr == null) rAttr = attrNum(node, "data-vs-group");
+      if (rAttr == null) rAttr = attrNum(node, "data-vs-sleeve");
+      if (rAttr != null) return rAttr;
+    }}
+    var dbResidual = dispersionRec(shortOf((card && (card.t || card.ticker || card.d)) || (node ? tickerOfNode(node) : "")));
+    if (dbResidual && residualField(dbResidual.f) && dbResidual.v != null && dbResidual.v !== "") {{
+      var dbN = parseStatNum(dbResidual.v);
+      if (dbN != null) return dbN;
+    }}
+    var rs = rsFromCard(card);
+    if (rs != null) return rs;
+    var fromNode = rs63FromNode(node);
+    if (fromNode != null) return fromNode;
+    if (node && !residualField(field)) {{
+      var stamped = attrNum(node, "data-dispersion");
+      if (stamped != null) return stamped;
+    }}
+    if (dbResidual && dbResidual.v != null && dbResidual.v !== "") {{
+      var dbRs = parseStatNum(dbResidual.v);
+      if (dbRs != null) return dbRs;
+    }}
+    return null;
   }}
   function readFields(item) {{
     var card = item.card || {{}};
@@ -1943,13 +2129,16 @@ def strip_js() -> str:
     }}
     return renderRow(row);
   }}
-  function emptyLine() {{
+  function emptyLine(universeN) {{
     var empty = document.createElement("p");
     empty.className = "fd-bb-empty";
-    empty.textContent = "No early inflections this Refresh.";
+    var n = universeN || 0;
+    empty.textContent = n > 0
+      ? ("No early inflections (0 of " + n + " passed)")
+      : "No early inflections this Refresh.";
     return empty;
   }}
-  function paintFiltered(grid, matches) {{
+  function paintFiltered(grid, matches, universeN) {{
     if (!grid) return 0;
     var nodes = [];
     for (var i = 0; i < matches.length; i++) {{
@@ -1959,7 +2148,7 @@ def strip_js() -> str:
     }}
     grid.innerHTML = "";
     if (!matches.length) {{
-      grid.appendChild(emptyLine());
+      grid.appendChild(emptyLine(universeN));
       return 0;
     }}
     for (var j = 0; j < nodes.length; j++) grid.appendChild(nodes[j]);
@@ -2011,7 +2200,7 @@ def strip_js() -> str:
         var universe = [];
         try {{ universe = momUniverse(); }} catch (eU) {{ universe = []; }}
         if (universe.length) {{
-          paintFiltered(grid, filterUniverse(universe, kind));
+          paintFiltered(grid, filterUniverse(universe, kind), universe.length);
         }} else {{
           var data = {{ breakout: [], breakdown: [] }};
           try {{ data = db(); }} catch (eD) {{ data = {{ breakout: [], breakdown: [] }}; }}
@@ -2029,6 +2218,7 @@ def strip_js() -> str:
     }} catch (eShow) {{}}
   }}
   window.__FD_BB_SHOW__ = show;
+  window.__FD_BB_DISPERSION_OF__ = dispersionOf;
   window.__FD_BB_SYNC_NAV__ = syncNav;
   window.__FD_BB_RENDER_ROW__ = renderRow;
   function isNavControl(el) {{
@@ -2491,6 +2681,360 @@ def _enrich_existing_db(html_text: str, live_map: Mapping[str, Any] | None) -> s
     return html_text[: match.start()] + tag + html_text[match.end() :]
 
 
+_SCRIPT_MASK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
+_ARTICLE_BLOCK_RE = re.compile(r"<article\b([^>]*)>(.*?)</article>", re.I | re.S)
+_RS_LABEL_RE = re.compile(r"RS[\s_\-]*63", re.I)
+_STAT_NUM_RE = re.compile(r"(-?\d+(?:\.\d+)?|\.\d+)\s*(%)?")
+_OTHER_STAT_RE = re.compile(r"\b(?:DAY|R20|ATR%?)\b", re.I)
+_STREAK_TOKEN_RE = re.compile(r"\d+\s*d\s*[<>]\s*5", re.I)
+_RESIDUAL_STAMP_FIELDS = frozenset(
+    {"residual_20d", "factor_residual", "factor_resid", "vs_group", "vs_sleeve"}
+)
+
+
+def _fmt_disp(value: float) -> str:
+    return f"{float(value):.8g}"
+
+
+def _norm_disp_text(text: str) -> str:
+    return (
+        (text or "")
+        .replace("\u2212", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace(",", "")
+    )
+
+
+def _parse_stat_num(text: str) -> float | None:
+    raw = _norm_disp_text(text).strip()
+    if not raw or raw in {"—", "-", "–", "−"}:
+        return None
+    match = _STAT_NUM_RE.search(raw)
+    if not match:
+        return None
+    try:
+        number = float(match.group(1))
+    except ValueError:
+        return None
+    if match.group(2):
+        number = number / 100.0
+    return number
+
+
+def _closest_stat_num(left: str, right: str) -> float | None:
+    last = None
+    for match in _STAT_NUM_RE.finditer(left or ""):
+        last = match
+    first = _STAT_NUM_RE.search(right or "")
+
+    def value_of(match: re.Match[str]) -> float | None:
+        try:
+            number = float(match.group(1))
+        except ValueError:
+            return None
+        if match.group(2):
+            number = number / 100.0
+        return number
+
+    if last is not None and first is not None:
+        dist_left = len(left or "") - last.end()
+        dist_right = first.start()
+        if dist_right < dist_left:
+            return value_of(first)
+        if dist_left < dist_right:
+            return value_of(last)
+        return value_of(first)
+    if first is not None:
+        return value_of(first)
+    if last is not None:
+        return value_of(last)
+    return None
+
+
+def _cell_around_rs(text: str) -> float | None:
+    """Number closest to an RS63 label, staying inside that stat cell."""
+    blob = _STREAK_TOKEN_RE.sub(" ", _norm_disp_text(text))
+    found = None
+    for match in _RS_LABEL_RE.finditer(blob):
+        found = match
+    if found is None:
+        return None
+    left = blob[: found.start()]
+    right = blob[found.end() :]
+    left_parts = _OTHER_STAT_RE.split(left)
+    right_parts = _OTHER_STAT_RE.split(right)
+    return _closest_stat_num(
+        left_parts[-1] if left_parts else "",
+        right_parts[0] if right_parts else "",
+    )
+
+
+def _strip_tags(fragment: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", fragment or "")
+    return re.sub(r"\s+", " ", html.unescape(text))
+
+
+def rs63_from_fragment(fragment: str) -> float | None:
+    """Read RS63 from live Mom-card HTML.
+
+    Dense cards often render the number *before* the ``RS63`` / ``RS 63``
+    label, or keep the label only on ``data-k`` / ``data-stat``. A trailing
+    ``%`` is percent (``4.0%`` → 0.04). A bare ``0.17`` stays ``0.17``.
+    """
+    src = fragment or ""
+    attr = re.search(r"""data-rs[-_]?63\s*=\s*["']([^"']+)["']""", src, re.I)
+    if attr:
+        number = _parse_stat_num(attr.group(1))
+        if number is not None:
+            return number
+    labeled = re.compile(
+        r"""<([a-z0-9]+)\b([^>]*?\b(?:data-k|data-stat|data-field|data-label|title|aria-label)\s*=\s*["']([^"']+)["'][^>]*)>(.*?)</\1>""",
+        re.I | re.S,
+    )
+    for match in labeled.finditer(src):
+        label = re.sub(r"[\s_\-]+", "", match.group(3) or "").upper()
+        if label != "RS63":
+            continue
+        attrs = match.group(2) or ""
+        for key in ("data-v", "data-val", "data-value", "data-n", "data-rs63", "data-rs-63"):
+            got = re.search(rf"""{re.escape(key)}\s*=\s*["']([^"']+)["']""", attrs, re.I)
+            if not got:
+                continue
+            number = _parse_stat_num(got.group(1))
+            if number is not None:
+                return number
+        inner = _strip_tags(match.group(4) or "")
+        if _OTHER_STAT_RE.search(inner):
+            continue
+        number = _parse_stat_num(inner)
+        if number is not None:
+            return number
+        number = _cell_around_rs(inner)
+        if number is not None:
+            return number
+    return _cell_around_rs(_strip_tags(src))
+
+
+def load_dispersion_book(root: Any = None) -> dict[str, tuple[float, str]]:
+    """Ticker → ``(value, field)``. Factor residual wins over ``residual_20d``.
+
+    Reads the residual panel / ``residual_last`` already on disk, then enrich
+    ``residual_20d``. Does not compute a new residual. A present 0 is kept.
+    """
+    base = Path(root) if root is not None else HERE
+    out: dict[str, tuple[float, str]] = {}
+
+    def put(ticker: str, value: float, field: str, *, override: bool = False) -> None:
+        short = _short(ticker)
+        for key in (short, str(ticker).strip()):
+            if not key:
+                continue
+            if key in out and not override:
+                continue
+            out[key] = (float(value), field)
+
+    try:
+        import s_score
+
+        panel = s_score.discover_residual_panel(base)
+        names = panel.get("names") if isinstance(panel, Mapping) else None
+        series = s_score._series_map(names if isinstance(names, Mapping) else None)
+        for ticker, points in series.items():
+            if points:
+                put(str(ticker), float(points[-1][1]), "factor_residual", override=True)
+        if not any(field == "factor_residual" for _value, field in out.values()):
+            last, _asof, _src = s_score._residual_last_snapshot(base)
+            for ticker, value in (last or {}).items():
+                put(str(ticker), float(value), "factor_residual", override=True)
+    except Exception as exc:
+        LOG.warning("dispersion book: residual panel unreadable: %s", exc)
+
+    try:
+        book = dapi_enrich.load_enrichment(base / dapi_enrich.ENRICH_FILENAME)
+    except Exception as exc:
+        LOG.warning("dispersion book: enrich unreadable: %s", exc)
+        book = None
+    names = book.get("names") if isinstance(book, Mapping) else None
+    if isinstance(names, Mapping):
+        for ticker, rec in names.items():
+            if not isinstance(rec, Mapping):
+                continue
+            value = dapi_enrich.as_float(rec.get("residual_20d"))
+            if value is None:
+                continue
+            short = _short(str(ticker))
+            prev = out.get(short) or out.get(str(ticker))
+            if prev is not None and prev[1] == "factor_residual":
+                continue
+            put(str(ticker), float(value), "residual_20d", override=False)
+    return out
+
+
+def _is_mom_card_attrs(attrs: str) -> bool:
+    match = re.search(r"""class\s*=\s*["']([^"']+)["']""", attrs or "", re.I)
+    if not match:
+        return False
+    classes = set(match.group(1).split())
+    if "fd-bb-card" in classes:
+        return False
+    return "card" in classes or "fd-card" in classes
+
+
+def _ticker_from_article(attrs: str, inner: str) -> str:
+    match = re.search(
+        r"""data-(?:t|ticker|name)\s*=\s*["']([^"']+)["']""",
+        attrs or "",
+        re.I,
+    )
+    if match and match.group(1).strip():
+        return match.group(1).strip()
+    heading = re.search(r"<h[23]\b[^>]*>(.*?)</h[23]>", inner or "", re.I | re.S)
+    if not heading:
+        return ""
+    return re.sub(r"<[^>]+>", "", heading.group(1)).strip()
+
+
+def _upsert_attr(open_tag: str, name: str, value: str) -> str:
+    escaped = html.escape(str(value), quote=True)
+    pattern = re.compile(
+        rf"""(\s{re.escape(name)}\s*=\s*)(["'])(?:(?!\2).)*\2""",
+        re.I | re.S,
+    )
+    if pattern.search(open_tag):
+        return pattern.sub(
+            lambda match: f"{match.group(1)}{match.group(2)}{escaped}{match.group(2)}",
+            open_tag,
+            count=1,
+        )
+    if open_tag.endswith("/>"):
+        return open_tag[:-2] + f' {name}="{escaped}"/>'
+    return open_tag[:-1] + f' {name}="{escaped}">'
+
+
+def _mask_scripts(text: str) -> tuple[str, list[str]]:
+    blocks: list[str] = []
+
+    def repl(match: re.Match[str]) -> str:
+        blocks.append(match.group(0))
+        return f"\x00FD_SCRIPT_{len(blocks) - 1}\x00"
+
+    return _SCRIPT_MASK_RE.sub(repl, text or ""), blocks
+
+
+def _unmask_scripts(text: str, blocks: list[str]) -> str:
+    for index, block in enumerate(blocks):
+        text = text.replace(f"\x00FD_SCRIPT_{index}\x00", block)
+    return text
+
+
+def _lookup_book(
+    book: Mapping[str, Any] | None,
+    ticker: str,
+) -> tuple[float, str] | None:
+    if not book or not ticker:
+        return None
+    short = _short(ticker)
+    rec = book.get(ticker) or book.get(short)
+    if not isinstance(rec, tuple):
+        for key, val in book.items():
+            if _short(str(key)) == short and isinstance(val, tuple):
+                rec = val
+                break
+    if not isinstance(rec, tuple) or len(rec) != 2 or rec[0] is None:
+        return None
+    try:
+        return float(rec[0]), str(rec[1] or "")
+    except (TypeError, ValueError):
+        return None
+
+
+def dispersion_for_card(
+    ticker: str,
+    fragment: str,
+    book: Mapping[str, Any] | None = None,
+) -> tuple[float, str] | None:
+    """Residual from the book, else ``vs_group``, else RS63 parsed off the card."""
+    chosen = _lookup_book(book, ticker)
+    if chosen is not None and chosen[1] in _RESIDUAL_STAMP_FIELDS:
+        return chosen
+    vs_group = re.search(
+        r"""data-vs-group\s*=\s*["']([^"']+)["']""",
+        fragment or "",
+        re.I,
+    )
+    if vs_group:
+        number = _parse_stat_num(vs_group.group(1))
+        if number is not None:
+            return number, "vs_group"
+    rs63 = rs63_from_fragment(fragment or "")
+    if rs63 is None:
+        return chosen
+    return rs63, "rs63"
+
+
+def _embed_dispersion_db(html_text: str, db: Mapping[str, Any]) -> str:
+    blob = json.dumps(dict(db or {}), separators=(",", ":"), ensure_ascii=True)
+    tag = f'<script type="application/json" id="{DISP_DB_ID}">{_script_json(blob)}</script>\n'
+    text = re.sub(
+        rf'<script\b[^>]*\bid=["\']{DISP_DB_ID}["\'][^>]*>.*?</script>\s*',
+        "",
+        html_text or "",
+        flags=re.I | re.S,
+    )
+    if "</body>" in text:
+        return text.replace("</body>", tag + "</body>", 1)
+    return text + tag
+
+
+def stamp_dispersion_html(
+    html_text: str,
+    root: Any = None,
+    book: Mapping[str, Any] | None = None,
+) -> str:
+    """Write ``data-dispersion`` onto Mom ``<article class="card">`` nodes.
+
+    Preference per name: factor residual, then enrich ``residual_20d``, then
+    ``data-vs-group``, then RS63 read from that card. Names with none of those
+    are left unstamped so the portable filter skips them. Script blocks are
+    masked so a ``cardHTML`` template is not rewritten.
+    """
+    if book is None:
+        book = load_dispersion_book(root)
+    masked, blocks = _mask_scripts(html_text or "")
+    db: dict[str, dict[str, Any]] = {}
+
+    def repl(match: re.Match[str]) -> str:
+        attrs, inner = match.group(1), match.group(2)
+        if not _is_mom_card_attrs(attrs):
+            return match.group(0)
+        ticker = _ticker_from_article(attrs, inner)
+        if not ticker:
+            return match.group(0)
+        chosen = dispersion_for_card(ticker, match.group(0), book)
+        if chosen is None:
+            return match.group(0)
+        value, field = chosen
+        short = _short(ticker) or ticker
+        db[short] = {"v": float(value), "f": field}
+        open_end = match.start(2) - match.start(0)
+        open_tag = _upsert_attr(match.group(0)[:open_end], "data-dispersion", _fmt_disp(value))
+        open_tag = _upsert_attr(open_tag, "data-dispersion-field", field)
+        return open_tag + inner + "</article>"
+
+    stamped = _ARTICLE_BLOCK_RE.sub(repl, masked)
+    if isinstance(book, Mapping):
+        for key, rec in book.items():
+            if not isinstance(rec, tuple) or len(rec) != 2 or rec[0] is None:
+                continue
+            short = _short(str(key))
+            if not short or short in db:
+                continue
+            db[short] = {"v": float(rec[0]), "f": str(rec[1] or "")}
+    stamped = _embed_dispersion_db(stamped, db)
+    return _unmask_scripts(stamped, blocks)
+
+
 def _replace_id_script(html_text: str, script_id: str, script: str) -> str:
     """Drop every copy of ``script_id`` then inject ``script`` before ``</body>``.
 
@@ -2514,14 +3058,19 @@ def _ensure_js(html_text: str) -> str:
     return _replace_id_script(html_text, JS_SCRIPT_ID, script)
 
 
-def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> str:
+def ensure_embedded(
+    html_text: str,
+    ranked: Mapping[str, Any] | None = None,
+    root: Any = None,
+) -> str:
     """Nav buttons + view shells + filled db + JS. Safe on live ~2.7–4.8MB HTML.
 
     ``ranked=None`` must not wipe ``#fd-breakout-db``. View shells stay; legacy
     ``#fd-bb-*`` are emptied. JS is **always** replaced (never skipped when
     ``ranked is None``) so a recopy refreshes ``renderRow``. Live MOM card
     ``metrics.*`` are scraped from the HTML (no ``fd-mom-db``) and stamped
-    onto BB rows at embed time.
+    onto BB rows at embed time. Mom cards also get ``data-dispersion`` from
+    the residual panel / enrich book, else the RS63 already on the card.
     """
     text = html_text or ""
     live_map = extract_live_metrics_map(text)
@@ -2544,4 +3093,4 @@ def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> 
     text = _ensure_js(text)
     if not show_binder_assigned(text):
         text = _ensure_js(text)
-    return text
+    return stamp_dispersion_html(text, root=root)
