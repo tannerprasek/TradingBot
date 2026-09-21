@@ -1924,6 +1924,230 @@ console.log(JSON.stringify({
         self.assertEqual(report["empty"], "No early inflections (0 of 2 passed)")
         self.assertNotIn("this Refresh", report["empty"])
 
+    def test_persist_snapshots_empty_mom_panes_from_streak(self) -> None:
+        """Refresh writes #fd-bb-mom-cache even when the saved Mom grids are empty."""
+        streak = (
+            '{"MXL":{"label":"↑3d>5","streak":3,"side":"above","score":9,"mom_score_d10":5},'
+            '"HIGH":{"label":"↑4d>5","streak":4,"side":"above","score":12,"mom_score_d10":6},'
+            '"SOFT":{"label":"↓4d<5","streak":4,"side":"below","score":4,"mom_score_d10":-5}}'
+        )
+        disp = (
+            '{"MXL":{"v":0.17,"f":"rs63"},"HIGH":{"v":0.2,"f":"rs63"},"SOFT":{"v":-0.06,"f":"rs63"}}'
+        )
+        html = (
+            "<!DOCTYPE html><body>"
+            '<div id="view-mom-up"><div id="mom-up-grid"></div></div>'
+            '<div id="view-mom-down"><div id="mom-down-grid"></div></div>'
+            f'<script type="application/json" id="mom-streak-db">{streak}</script>'
+            f'<script type="application/json" id="fd-dispersion-db">{disp}</script>'
+            "</body>"
+        )
+        out = bo.persist_mom_universe(html)
+        self.assertIn('id="mom-up-grid"></div>', out)
+        self.assertIn('id="fd-bb-mom-cache"', out)
+        self.assertIn('id="fd-bb-mom-db"', out)
+        cache_at = out.find('id="fd-bb-mom-cache"')
+        grid_at = out.find('id="mom-up-grid"')
+        self.assertLess(grid_at, cache_at)
+        cache = out[cache_at:]
+        self.assertIn('data-t="MXL"', cache)
+        self.assertIn('data-t="SOFT"', cache)
+        self.assertIn('data-score="9"', cache)
+        self.assertEqual(out.count('id="fd-bb-mom-cache"'), 1)
+        again = bo.persist_mom_universe(out)
+        self.assertEqual(again.count('data-t="MXL"'), out.count('data-t="MXL"'))
+
+    def test_persist_keeps_existing_cache_when_nothing_to_copy(self) -> None:
+        html = (
+            "<!DOCTYPE html><body>"
+            '<div id="view-mom-up"><div id="mom-up-grid"></div></div>'
+            '<div id="fd-bb-mom-cache" hidden><div class="card" data-t="MXL">'
+            '<span class="sc">9</span></div></div>'
+            "</body>"
+        )
+        out = bo.persist_mom_universe(html)
+        self.assertEqual(out.count('id="fd-bb-mom-cache"'), 1)
+        self.assertIn('data-t="MXL"', out)
+        self.assertIn('id="mom-up-grid"></div>', out)
+
+    def test_jsdom_breakout_paints_from_cache_when_mom_grids_empty(self) -> None:
+        """Active Breakout, Mom grids empty, cache full → MXL paints. Breakdown too."""
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        streak = (
+            '{"MXL":{"label":"↑3d>5","streak":3,"side":"above","score":9,"mom_score_d10":5},'
+            '"HIGH":{"label":"↑4d>5","streak":4,"side":"above","score":12,"mom_score_d10":6},'
+            '"SOFT":{"label":"↓4d<5","streak":4,"side":"below","score":4,"mom_score_d10":-5}}'
+        )
+        disp = (
+            '{"MXL":{"v":0.17,"f":"rs63"},"HIGH":{"v":0.2,"f":"rs63"},"SOFT":{"v":-0.06,"f":"rs63"}}'
+        )
+        page = (
+            "<!DOCTYPE html><body>"
+            '<div id="view-mom-up"><div id="mom-up-grid"></div></div>'
+            '<div id="view-mom-down"><div id="mom-down-grid"></div></div>'
+            '<div id="view-breakout"><div id="breakout-grid"></div></div>'
+            '<div id="view-breakdown"><div id="breakdown-grid"></div></div>'
+            f'<script type="application/json" id="mom-streak-db">{streak}</script>'
+            f'<script type="application/json" id="fd-dispersion-db">{disp}</script>'
+            '<script type="application/json" id="fd-breakout-db">'
+            '{"breakout":[],"breakdown":[]}</script>'
+            "</body>"
+        )
+        cached = bo.persist_mom_universe(page)
+        html = cached.replace(
+            "</body>",
+            "<script>\n" + bo.strip_js() + "\n</script></body>",
+        )
+        self.assertIn('id="fd-bb-mom-cache"', html)
+        self.assertLess(html.find('id="fd-bb-mom-cache"'), html.find('id="fd-breakout-js"') if 'id="fd-breakout-js"' in html else html.find("function snapshotMom"))
+        report = _run_jsdom(
+            html,
+            r"""
+function names(id) {
+  return Array.from(document.querySelectorAll("#" + id + " .card")).filter(function (el) {
+    return !el.querySelector(".card");
+  }).map(function (el) { return el.getAttribute("data-t"); });
+}
+const momN = document.querySelectorAll("#view-mom-up .card, #view-mom-down .card, #mom-up-grid .card, #mom-down-grid .card").length;
+window.__FD_BB_SHOW__("breakout");
+const boGrid = document.getElementById("breakout-grid");
+const boClones = Array.from(boGrid.querySelectorAll(".card")).filter(function (el) {
+  return el.getAttribute("data-fd-bb-clone") === "1";
+});
+window.__FD_BB_SHOW__("breakdown");
+const bdGrid = document.getElementById("breakdown-grid");
+const bdClones = Array.from(bdGrid.querySelectorAll(".card")).filter(function (el) {
+  return el.getAttribute("data-fd-bb-clone") === "1";
+});
+console.log(JSON.stringify({
+  momN: momN,
+  cacheN: (window.__FD_BB_MOM_CACHE__ || []).length,
+  bo: boClones.map(function (el) { return el.getAttribute("data-t"); }),
+  boEmpty: (boGrid.querySelector(".fd-bb-empty") || {}).textContent || "",
+  bd: bdClones.map(function (el) { return el.getAttribute("data-t"); }),
+  bdEmpty: (bdGrid.querySelector(".fd-bb-empty") || {}).textContent || "",
+  momAfter: document.querySelectorAll("#mom-up-grid .card, #mom-down-grid .card").length
+}));
+""",
+        )
+        self.assertEqual(report["momN"], 0, report)
+        self.assertEqual(report["momAfter"], 0, report)
+        self.assertGreaterEqual(report["cacheN"], 1, report)
+        self.assertEqual(report["bo"], ["MXL"], report)
+        self.assertNotIn("HIGH", report["bo"])
+        self.assertEqual(report["boEmpty"], "")
+        self.assertEqual(report["bd"], ["SOFT"], report)
+        self.assertEqual(report["bdEmpty"], "")
+        self.assertNotIn("this Refresh", report["boEmpty"] + report["bdEmpty"])
+
+    def test_jsdom_cache_band_miss_uses_passed_count(self) -> None:
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        html = """<!DOCTYPE html><body>
+<div id="view-mom-up"><div id="mom-up-grid"></div></div>
+<div id="view-mom-down"><div id="mom-down-grid"></div></div>
+<div id="fd-bb-mom-cache" hidden>
+  <div class="card" data-t="HIGH" data-score="12" data-rs63="0.20">
+    <header><h2>HIGH</h2><span class="sc">12</span></header>
+    <span data-mom-score-d10="6">+6</span>
+    <span class="badge" data-key="mom-streak">↑4d&gt;5</span>
+    <span><b>0.20</b> RS63</span>
+  </div>
+</div>
+<div id="view-breakout"><div id="breakout-grid"></div></div>
+<script type="application/json" id="fd-breakout-db">{"breakout":[],"breakdown":[]}</script>
+<script>
+""" + bo.strip_js() + """
+</script></body>"""
+        report = _run_jsdom(
+            html,
+            r"""
+window.__FD_BB_SHOW__("breakout");
+const grid = document.getElementById("breakout-grid");
+console.log(JSON.stringify({
+  momN: document.querySelectorAll("#mom-up-grid .card").length,
+  names: Array.from(grid.querySelectorAll(".card")).map(function (el) { return el.getAttribute("data-t"); }),
+  empty: (grid.querySelector(".fd-bb-empty") || {}).textContent || ""
+}));
+""",
+        )
+        self.assertEqual(report["momN"], 0)
+        self.assertEqual(report["names"], [])
+        self.assertEqual(report["empty"], "No early inflections (0 of 1 passed)")
+        self.assertNotIn("this Refresh", report["empty"])
+
+    def test_jsdom_snapshot_survives_mom_grid_clear(self) -> None:
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        mom = """
+<div id="view-mom-up"><div id="mom-up-grid">
+  <div class="card" data-t="MXL">
+    <header><h2>MXL</h2><span class="sc">9</span></header>
+    <span data-mom-score-d10="5">+5</span>
+    <span class="badge" data-key="mom-streak">↑3d&gt;5</span>
+    <span><b>0.17</b> RS63</span>
+  </div>
+</div></div>
+<div id="view-mom-down"></div>
+<div id="view-breakout"><div id="breakout-grid"></div></div>
+"""
+        html = "<!DOCTYPE html><body>" + mom + "<script>\n" + bo.strip_js() + "\n</script></body>"
+        report = _run_jsdom(
+            html,
+            r"""
+document.getElementById("mom-up-grid").innerHTML = "";
+window.__FD_BB_SHOW__("breakout");
+const grid = document.getElementById("breakout-grid");
+const clones = Array.from(grid.querySelectorAll(".card")).filter(function (el) {
+  return el.getAttribute("data-fd-bb-clone") === "1";
+});
+console.log(JSON.stringify({
+  momN: document.querySelectorAll("#mom-up-grid .card").length,
+  names: clones.map(function (el) { return el.getAttribute("data-t"); }),
+  empty: (grid.querySelector(".fd-bb-empty") || {}).textContent || ""
+}));
+""",
+        )
+        self.assertEqual(report["momN"], 0, report)
+        self.assertEqual(report["names"], ["MXL"], report)
+        self.assertEqual(report["empty"], "")
+
+    def test_jsdom_mom_db_json_paints_without_nodes(self) -> None:
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        html = """<!DOCTYPE html><body>
+<div id="view-mom-up"><div id="mom-up-grid"></div></div>
+<div id="view-mom-down"><div id="mom-down-grid"></div></div>
+<div id="view-breakout"><div id="breakout-grid"></div></div>
+<script type="application/json" id="fd-bb-mom-db">[{"t":"MXL","score":9,"mom_score":9,"mom_score_d10":5,"mom_streak":3,"mom_streak_side":"above","rs63":0.17},{"t":"HIGH","score":12,"mom_score":12,"mom_score_d10":6,"mom_streak":4,"mom_streak_side":"above","rs63":0.2}]</script>
+<script type="application/json" id="fd-breakout-db">{"breakout":[],"breakdown":[]}</script>
+<script>
+""" + bo.strip_js() + """
+</script></body>"""
+        report = _run_jsdom(
+            html,
+            r"""
+window.cardHTML = function (c) {
+  var t = (c && (c.t || c.d)) || "";
+  return '<div class="card" data-t="' + t + '">JSON ' + t + '</div>';
+};
+window.__FD_BB_SHOW__("breakout");
+const grid = document.getElementById("breakout-grid");
+console.log(JSON.stringify({
+  momN: document.querySelectorAll("#mom-up-grid .card, #mom-down-grid .card").length,
+  names: Array.from(grid.querySelectorAll(".card")).map(function (el) { return el.getAttribute("data-t"); }),
+  text: grid.textContent || "",
+  empty: (grid.querySelector(".fd-bb-empty") || {}).textContent || ""
+}));
+""",
+        )
+        self.assertEqual(report["momN"], 0, report)
+        self.assertEqual(report["names"], ["MXL"], report)
+        self.assertIn("JSON MXL", report["text"])
+        self.assertNotIn("HIGH", report["names"])
+        self.assertNotIn("this Refresh", report["empty"])
+
 
 class PaperNavIgnoreTests(unittest.TestCase):
     def test_native_views_omit_paper_and_kindof_returns_empty(self) -> None:
