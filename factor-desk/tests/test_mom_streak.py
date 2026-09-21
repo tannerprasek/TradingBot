@@ -363,7 +363,8 @@ class CardTagTests(unittest.TestCase):
         self.assertIn("d&gt;5", html)  # HTML pill markup still escapes
         self.assertIn("d>5", html)  # #mom-streak-db JSON must keep raw >
         self.assertIn('id="mom-streak-db"', html)
-        self.assertIn("var STRIP_ID", html)
+        self.assertNotIn("var STRIP_ID", html)
+        self.assertNotIn('id="gics-filter-strip"', html)
 
 
 class WriteCombinedSurviveTests(unittest.TestCase):
@@ -413,12 +414,9 @@ class WriteCombinedSurviveTests(unittest.TestCase):
             self.assertIn("Outliers", text)
             self.assertIn("Options", text)
             self.assertNotIn("__GICS_SECTOR_DB__", text)
-            self.assertIn('id="gics-sector-db"', text)
-            self.assertIn("Information Technology", text)
-            self.assertIn("var STRIP_ID", text)
-            self.assertIn("data-t", gf.strip_js())
-            self.assertIn('id="gics-filter-strip"', text)
-            self.assertIn(".gics-hid", text)
+            self.assertNotIn('id="gics-sector-db"', text)
+            self.assertNotIn("var STRIP_ID", text)
+            self.assertNotIn('id="gics-filter-strip"', text)
             self.assertIn(".gchip", text)
             self.assertIn("mom-streak-db", text)
             self.assertNotIn('data-tab="sectors"', text)
@@ -441,10 +439,12 @@ class WriteCombinedSurviveTests(unittest.TestCase):
             dest = write_dash.write(root / "factorbook.html", root=root)
             # write_dash → write_combined; book was not passed so it loads enrich file.
             de.write_enrichment(book, root / de.ENRICH_FILENAME)
+            dest.unlink(missing_ok=True)
             dest = desk_dash.write_combined(root / "factorbook.html", root=root, book=book)
             html = dest.read_text(encoding="utf-8")
             self.assertIn("Financials", html)
-            self.assertIn("var STRIP_ID", html)
+            self.assertNotIn("var STRIP_ID", html)
+            self.assertNotIn('id="gics-filter-strip"', html)
             self.assertIn("Refresh", html)
 
     def test_ensure_embedded_replaces_empty_db(self) -> None:
@@ -454,10 +454,9 @@ class WriteCombinedSurviveTests(unittest.TestCase):
 <script type="application/json" id="gics-sector-db">{}</script>
 </body></html>"""
         out = gf.ensure_embedded(html, {"AAPL US Equity": "Information Technology"})
-        self.assertIn("Information Technology", out)
-        self.assertIn("var STRIP_ID", out)
-        self.assertIn("data-t", out)
-        self.assertNotIn(">{}</script>", out)
+        self.assertNotIn('id="gics-filter-strip"', out)
+        self.assertNotIn('id="gics-sector-db"', out)
+        self.assertNotIn("var STRIP_ID", out)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,12 @@
-"""Book-delta strip: what changed since last successful Refresh.
+"""Book-delta snapshot (since last Refresh). Strip UI is BINNED.
 
-Persists a small gitignored ``desk_snapshot.json`` after each write. The next
-write diffs FLAGS / WATCH / outliers / mom scores / streak sides and paints a
-one-row chip strip. Missing prior snapshot → quiet ``baseline set``.
+Persists a small gitignored ``desk_snapshot.json`` after each write. Diff
+helpers stay for tests / snapshot persist. ``ensure_embedded`` **removes**
+leftover ``#fd-book-delta`` UI (Tanner: BINNED, not polished).
 """
 
 from __future__ import annotations
 
-import html
 import json
 import logging
 import os
@@ -347,13 +346,8 @@ def _script_json(blob: str) -> str:
 
 
 def embed_db(diff: Mapping[str, Any] | None) -> str:
-    payload = {
-        "baseline": bool((diff or {}).get("baseline")),
-        "chips": list((diff or {}).get("chips") or []),
-        "extra": list((diff or {}).get("extra") or []),
-    }
-    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=True, default=str)
-    return f'<script type="application/json" id="{DB_SCRIPT_ID}">{_script_json(blob)}</script>'
+    """No-op. Delta JSON was only used by the BINNED strip UI."""
+    return ""
 
 
 def strip_css() -> str:
@@ -502,105 +496,69 @@ def strip_js() -> str:
 
 
 def host_html(diff: Mapping[str, Any] | None = None) -> str:
-    diff = diff or {}
-    chips = list(diff.get("chips") or [])
-    extra = list(diff.get("extra") or [])
-    kicker = "book" if diff.get("baseline") else "since last Refresh"
-    bits = [
-        f'<div id="{HOST_ID}" class="fd-book-delta" role="status" aria-label="Book changes since last Refresh">',
-        f'<span class="fd-book-delta-kicker">{html.escape(kicker)}</span>',
-    ]
-    for chip in chips:
-        label = html.escape(str(chip.get("label") or ""))
-        cls = html.escape(str(chip.get("cls") or ""))
-        title = html.escape(str(chip.get("title") or ""), quote=True)
-        bits.append(f'<span class="fd-dchip {cls}" title="{title}">{label}</span>')
-    if extra:
-        bits.append('<button type="button" class="fd-book-delta-more">more</button>')
-        for chip in extra:
-            label = html.escape(str(chip.get("label") or ""))
-            cls = html.escape(str(chip.get("cls") or ""))
-            title = html.escape(str(chip.get("title") or ""), quote=True)
-            bits.append(f'<span class="fd-dchip {cls} fd-delta-extra-chip" hidden title="{title}">{label}</span>')
-    bits.append("</div>")
-    return "".join(bits)
+    """No-op. Book-delta strip UI is BINNED — do not emit a host."""
+    return ""
 
 
-def _ensure_css(html_text: str) -> str:
-    css = f'<style id="{CSS_STYLE_ID}">\n{strip_css()}\n</style>\n'
-    text, n = re.subn(
-        rf'<style\b[^>]*\bid=["\']{CSS_STYLE_ID}["\'][^>]*>.*?</style>\s*',
-        lambda _m: css,
-        html_text,
-        count=1,
-        flags=re.I | re.S,
-    )
-    if n:
-        return text
-    if "</head>" in html_text:
-        return html_text.replace("</head>", css + "</head>", 1)
-    return css + html_text
+_HOST_OPEN_RE = re.compile(
+    rf'<(?P<tag>div|span)\b[^>]*\bid=["\']{HOST_ID}["\'][^>]*>',
+    re.I,
+)
+_CSS_RE = re.compile(
+    rf'<style\b[^>]*\bid=["\']{CSS_STYLE_ID}["\'][^>]*>.*?</style>\s*',
+    re.I | re.S,
+)
+_DB_RE = re.compile(
+    rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
+    re.I | re.S,
+)
+_JS_RE = re.compile(
+    rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
+    re.I | re.S,
+)
 
 
-def _ensure_host(html_text: str, diff: Mapping[str, Any] | None) -> str:
-    host = host_html(diff)
-    if re.search(rf'id=["\']{HOST_ID}["\']', html_text, re.I):
-        return re.sub(
-            rf'<div\b[^>]*\bid=["\']{HOST_ID}["\'][^>]*>.*?</div>',
-            host,
-            html_text,
-            count=1,
-            flags=re.I | re.S,
-        )
-    for pat in (
-        r'(<div\b[^>]*\bid=["\']gics-filter-strip["\'][^>]*>.*?</div>)',
-        r"(<nav\b[^>]*>.*?</nav>)",
-        r'(<div\b[^>]*class=["\'][^"\']*(?:filter-strip|filters|chip-row)[^"\']*["\'][^>]*>.*?</div>)',
-        r"(<h1\b[^>]*>.*?</h1>)",
-        r"(<body\b[^>]*>)",
-    ):
-        match = re.search(pat, html_text, re.I | re.S)
-        if match:
-            return html_text[: match.end()] + "\n" + host + html_text[match.end() :]
-    return host + "\n" + html_text
+def _remove_host(html_text: str) -> str:
+    """Drop ``#fd-book-delta`` including nested extra-chip wraps."""
+    text = html_text
+    while True:
+        match = _HOST_OPEN_RE.search(text)
+        if not match:
+            return text
+        tag = match.group("tag")
+        start = match.start()
+        i = match.end()
+        depth = 1
+        open_re = re.compile(rf"<{tag}\b", re.I)
+        close_re = re.compile(rf"</{tag}\s*>", re.I)
+        while i < len(text) and depth:
+            nxt_open = open_re.search(text, i)
+            nxt_close = close_re.search(text, i)
+            if nxt_close is None:
+                return text[:start] + text[match.end() :]
+            if nxt_open and nxt_open.start() < nxt_close.start():
+                depth += 1
+                i = nxt_open.end()
+            else:
+                depth -= 1
+                i = nxt_close.end()
+        text = text[:start] + text[i:]
 
 
-def _ensure_db(html_text: str, diff: Mapping[str, Any] | None) -> str:
-    tag = embed_db(diff)
-    if re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', html_text, re.I):
-        return re.sub(
-            rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>',
-            lambda _m: tag,
-            html_text,
-            count=1,
-            flags=re.I | re.S,
-        )
-    if "</body>" in html_text:
-        return html_text.replace("</body>", tag + "\n</body>", 1)
-    return html_text + tag
-
-
-def _ensure_js(html_text: str) -> str:
-    script = f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
-    text, n = re.subn(
-        rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
-        lambda _m: script,
-        html_text,
-        count=1,
-        flags=re.I | re.S,
-    )
-    if n:
-        return text
-    if "</body>" in html_text:
-        return html_text.replace("</body>", script + "</body>", 1)
-    return html_text + script
+def strip_ui(html_text: str, diff: Mapping[str, Any] | None = None) -> str:
+    """Remove book-delta strip host / CSS / JS / db from HTML."""
+    text = html_text or ""
+    text = _CSS_RE.sub("", text)
+    text = _remove_host(text)
+    text = _DB_RE.sub("", text)
+    text = _JS_RE.sub("", text)
+    return text
 
 
 def ensure_embedded(html_text: str, diff: Mapping[str, Any] | None = None) -> str:
-    """Strip host + chips + JS after every HTML write."""
-    text = html_text or ""
-    text = _ensure_css(text)
-    text = _ensure_host(text, diff)
-    text = _ensure_db(text, diff)
-    text = _ensure_js(text)
-    return text
+    """No-op embed: Refresh path **removes** leftover book-delta strip UI (BINNED).
+
+    Live ``write_combined`` still calls this so a prior bake cannot survive
+    the next Refresh. ``diff`` is ignored.
+    """
+    return strip_ui(html_text, diff)

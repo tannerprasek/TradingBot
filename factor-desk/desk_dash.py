@@ -34,7 +34,8 @@ LOG = logging.getLogger("desk_dash")
 HTML_NAME = "factorbook.html"
 
 # Live factorbook.html is ~2.7MB. Never replace that class of file with the
-# skinny enrich-only grid — patch GICS + streak into the existing HTML.
+# skinny enrich-only grid — patch streak / tabs into the existing HTML.
+# GICS sector-filter strip + book-delta strip are BINNED (removed, not polished).
 LIVE_MIN_BYTES = 1_000_000
 LIVE_NAV_MARKERS = (
     "Refresh",
@@ -681,19 +682,11 @@ def render_html(
     asof = html.escape(str((book or {}).get("asof") or ""))
     meta = (book or {}).get("meta") if isinstance(book, Mapping) else {}
     intra = bool((meta or {}).get("intraday")) if isinstance(meta, Mapping) else False
-    sectors = gics_filter.sectors_present(cards, cache)
-    db = gics_filter.filled_sector_db(cards, cache=cache, book=book)
     streak_map = mom_streak.streak_db(cards, hist=hist)
     chart_map = chart_marks.chart_db(cards)
     hitch_map = desk_hitch.hitch_db(cards, hitch_index)
     paper_marks = paper_trade.marks_db(cards, book=book)
     ss_ranked = s_score.rank_book(cards, root=root, write_panel_file=True)
-    gics_note = ""
-    if rows and not sectors:
-        gics_note = (
-            '<p class="meta">No GICS sector names in the book. Optional one-shot: '
-            "<code>python dapi_enrich.py --gics-once</code> (not part of Refresh).</p>"
-        )
     drill = ""
     for card in cards:
         detail = chart_marks.render_detail_svg(card)
@@ -743,11 +736,9 @@ def render_html(
     {NAV_CSS}
     {PILL_CSS}
     {card_render.strip_css()}
-    {gics_filter.strip_css()}
     {mom_streak.streak_css()}
     {chart_marks.strip_css()}
     {breakout.strip_css()}
-    {book_delta.strip_css()}
     {desk_hitch.strip_css()}
     {paper_trade.strip_css()}
     {s_score.strip_css()}
@@ -756,10 +747,7 @@ def render_html(
 <body>
   {NAV_HTML}
   <h1>{html.escape(title)}</h1>
-  <p class="meta">asof {asof or "—"} · Refresh / Momentum Up / Down / Breakout / Breakdown · GICS chips + mom streak vs 5 · intraday={"on" if intra else "off"}</p>
-  {gics_filter.render_strip(sectors)}
-    {book_delta.host_html(delta)}
-  {gics_note}
+  <p class="meta">asof {asof or "—"} · Refresh / Momentum Up / Down / Breakout / Breakdown · mom streak vs 5 · intraday={"on" if intra else "off"}</p>
   {empty}
   {drill}
   {breakout.panes_html(ranked)}
@@ -770,17 +758,12 @@ def render_html(
     {"".join(rows)}
   </div>
   </div>
-  {gics_filter.embed_db(db)}
   {mom_streak.embed_db(streak_map)}
   {chart_marks.embed_db(chart_map)}
   {breakout.embed_db(ranked)}
-  {book_delta.embed_db(delta)}
   {desk_hitch.embed_db(hitch_map)}
   {paper_trade.embed_db(paper_marks)}
   {s_score.embed_db(ss_ranked)}
-  <script>
-  {gics_filter.strip_js()}
-  </script>
   <script>
   {mom_streak.strip_js()}
   </script>
@@ -790,12 +773,12 @@ def render_html(
 </body>
 </html>
 """
-    html_text = gics_filter.ensure_embedded(html_text, db)
+    html_text = gics_filter.ensure_embedded(html_text, None)  # BINNED: remove leftover GICS strip
     html_text = mom_streak.ensure_embedded(html_text, streak_map)
     html_text = chart_marks.ensure_embedded(html_text, chart_map)
     html_text = card_render.ensure_embedded(html_text)
     html_text = breakout.ensure_embedded(html_text, ranked)
-    html_text = book_delta.ensure_embedded(html_text, delta)
+    html_text = book_delta.ensure_embedded(html_text, None)  # BINNED: remove leftover book-delta strip
     html_text = desk_hitch.ensure_embedded(html_text, hitch_map)
     html_text = paper_trade.ensure_embedded(html_text, paper_marks)
     html_text = s_score.ensure_embedded(html_text, ss_ranked)
@@ -810,10 +793,10 @@ def write_combined(
     book: Mapping[str, Any] | None = None,
     html: str | None = None,
 ) -> Path:
-    """Write ``factorbook.html``. Always embeds filled GICS db + strip JS.
+    """Write ``factorbook.html``. Patch live fat chrome; never emit skinny grid.
 
-    If a live (~2.7MB / nav) dashboard already exists, **patch** it in place.
-    Never replace it with the skinny enrich-only grid.
+    GICS sector-filter strip and book-delta strip are BINNED: leftover hosts
+    are removed on every write. G1–G12 group chips stay.
     """
     base = Path(root) if root is not None else HERE
     dest = Path(path) if path is not None else base / HTML_NAME
@@ -860,15 +843,12 @@ def write_combined(
 
     text = _ensure_nav(text)
     text = _ensure_options_refresh_ui(text)
-    mapping = gics_filter.filled_sector_db(cards, cache=cache, book=book)
-    if gics_filter.GICS_SECTOR_DB_PLACEHOLDER in text:
-        text = text.replace(gics_filter.GICS_SECTOR_DB_PLACEHOLDER, _gics_sector_db_json(book, cards, cache, base))
-    text = gics_filter.ensure_embedded(text, mapping)
+    text = gics_filter.ensure_embedded(text, None)  # BINNED: remove leftover GICS strip
     text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards, hist=hist))
     text = chart_marks.ensure_embedded(text, chart_marks.chart_db(cards))
     text = card_render.ensure_embedded(text)
     text = breakout.ensure_embedded(text, ranked)
-    text = book_delta.ensure_embedded(text, delta)
+    text = book_delta.ensure_embedded(text, None)  # BINNED: remove leftover book-delta strip
     text = desk_hitch.ensure_embedded(text, hitch_map)
     text = paper_trade.ensure_embedded(text, paper_marks)
     text = s_score.ensure_embedded(text, ss_ranked)

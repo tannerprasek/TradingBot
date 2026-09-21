@@ -109,7 +109,7 @@ Implied vol for the IV chip = `iv_mid` if present, else mean(call, put) hist IV,
 
 MOM rows also get `residual_20d`, `watch_hint`, `beta_field` when the name exists in the book.
 
-GICS chips are a **filter strip**, not an enrich layer. Refresh does not pull `GICS_SECTOR_NAME`. See [GICS-FILTER.md](GICS-FILTER.md). Momentum streak vs 5: [MOM-STREAK.md](MOM-STREAK.md).
+GICS `gics_sector_name` is card data, **not** a filter strip. The GICS strip is BINNED. Refresh does not pull `GICS_SECTOR_NAME`. See [GICS-FILTER.md](GICS-FILTER.md). Momentum streak vs 5: [MOM-STREAK.md](MOM-STREAK.md).
 
 ## Options score v2 (unchanged)
 

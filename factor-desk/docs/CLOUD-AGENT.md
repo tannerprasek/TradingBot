@@ -30,15 +30,15 @@ See [DAPI-ENRICH.md](DAPI-ENRICH.md) for field candidates, chip thresholds, and 
 
 Never invent Bloomberg numbers. Null + reason. Capacity → skip enrich, continue Refresh.
 
-## GICS sector chips
+## GICS names (filter strip BINNED)
 
-Home filter-strip chips (G1–G12 language). Read `gics_sector_name` from enrichment. Do **not** add a Sectors tab, `sectors.json`, or a GICS pull on Refresh. Optional one-shot: `python dapi_enrich.py --gics-once`.
+Card `gics_sector_name` from enrichment is fine. Do **not** add a Sectors tab, `sectors.json`, a GICS pull on Refresh, or a `#gics-filter-strip`. Optional one-shot: `python dapi_enrich.py --gics-once`.
 
-`write_dash` / `desk_dash.write_combined` must call `gics_filter.ensure_embedded` so `#gics-sector-db` + strip JS (`STRIP_ID`) survive every HTML write. Live ~2.7MB factorbook with Refresh / Momentum Up / Down / Outliers / Options is **patched**, never replaced by the skinny grid. See [GICS-FILTER.md](GICS-FILTER.md).
+`write_dash` / `desk_dash.write_combined` calls `gics_filter.ensure_embedded` to **remove** leftover GICS strip UI. Live ~2.7MB factorbook is **patched**, never replaced by the skinny grid. G1–G12 stay. See [GICS-FILTER.md](GICS-FILTER.md).
 
-## Breakout / Breakdown + book delta + hitch
+## Breakout / Breakdown + hitch (book-delta strip BINNED)
 
-Mid-score climbers / crackers as home tabs (not maxed MOM). `card_render.ensure_embedded` (shared MOM `cardHTML` wrap) then `breakout.ensure_embedded` + `book_delta.ensure_embedded` + `desk_hitch.ensure_embedded` on every HTML write. Breakout/Breakdown/Outliers must mount the same portable card — tabs only filter/rank. See [BREAKOUT-BREAKDOWN.md](BREAKOUT-BREAKDOWN.md). Do **not** reintroduce a Sectors tab. Recopy `card_render.py` and `breakout.py`; do not wholesale replace live `desk_dash.py`.
+Mid-score climbers / crackers as home tabs (not maxed MOM). `card_render.ensure_embedded` (shared MOM `cardHTML` wrap) then `breakout.ensure_embedded` + `book_delta.ensure_embedded` (now **removes** leftover `#fd-book-delta`) + `desk_hitch.ensure_embedded` on every HTML write. Breakout/Breakdown/Outliers must mount the same portable card — tabs only filter/rank. See [BREAKOUT-BREAKDOWN.md](BREAKOUT-BREAKDOWN.md). Do **not** reintroduce a Sectors tab. Recopy `card_render.py` and `breakout.py`; do not wholesale replace live `desk_dash.py`.
 
 ## Paper trading
 

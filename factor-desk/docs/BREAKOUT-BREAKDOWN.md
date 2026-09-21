@@ -65,6 +65,6 @@ Drill is `article.card.onclick → selectTicker`. Legacy `#fd-bb-breakout` / `#f
 
 ## Related
 
-- Book-delta strip (since last Refresh): [`book_delta.py`](../book_delta.py), gitignored `desk_snapshot.json`
+- Book-delta snapshot persist (strip UI BINNED): [`book_delta.py`](../book_delta.py), gitignored `desk_snapshot.json`
 - Desk Analyst hitch pills: [`desk_hitch.py`](../desk_hitch.py), `FACTOR_DESK_IDEAS_DIR`
 - Desktop copy list: [DEPLOY-HOOKS.md](../DEPLOY-HOOKS.md) §9

@@ -48,4 +48,4 @@ python dapi_enrich.py --gics-once --tickers AAPL,MSFT
 
 `--gics-once` is a **manual** GICS sector fill. It is not on the Refresh pipeline. See [docs/GICS-FILTER.md](docs/GICS-FILTER.md).
 
-Rebuild (`write_dash` / `desk_dash.write_combined`) always re-embeds filled `#gics-sector-db` + strip JS, mom streak tags, and the Experimental residual S-score tab. Live ~2.7MB `factorbook.html` is patched, not replaced. Residual S-score is Experimental-only (confirm panel depth; PIT not claimed). See [docs/S-SCORE.md](docs/S-SCORE.md).
+Rebuild (`write_dash` / `desk_dash.write_combined`) patches mom streak tags and the Experimental residual S-score tab, and **removes** leftover GICS / book-delta strip UI. Live ~2.7MB `factorbook.html` is patched, not replaced. Residual S-score is Experimental-only (confirm panel depth; PIT not claimed). See [docs/S-SCORE.md](docs/S-SCORE.md).
