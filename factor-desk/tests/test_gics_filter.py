@@ -243,14 +243,16 @@ class HtmlChipTests(unittest.TestCase):
         self.assertIn(">All</button>", out)
         self.assertIn(">EN</button>", out)
 
-    def test_unique_sectors_js_uses_db_not_on_screen_cards(self) -> None:
+    def test_unique_sectors_js_map_first_then_cards(self) -> None:
         js = gf.strip_js()
         start = js.index("function uniqueSectors")
         end = js.index("function ensureStrip")
         body = js[start:end]
-        self.assertNotIn("cardNodes", body)
         self.assertIn("ORDER", body)
-        self.assertIn("#gics-sector-db", body)
+        map_at = body.index("Object.keys(map")
+        cards_at = body.index("cardNodes")
+        self.assertLess(map_at, cards_at, "have must come from map values before cards")
+        self.assertIn("Never drop Energy", body)
         stale = (
             "<html><body>"
             '<div id="gics-filter-strip" class="filter-strip gics-chips"></div>'
@@ -265,7 +267,8 @@ class HtmlChipTests(unittest.TestCase):
         self.assertEqual(out.count("function uniqueSectors"), 1)
         start = out.index("function uniqueSectors")
         end = out.index("function ensureStrip")
-        self.assertNotIn("cardNodes", out[start:end])
+        body = out[start:end]
+        self.assertLess(body.index("Object.keys(map"), body.index("cardNodes"))
         self.assertIn(">EN</button>", out)
         self.assertIn(f'id="{gf.JS_SCRIPT_ID}"', out)
 

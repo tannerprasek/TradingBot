@@ -293,13 +293,18 @@ def strip_js() -> str:
   }
 
   function uniqueSectors(map) {
-    /* Chip bar = All + ORDER ∩ #gics-sector-db. Do not drop Energy because
-       home cards omit it. Filtering cards still uses selected + sectorOf. */
+    /* have = map values first (ORDER ∩ DB), then on-screen cards.
+       Never drop Energy when it is in the DB just because home cards omit it. */
     var have = {};
     var keys = Object.keys(map || {});
     for (var k = 0; k < keys.length; k++) {
       var name = map[keys[k]];
       if (name) have[name] = true;
+    }
+    var cards = cardNodes();
+    for (var i = 0; i < cards.length; i++) {
+      var s = sectorOf(cards[i], map);
+      if (s) have[s] = true;
     }
     var known = [];
     for (var o = 0; o < ORDER.length; o++) if (have[ORDER[o]]) known.push(ORDER[o]);
@@ -487,8 +492,9 @@ def _ensure_css(html_text: str) -> str:
 
 
 def _ensure_host(html_text: str, mapping: Mapping[str, str] | None = None) -> str:
-    """Always bake All + ORDER ∩ DB chips. Never leave an empty host in place."""
-    host = render_strip(sectors_from_mapping(mapping))
+    """Replace empty-or-any ``#gics-filter-strip`` with baked chips. No early-return."""
+    sectors = sectors_from_mapping(mapping)  # GICS_SECTOR_ORDER ∩ mapping
+    host = render_strip(sectors)  # All + sectors
     match = _HOST_RE.search(html_text)
     if match:
         return html_text[: match.start()] + host + html_text[match.end() :]
@@ -531,7 +537,7 @@ def _ensure_db(html_text: str, mapping: Mapping[str, str] | None) -> str:
 
 
 def _ensure_js(html_text: str) -> str:
-    """Always replace strip JS so uniqueSectors stays ORDER ∩ DB (not cards)."""
+    """Always replace strip JS so uniqueSectors stays map-first, then cards."""
     script = f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
     text, n = _JS_ID_RE.subn(lambda _m: script, html_text, count=1)
     if n:
