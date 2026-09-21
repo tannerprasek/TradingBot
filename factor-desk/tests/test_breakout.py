@@ -614,6 +614,8 @@ class EmbedTests(unittest.TestCase):
         self.assertIn('id="breakdown-grid"', out)
         self.assertIn('class="grid dense"', out)
         self.assertIn('<div class="ph">Breakout</div>', out)
+        self.assertIn(bo.NOTE_COPY, out)
+        self.assertIn("not a trade signal", out)
         self.assertNotRegex(out, r'<article\b[^>]*fd-bb-card')
         self.assertNotIn('data-tab="sectors"', out)
         self.assertNotIn("&gt;", bo.embed_db(ranked))
@@ -754,12 +756,40 @@ function syncNav() {}
         self.assertIn('id="breakdown-grid"', host)
         self.assertIn('<div class="ph">Breakout</div>', host)
         self.assertIn('<div class="ph">Breakdown</div>', host)
+        self.assertEqual(host.count(bo.NOTE_COPY), 2)
+        self.assertIn('class="fd-bb-note"', host)
+        self.assertIn('class="fd-bb-split"', host)
+        self.assertLess(host.find('id="breakout-grid"'), host.find("fd-bb-note"))
         self.assertIn('id="fd-bb-breakout"', host)
         self.assertIn("hidden", host)
         self.assertNotIn("CLIMB", host)
         self.assertNotIn("CRACK", host)
         self.assertNotIn("fd-bb-card", host)
         self.assertNotIn("No breakout names", host)
+
+    def test_side_note_stays_on_breakout_panes_not_momentum(self) -> None:
+        html = """<!DOCTYPE html><html><head></head><body>
+<nav><button>Momentum Down</button></nav>
+<div id="view-mom-up" class="view-pane hide"><div class="ph">Momentum Up</div><div class="grid dense" id="mom-up-grid"></div></div>
+<div id="view-breakout" class="view-pane hide"><div class="ph">Breakout</div><div class="grid dense" id="breakout-grid"></div></div>
+<div id="view-breakdown" class="view-pane hide"><div class="ph">Breakdown</div><div class="grid dense" id="breakdown-grid"></div></div>
+</body></html>"""
+        out = bo.ensure_embedded(html, None)
+
+        def chunk(view_id: str) -> str:
+            span = bo._find_tag_span(out, view_id)
+            self.assertIsNotNone(span)
+            return out[span[0] : span[1]]
+
+        for view_id, grid_id in (("view-breakout", "breakout-grid"), ("view-breakdown", "breakdown-grid")):
+            body = chunk(view_id)
+            self.assertIn(bo.NOTE_COPY, body)
+            self.assertIn("fd-bb-split", body)
+            self.assertLess(body.find(grid_id), body.find("fd-bb-note"))
+        mom = chunk("view-mom-up")
+        self.assertNotIn(bo.NOTE_COPY, mom)
+        self.assertNotIn("fd-bb-note", mom)
+        self.assertNotIn("fd-bb-split", mom)
 
     def test_ensure_embedded_none_does_not_wipe_ranked_panes(self) -> None:
         html = """<!DOCTYPE html><html><body>

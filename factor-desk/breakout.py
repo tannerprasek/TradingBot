@@ -11,6 +11,7 @@ from ``mom_streak`` (already on the card when hist is long enough).
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -108,6 +109,18 @@ VIEW_BREAKOUT_ID = "view-breakout"
 VIEW_BREAKDOWN_ID = "view-breakdown"
 GRID_BREAKOUT_ID = "breakout-grid"
 GRID_BREAKDOWN_ID = "breakdown-grid"
+NOTE_CLASS = "fd-bb-note"
+SPLIT_CLASS = "fd-bb-split"
+# Right-rail copy on both panes. Gates live in the constants above; this is display only.
+NOTE_COPY = (
+    "Breakout and Breakdown keep early inflections only. "
+    "A name must clear all four gates: score in band (Breakout 7–10, Breakdown 2–6), "
+    "10-trading-day composite score change beyond ±3 (missing Δ fails), "
+    "a fresh streak vs 5 (1–15 days on the correct side of 5), "
+    "and same-sign factor dispersion (prefer residual_20d; else RS63). "
+    "Lists are capped and ranked by an inflection score "
+    "(band edge, |Δ10d|, streak freshness, dispersion size) — not a trade signal."
+)
 HID_CLASS = "fd-bb-hid"
 
 NAV_BREAKOUT_ID = "fd-nav-breakout"
@@ -1202,6 +1215,36 @@ article.fd-bb-card, .fd-bb-card {{
 }}
 #view-breakout.hide, #view-breakdown.hide {{ display: none !important; }}
 .{HID_CLASS} {{ display: none !important; }}
+#view-breakout .{SPLIT_CLASS},
+#view-breakdown .{SPLIT_CLASS} {{
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}}
+#view-breakout .{SPLIT_CLASS} > .grid,
+#view-breakdown .{SPLIT_CLASS} > .grid {{
+  flex: 1 1 auto;
+  min-width: 0;
+}}
+#view-breakout .{NOTE_CLASS},
+#view-breakdown .{NOTE_CLASS} {{
+  flex: 0 0 280px;
+  width: 280px;
+  box-sizing: border-box;
+  margin: 2px 0 0;
+  padding: 8px 10px;
+  border: 1px solid #1f2937;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font: 11px/1.45 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  position: sticky;
+  top: 10px;
+}}
+#view-breakout .{NOTE_CLASS} p,
+#view-breakdown .{NOTE_CLASS} p {{
+  margin: 0;
+}}
 .fd-bb-empty {{
   grid-column: 1 / -1;
   color: #9ca3af;
@@ -1731,27 +1774,61 @@ def strip_js() -> str:
 """.strip()
 
 
+def note_html() -> str:
+    """One quiet paragraph. Same copy on Breakout and Breakdown; not a help page."""
+    return f'<aside class="{NOTE_CLASS}"><p>{html.escape(NOTE_COPY)}</p></aside>'
+
+
+def _pane_shell(view_id: str, title: str, grid_id: str, data_view: str) -> str:
+    return "\n".join(
+        [
+            f'<div id="{view_id}" class="view-pane hide" data-view="{data_view}">',
+            f'  <div class="ph">{html.escape(title)}</div>',
+            f'  <div class="{SPLIT_CLASS}">',
+            f'    <div class="grid dense" id="{grid_id}"></div>',
+            f"    {note_html()}",
+            "  </div>",
+            "</div>",
+        ]
+    )
+
+
 def panes_html(ranked: Mapping[str, Any] | None = None, article_html=None) -> str:
     """Momentum-style view shells. Grids are filled by live ``cardHTML(momCard)``.
 
     ``ranked`` / ``article_html`` are unused (kept for call-site compatibility).
     Legacy ``#fd-bb-*`` stay empty so old CSS cannot paint stub articles.
+    A right-hand note sits beside each grid. It is inside the view pane, so it
+    shows only while that tab is open.
     """
     _ = (ranked, article_html)
     return "\n".join(
         [
-            f'<div id="{VIEW_BREAKOUT_ID}" class="view-pane hide" data-view="breakout">',
-            '  <div class="ph">Breakout</div>',
-            f'  <div class="grid dense" id="{GRID_BREAKOUT_ID}"></div>',
-            "</div>",
-            f'<div id="{VIEW_BREAKDOWN_ID}" class="view-pane hide" data-view="breakdown">',
-            '  <div class="ph">Breakdown</div>',
-            f'  <div class="grid dense" id="{GRID_BREAKDOWN_ID}"></div>',
-            "</div>",
+            _pane_shell(VIEW_BREAKOUT_ID, "Breakout", GRID_BREAKOUT_ID, "breakout"),
+            _pane_shell(VIEW_BREAKDOWN_ID, "Breakdown", GRID_BREAKDOWN_ID, "breakdown"),
             f'<div id="{PANE_BREAKOUT_ID}" class="fd-bb-pane hide" hidden aria-hidden="true"></div>',
             f'<div id="{PANE_BREAKDOWN_ID}" class="fd-bb-pane hide" hidden aria-hidden="true"></div>',
         ]
     )
+
+
+def _ensure_side_note(html_text: str, view_id: str, grid_id: str) -> str:
+    """Put the right-rail note in an existing pane that predates it. Mom panes are untouched."""
+    span = _find_tag_span(html_text, view_id)
+    if not span:
+        return html_text
+    chunk = html_text[span[0] : span[1]]
+    if NOTE_CLASS in chunk:
+        return html_text
+    grid = _find_tag_span(html_text, grid_id)
+    note = note_html()
+    if grid and span[0] <= grid[0] < span[1]:
+        wrapped = f'<div class="{SPLIT_CLASS}">\n{html_text[grid[0] : grid[1]]}\n{note}\n</div>'
+        return html_text[: grid[0]] + wrapped + html_text[grid[1] :]
+    close = html_text.rfind("</div>", span[0], span[1])
+    if close < 0:
+        return html_text
+    return html_text[:close] + "\n" + note + "\n" + html_text[close:]
 
 
 def _ensure_css(html_text: str) -> str:
@@ -2088,5 +2165,7 @@ def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> 
             text = _ensure_db(text, {"breakout": [], "breakdown": []}, live_map=live_map)
         elif live_map:
             text = _enrich_existing_db(text, live_map)
+    text = _ensure_side_note(text, VIEW_BREAKOUT_ID, GRID_BREAKOUT_ID)
+    text = _ensure_side_note(text, VIEW_BREAKDOWN_ID, GRID_BREAKDOWN_ID)
     text = _ensure_js(text)
     return text

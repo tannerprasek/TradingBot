@@ -43,7 +43,7 @@ Display cap is **24** per side. That cap is a backstop — the gates are what ke
 
 ## UI
 
-Top-nav **Breakout** / **Breakdown** sit beside Momentum Up / Down. Tabs **only rank/filter**. Clicking a tab fills `#view-breakout` / `#view-breakdown` (`.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`) with the **same card chrome as Momentum Up/Down**:
+Top-nav **Breakout** / **Breakdown** sit beside Momentum Up / Down. Tabs **only rank/filter**. Clicking a tab fills `#view-breakout` / `#view-breakdown` (`.ph` + `.grid.dense` `#breakout-grid` / `#breakdown-grid`) with the **same card chrome as Momentum Up/Down**. Each of those two panes also has a quiet right-hand note (`.fd-bb-note`) stating the four gates. It is inside the view, so it shows only while that tab is open — not on Home or Momentum.
 
 - Ranked JSON (`#fd-breakout-db`) carries top-level numeric `day` / `r20` / `rs63` / `atr_pct` **and** a nested `metrics` blob (`r20_pct` / `rs_63` / `atr_pct`) — the shape live Momentum `cardHTML` actually reads (`c.metrics.r20_pct`, not top-level `r20`). Returns are decimals (`0.1277` → desk `fmtPct` → `12.8%`). `atr_pct` is already percent points (~2–5); do **not** `*100` again (`2.3` stays `2.3%`, not `230%`). Prefer `card.metrics` from the live book; else compute from `px_series` / `prices_long.csv` / live `px.by`.
 - Live Desktop has **no** `#fd-mom-db`. `ensure_embedded` scrapes the ~396 embedded MOM card objects (`"metrics":{..."r20_pct":...}`) out of factorbook HTML and stamps those numbers onto ranked BB rows at rank/embed time (and onto an existing `#fd-breakout-db` when `ranked=None`).
