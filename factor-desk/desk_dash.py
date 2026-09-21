@@ -1984,7 +1984,7 @@ def render_html(
     html_text = mom_streak.ensure_embedded(html_text, streak_map)
     html_text = chart_marks.ensure_embedded(html_text, chart_map)
     html_text = card_render.ensure_embedded(html_text)
-    html_text = breakout.ensure_embedded(html_text, ranked)
+    html_text = breakout.ensure_embedded(html_text, ranked, cards=cards)
     html_text = book_delta.ensure_embedded(html_text, None)  # BINNED: remove leftover book-delta strip
     html_text = desk_hitch.ensure_embedded(html_text, hitch_map)
     html_text = paper_trade.ensure_embedded(html_text, paper_marks)
@@ -2054,7 +2054,7 @@ def write_combined(
     text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards, hist=hist))
     text = chart_marks.ensure_embedded(text, chart_marks.chart_db(cards))
     text = card_render.ensure_embedded(text)
-    text = breakout.ensure_embedded(text, ranked)
+    text = breakout.ensure_embedded(text, ranked, cards=cards)
     text = book_delta.ensure_embedded(text, None)  # BINNED: remove leftover book-delta strip
     text = desk_hitch.ensure_embedded(text, hitch_map)
     text = paper_trade.ensure_embedded(text, paper_marks)

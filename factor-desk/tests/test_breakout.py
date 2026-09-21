@@ -2149,6 +2149,373 @@ console.log(JSON.stringify({
         self.assertNotIn("this Refresh", report["empty"])
 
 
+class MomFullCardTests(unittest.TestCase):
+    """Thin streak rows must not paint. Breakout uses the baked full Mom card."""
+
+    def test_js_literal_keeps_chrome_and_drops_series(self) -> None:
+        blob = (
+            '{t:"LRCX", score:4, metrics:{r20_pct:-0.082, rs_63:-0.041, atr_pct:2.4},'
+            ' status:"Weak / fading", pills:[{label:"IV RICH", cls:"iv-rich", on:true}],'
+            " factor_residual:-0.04, px_series:[1,2,3],"
+            " paint:function(){ return {a:1}; },}"
+        )
+        got = bo._js_literal_to_py(blob)
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertEqual(got["metrics"]["r20_pct"], -0.082)
+        self.assertEqual(got["metrics"]["atr_pct"], 2.4)
+        self.assertTrue(got["pills"][0]["on"])
+        self.assertNotIn("px_series", got)
+        self.assertNotIn("paint", got)
+        self.assertTrue(bo.is_dense_card(got))
+        thin = {
+            "t": "LRCX",
+            "score": 4,
+            "mom_score": 4,
+            "mom_score_d10": -5,
+            "mom_streak": 4,
+            "label": "↓4d<5",
+            "factor_residual": -0.04,
+        }
+        self.assertFalse(bo.is_dense_card(thin))
+
+    def test_slim_fills_metrics_from_closes_without_keeping_series(self) -> None:
+        closes = [100.0 + i for i in range(80)]
+        card = {
+            "t": "LRCX",
+            "ticker": "LRCX US Equity",
+            "status": "Weak / fading",
+            "pills": [{"key": "vol", "label": "IV RICH", "on": True}],
+            "px_series": closes,
+        }
+        slim = bo.slim_mom_card(card)
+        self.assertNotIn("px_series", slim)
+        self.assertIsInstance(slim["metrics"]["r20_pct"], float)
+        self.assertIsInstance(slim["metrics"]["atr_pct"], float)
+        self.assertNotEqual(slim["metrics"]["r20_pct"], None)
+        self.assertTrue(bo.is_dense_card(slim))
+
+    def test_persist_bakes_full_index_and_leaves_streak_rows_thin(self) -> None:
+        streak = (
+            '{"LRCX":{"label":"\\u21934d<5","streak":4,"side":"below","score":4,"mom_score_d10":-5},'
+            '"HIGH":{"label":"\\u21914d>5","streak":4,"side":"above","score":12,"mom_score_d10":6}}'
+        )
+        disp = '{"LRCX":{"v":-0.04,"f":"factor_residual"},"HIGH":{"v":0.2,"f":"factor_residual"}}'
+        html = (
+            "<!DOCTYPE html><body>"
+            '<div id="view-mom-up"><div id="mom-up-grid"></div></div>'
+            '<div id="view-mom-down"><div id="mom-down-grid"></div></div>'
+            f'<script type="application/json" id="mom-streak-db">{streak}</script>'
+            f'<script type="application/json" id="fd-dispersion-db">{disp}</script>'
+            "<script>var MOMUP=["
+            '{t:"LRCX", ticker:"LRCX US Equity", score:4, mom_score_d10:-5, mom_streak:4,'
+            ' mom_streak_side:"below", status:"Weak / fading", trend:"Trending down",'
+            ' blurb:"below key MAs", flow_line:"supply",'
+            " metrics:{r20_pct:-0.082, rs_63:-0.041, atr_pct:2.4},"
+            ' pills:[{key:"vol", label:"IV RICH", cls:"iv-rich", on:true}],'
+            ' tg:{"MA FAN":true,"GAP":false}}'
+            "];</script></body>"
+        )
+        out = bo.persist_mom_universe(html)
+        self.assertIn('id="fd-bb-mom-db"', out)
+        self.assertIn('id="fd-bb-mom-full-db"', out)
+        thin = json.loads(re.search(r'id="fd-bb-mom-db">(.*?)</script>', out, re.S).group(1))
+        full = json.loads(re.search(r'id="fd-bb-mom-full-db">(.*?)</script>', out, re.S).group(1))
+        thin_lrcx = next(row for row in thin if row["t"] == "LRCX")
+        self.assertNotIn("pills", thin_lrcx)
+        self.assertNotIn("status", thin_lrcx)
+        self.assertNotIn("metrics", thin_lrcx)
+        full_by = {row["t"]: row for row in full}
+        self.assertIn("LRCX", full_by)
+        self.assertNotIn("HIGH", full_by)
+        self.assertEqual(full_by["LRCX"]["metrics"]["r20_pct"], -0.082)
+        self.assertEqual(full_by["LRCX"]["metrics"]["rs_63"], -0.041)
+        self.assertEqual(full_by["LRCX"]["metrics"]["atr_pct"], 2.4)
+        self.assertEqual(full_by["LRCX"]["status"], "Weak / fading")
+        self.assertEqual(full_by["LRCX"]["blurb"], "below key MAs")
+        self.assertTrue(full_by["LRCX"]["pills"][0]["on"])
+        self.assertEqual(full_by["LRCX"]["factor_residual"], -0.04)
+
+    def _dense_page(self) -> str:
+        thin = [
+            {
+                "t": "LRCX",
+                "ticker": "LRCX US Equity",
+                "score": 4,
+                "mom_score": 4,
+                "mom_score_d10": -5,
+                "mom_streak": 4,
+                "mom_streak_side": "below",
+                "label": "↓4d<5",
+                "factor_residual": -0.04,
+            },
+            {
+                "t": "JPM",
+                "ticker": "JPM US Equity",
+                "score": 3,
+                "mom_score": 3,
+                "mom_score_d10": -4,
+                "mom_streak": 2,
+                "mom_streak_side": "below",
+                "label": "↓2d<5",
+                "factor_residual": -0.02,
+            },
+            {
+                "t": "HIGH",
+                "ticker": "HIGH US Equity",
+                "score": 12,
+                "mom_score": 12,
+                "mom_score_d10": 6,
+                "mom_streak": 4,
+                "mom_streak_side": "above",
+                "label": "↑4d>5",
+                "factor_residual": 0.2,
+            },
+        ]
+        full = [
+            {
+                "t": "LRCX",
+                "ticker": "LRCX US Equity",
+                "score": 4,
+                "mom_score": 4,
+                "mom_score_d10": -5,
+                "mom_streak": 4,
+                "mom_streak_side": "below",
+                "factor_residual": -0.04,
+                "status": "Weak / fading",
+                "trend": "Trending down",
+                "blurb": "below key MAs",
+                "flow_line": "supply",
+                "metrics": {"r20_pct": -0.082, "rs_63": -0.041, "atr_pct": 2.4, "day_pct": -0.012},
+                "pills": [{"key": "vol", "label": "IV RICH", "cls": "iv-rich", "on": True}],
+                "tg": {"MA FAN": True, "GAP": False},
+            },
+            {
+                "t": "JPM",
+                "ticker": "JPM US Equity",
+                "score": 3,
+                "mom_score": 3,
+                "mom_score_d10": -4,
+                "mom_streak": 2,
+                "mom_streak_side": "below",
+                "factor_residual": -0.02,
+                "status": "Softening",
+                "blurb": "rolling over",
+                "metrics": {"r20_pct": -0.051, "rs_63": -0.02, "atr_pct": 1.8},
+                "pills": [{"key": "opt", "label": "OPT SPIKE", "cls": "opt-spike on", "on": True}],
+            },
+        ]
+        return f"""<!DOCTYPE html><body>
+<div id="view-mom-up"><div id="mom-up-grid"></div></div>
+<div id="view-mom-down"><div id="mom-down-grid"></div></div>
+<div id="fd-bb-mom-cache" hidden>
+  <div class="card" data-t="LRCX">
+    <header><h2>LRCX</h2><span class="sc">4</span></header>
+    <span data-mom-score-d10="-5">-5</span>
+    <span class="badge" data-key="mom-streak">stub</span>
+  </div>
+</div>
+<div id="view-breakout"><div id="breakout-grid"></div></div>
+<div id="view-breakdown"><div id="breakdown-grid"></div></div>
+<script type="application/json" id="fd-bb-mom-db">{json.dumps(thin)}</script>
+<script type="application/json" id="fd-bb-mom-full-db">{json.dumps(full)}</script>
+<script type="application/json" id="fd-breakout-db">{{"breakout":[],"breakdown":[]}}</script>
+<script>
+{bo.strip_js()}
+</script></body>"""
+
+    def test_jsdom_thin_row_plus_full_index_paints_dense_chrome(self) -> None:
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        report = _run_jsdom(
+            self._dense_page(),
+            r"""
+window.__painted = [];
+window.cardHTML = function (c) {
+  c = c || {};
+  var m = c.metrics || {};
+  window.__painted.push({
+    t: c.t || "",
+    r20: m.r20_pct,
+    rs: m.rs_63,
+    atr: m.atr_pct,
+    status: c.status || "",
+    on: (c.pills || []).some(function (p) { return p && (p.on === true || p.on === 1); })
+  });
+  function miss(x) { return x == null || x === "" || !isFinite(Number(x)); }
+  function pct(x) { return miss(x) ? "-" : (Number(x) * 100).toFixed(1) + "%"; }
+  function atr(x) {
+    if (miss(x)) return "-";
+    var n = Number(x);
+    return (Math.abs(n) < 1 ? n * 100 : n).toFixed(1) + "%";
+  }
+  function num(x) { return miss(x) ? "-" : String(x); }
+  var pills = (c.pills || []).map(function (p) {
+    var on = p && (p.on === true || p.on === 1 || String(p.cls || "").indexOf("on") >= 0);
+    return '<span class="tg ' + (on ? "on" : "off") + '">' + (p.label || "") + "</span>";
+  }).join("");
+  return '<article class="card" data-t="' + (c.t || "") + '">' +
+    '<span class="status">' + (c.status || "") + "</span>" +
+    '<div class="pills">' + pills + "</div>" +
+    '<div class="stats"><span>R20 ' + pct(m.r20_pct) + "</span><span>RS63 " + num(m.rs_63) +
+    "</span><span>ATR% " + atr(m.atr_pct) + "</span></div>" +
+    '<p class="blurb">' + (c.blurb || "") + "</p></article>";
+};
+window.__FD_BB_SHOW__("breakdown");
+const grid = document.getElementById("breakdown-grid");
+const gridHtml = grid.innerHTML;
+console.log(JSON.stringify({
+  names: Array.from(grid.querySelectorAll(".card")).map(function (el) { return el.getAttribute("data-t"); }),
+  empty: (grid.querySelector(".fd-bb-empty") || {}).textContent || "",
+  html: gridHtml,
+  painted: window.__painted
+}));
+""",
+        )
+        self.assertEqual(report["names"], ["LRCX", "JPM"])
+        self.assertNotIn("HIGH", report["names"])
+        self.assertEqual(report["empty"], "")
+        painted = {row["t"]: row for row in report["painted"]}
+        self.assertEqual(painted["LRCX"]["r20"], -0.082)
+        self.assertEqual(painted["LRCX"]["rs"], -0.041)
+        self.assertEqual(painted["LRCX"]["atr"], 2.4)
+        self.assertTrue(painted["LRCX"]["on"])
+        self.assertEqual(painted["LRCX"]["status"], "Weak / fading")
+        self.assertEqual(painted["JPM"]["r20"], -0.051)
+        self.assertTrue(painted["JPM"]["on"])
+        html = report["html"]
+        self.assertIn("R20 -8.2%", html)
+        self.assertIn("RS63 -0.041", html)
+        self.assertIn("ATR% 2.4%", html)
+        self.assertIn('class="tg on"', html)
+        self.assertIn("Weak / fading", html)
+        self.assertIn("below key MAs", html)
+        self.assertNotRegex(html, r"R20\s+-\s*<")
+        self.assertNotIn(">stub<", html)
+
+    def test_jsdom_full_index_misses_still_count_universe(self) -> None:
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        full = [
+            {
+                "t": "HIGH",
+                "score": 12,
+                "mom_score": 12,
+                "mom_score_d10": 6,
+                "mom_streak": 4,
+                "mom_streak_side": "above",
+                "factor_residual": 0.2,
+                "status": "Strong momentum",
+                "metrics": {"r20_pct": 0.1, "rs_63": 0.2, "atr_pct": 2},
+                "pills": [{"label": "RS+", "on": True}],
+            },
+            {
+                "t": "WIDE",
+                "score": 13,
+                "mom_score": 13,
+                "mom_score_d10": 5,
+                "mom_streak": 8,
+                "mom_streak_side": "above",
+                "factor_residual": 0.05,
+                "status": "Strong momentum",
+                "metrics": {"r20_pct": 0.2, "rs_63": 0.1, "atr_pct": 3},
+                "pills": [{"label": "MOM+", "on": True}],
+            },
+        ]
+        html = f"""<!DOCTYPE html><body>
+<div id="view-mom-up"><div id="mom-up-grid"></div></div>
+<div id="view-mom-down"><div id="mom-down-grid"></div></div>
+<div id="view-breakout"><div id="breakout-grid"></div></div>
+<div id="view-breakdown"><div id="breakdown-grid"></div></div>
+<script type="application/json" id="fd-bb-mom-full-db">{json.dumps(full)}</script>
+<script>
+{bo.strip_js()}
+</script></body>"""
+        report = _run_jsdom(
+            html,
+            r"""
+window.cardHTML = function (c) {
+  return '<article class="card" data-t="' + (c.t || "") + '">should-not-paint</article>';
+};
+window.__FD_BB_SHOW__("breakout");
+const grid = document.getElementById("breakout-grid");
+console.log(JSON.stringify({
+  names: Array.from(grid.querySelectorAll(".card")).map(function (el) { return el.getAttribute("data-t"); }),
+  empty: (grid.querySelector(".fd-bb-empty") || {}).textContent || ""
+}));
+""",
+        )
+        self.assertEqual(report["names"], [])
+        self.assertEqual(report["empty"], "No early inflections (0 of 2 passed)")
+        self.assertNotIn("this Refresh", report["empty"])
+
+    def test_jsdom_mom_paint_cache_beats_thin_db(self) -> None:
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        thin = [
+            {
+                "t": "LRCX",
+                "ticker": "LRCX US Equity",
+                "score": 4,
+                "mom_score": 4,
+                "mom_score_d10": -5,
+                "mom_streak": 4,
+                "mom_streak_side": "below",
+                "factor_residual": -0.04,
+            }
+        ]
+        html = f"""<!DOCTYPE html><body>
+<div id="view-mom-up"><div id="mom-up-grid"></div></div>
+<div id="view-mom-down"><div id="mom-down-grid"></div></div>
+<div id="view-breakdown"><div id="breakdown-grid"></div></div>
+<script type="application/json" id="fd-bb-mom-db">{json.dumps(thin)}</script>
+<script>
+{bo.strip_js()}
+</script></body>"""
+        report = _run_jsdom(
+            html,
+            r"""
+window.MOM = { up: [{
+  t:"LRCX", ticker:"LRCX US Equity", score:4, mom_score_d10:-5, mom_streak:4, mom_streak_side:"below",
+  factor_residual:-0.04, status:"Weak / fading", blurb:"below key MAs",
+  metrics:{r20_pct:-0.082, rs_63:-0.041, atr_pct:2.4},
+  pills:[{key:"vol", label:"IV RICH", on:true}]
+}], down: [] };
+window.__FD_BB_SNAPSHOT_MOM__();
+window.MOM = { up: [], down: [] };
+window.__painted = null;
+window.cardHTML = function (c) {
+  var m = (c && c.metrics) || {};
+  window.__painted = { r20: m.r20_pct, status: c.status || "", on: !!(c.pills && c.pills[0] && c.pills[0].on) };
+  function miss(x) { return x == null || !isFinite(Number(x)); }
+  return '<article class="card" data-t="LRCX"><span class="status">' + (c.status || "") +
+    '</span><span class="tg on">IV RICH</span><div class="stats"><span>R20 ' +
+    (miss(m.r20_pct) ? "-" : (Number(m.r20_pct) * 100).toFixed(1) + "%") +
+    "</span><span>RS63 " + (miss(m.rs_63) ? "-" : String(m.rs_63)) +
+    "</span><span>ATR% " + (miss(m.atr_pct) ? "-" : Number(m.atr_pct).toFixed(1) + "%") +
+    "</span></div></article>";
+};
+window.__FD_BB_SHOW__("breakdown");
+const grid = document.getElementById("breakdown-grid");
+console.log(JSON.stringify({
+  names: Array.from(grid.querySelectorAll(".card")).map(function (el) { return el.getAttribute("data-t"); }),
+  html: grid.innerHTML,
+  painted: window.__painted,
+  cached: !!(window.__FD_BB_MOM_CARDS__ && window.__FD_BB_MOM_CARDS__.LRCX)
+}));
+""",
+        )
+        self.assertEqual(report["names"], ["LRCX"])
+        self.assertTrue(report["cached"])
+        self.assertEqual(report["painted"]["r20"], -0.082)
+        self.assertEqual(report["painted"]["status"], "Weak / fading")
+        self.assertTrue(report["painted"]["on"])
+        self.assertIn("R20 -8.2%", report["html"])
+        self.assertIn("RS63 -0.041", report["html"])
+        self.assertIn("ATR% 2.4%", report["html"])
+        self.assertIn('class="tg on"', report["html"])
+
+
 class PaperNavIgnoreTests(unittest.TestCase):
     def test_native_views_omit_paper_and_kindof_returns_empty(self) -> None:
         self.assertNotIn("view-paper", bo.NATIVE_VIEW_IDS)

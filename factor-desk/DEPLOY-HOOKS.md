@@ -471,7 +471,7 @@ Pills (`DA·A` / `DA·B` / `DA·C` / `DA`) appear when a recent `YYYY-MM-DD-*.md
 | Copy into `C:\Users\MLP\Desktop\factorbook` | Notes |
 | --- | --- |
 | `card_render.py` | **recopy** — wrap live `cardHTML`; portable chip CSS; `__FD_RENDER_CARD__` / `__FD_RENDER_ROW__`; Day/R20/RS63/ATR% aliases |
-| `breakout.py` | **recopy** — `renderRow` = find MOM card by ticker → `cardHTML(card)` (full Mom chrome); scrape live HTML `"metrics":{r20_pct,rs_63,atr_pct}` onto `#fd-breakout-db`; capture click on BB cards → `selectTicker` (not `show(breakdown)`); `fmtAtr` does not `*100` when `abs(atr_pct)>=1` |
+| `breakout.py` | **recopy** — `renderRow` = full Mom card → `cardHTML(card)` (not a thin `#fd-bb-mom-db` stub); bakes `#fd-bb-mom-full-db` from the live card objects; `__FD_BB_MOM_CACHE__` stores the card object whenever Mom paints; scrape `"metrics":{r20_pct,rs_63,atr_pct}` onto `#fd-breakout-db`; capture click on BB cards → `selectTicker`; `fmtAtr` does not `*100` when `abs(atr_pct)>=1` |
 | `book_delta.py` | recopy — `ensure_embedded` **removes** leftover `#fd-book-delta` (strip BINNED) |
 | `desk_hitch.py` | new — DA hitch pills |
 | `desk_dash.py` hooks | paste `write_combined` tail above; **do not wholesale replace** live FLAGS/WATCH/MOM `desk_dash.py` |
