@@ -529,5 +529,355 @@ function tick() {{
         self.assertEqual(report["downLabels"], ["all", "Weak / fading", "Softening"])
 
 
+LEGACY_CHANGE_JS = r"""
+var viewFilt = {
+  "mom-up": { score: "all", flows: "all", tags: "all", sort: "Score", pills: {} },
+  "mom-down": { score: "all", flows: "all", tags: "all", sort: "Score", pills: {} },
+  "outliers": { score: "all", flows: "all", tags: "all", sort: "Score", pills: {} }
+};
+function grp(label, chips, key, cur) {
+  var h = '<div class="fgrp"><span class="flab">' + label + '</span>';
+  for (var i = 0; i < chips.length; i++) {
+    var v = chips[i][0], lab = chips[i][1];
+    var on = String(cur) === String(v) ? " on" : "";
+    h += '<button type="button" class="fchip' + on + '" data-k="' + key + '" data-v="' + v + '">' + lab + '</button>';
+  }
+  return h + '</div>';
+}
+function mkGrp(label, chips, key, cur) { return grp(label, chips, key, cur); }
+function applyMomFilters(cards, viewKey) {
+  var vf = viewFilt[viewKey] || {};
+  return (cards || []).filter(function (c) {
+    if (vf.change === "up" && !(Number(c.mom_score_d10) > 0)) return false;
+    if (vf.change === "down" && !(Number(c.mom_score_d10) < 0)) return false;
+    if (vf.change === "flat" && Number(c.mom_score_d10) !== 0) return false;
+    if (vf.score && vf.score !== "all") {
+      var n = parseFloat(vf.score);
+      if (isFinite(n) && !(Number(c.score) >= n)) return false;
+    }
+    return true;
+  });
+}
+function buildFiltBar(viewKey) {
+  var vf = viewFilt[viewKey] || {};
+  var html = "";
+  html += mkGrp("SCORE", [["all","All"],["5+","5+"],["6+","6+"],["7+","7+"],["8+","8+"]], "score", vf.score);
+  html += grp("FLOWS", [["all","All"],["OPT SPIKE","OPT SPIKE"]], "flows", vf.flows);
+  html += grp("TAGS", [["all","All"],["OUTLIER","OUTLIER"],["NEW","NEW"]], "tags", vf.tags);
+  if (viewKey === "mom-up" || viewKey === "mom-down") {
+    html += mkGrp("Change", [["all","All"],["up","Up (+)"],["down","Down (\u2212)"],["flat","Flat"]], "change", vf.change);
+  }
+  html += grp("SORT", [["Score","Score"],["Name","Name"],["RS","RS"],["Opt","Opt"]], "sort", vf.sort);
+  return html;
+}
+function paintView(view) {
+  window.__paintCount = (window.__paintCount || 0) + 1;
+  window.__paintView = view;
+  window.__paintChange = viewFilt[view] && viewFilt[view].change;
+}
+"""
+
+BOTH_CHANGE_JS = r"""
+var viewFilt = {
+  "mom-up": { score: "all", flows: "all", tags: "all", sort: "Score", change: "all" },
+  "mom-down": { score: "all", flows: "all", tags: "all", sort: "Score", change: "all" },
+  "outliers": { score: "all", flows: "all", tags: "all", sort: "Score" }
+};
+function grp(label, chips, key, cur) {
+  var h = '<div class="fgrp"><span class="flab">' + label + '</span>';
+  for (var i = 0; i < chips.length; i++) {
+    var v = chips[i][0], lab = chips[i][1];
+    h += '<button type="button" class="fchip" data-k="' + key + '" data-v="' + v + '">' + lab + '</button>';
+  }
+  return h + '</div>';
+}
+function mkGrp(label, chips, key, cur) { return grp(label, chips, key, cur); }
+function applyMomFilters(cards, viewKey) {
+  var vf = viewFilt[viewKey] || {};
+  return (cards || []).filter(function (c) { return true; });
+}
+function buildFiltBar(viewKey) {
+  var vf = viewFilt[viewKey] || {};
+  var html = "";
+  html += grp("SCORE", [["all","All"],["5+","5+"]], "score", vf.score);
+  if (viewKey === "mom-up" || viewKey === "mom-down") {
+    html += grp("CHANGE", [["all","All"],["gt3","+>3"],["le3","+\u22643"],["flat","Flat"],["nle3","\u2212\u22643"],["ngt3","\u2212>3"]], "change", vf.change);
+  }
+  html += grp("FLOWS", [["all","All"]], "flows", vf.flows);
+  html += grp("TAGS", [["all","All"],["OUTLIER","OUTLIER"],["NEW","NEW"]], "tags", vf.tags);
+  html += mkGrp("Change", [["all","All"],["up","Up (+)"],["down","Down (\u2212)"],["flat","Flat"]], "change", vf.change);
+  html += grp("SORT", [["Score","Score"],["Name","Name"]], "sort", vf.sort);
+  return html;
+}
+function paintView(view) {}
+"""
+
+
+class LegacyChangeRowTests(unittest.TestCase):
+    def test_legacy_mkgrp_becomes_one_granular_row(self) -> None:
+        js = _patched_script(LEGACY_CHANGE_JS)
+        build = js.split("function buildFiltBar", 1)[1].split("function paintView", 1)[0]
+        self.assertNotIn("Up (+)", build)
+        self.assertNotIn('"up"', build)
+        self.assertNotIn('"down"', build)
+        self.assertEqual(build.count('mkGrp("Change"') + build.count('grp("CHANGE"') + build.count('grp("Change"'), 1)
+        self.assertIn('mkGrp("SCORE"', build)
+        self.assertIn("gt3", build)
+        self.assertIn("+>3", build)
+        self.assertIn("nle3", build)
+        self.assertIn("ngt3", build)
+        self.assertIn('(viewKey==="mom-up"||viewKey==="mom-down")', build)
+        apply = js.split("function applyMomFilters", 1)[1].split("function buildFiltBar", 1)[0]
+        self.assertNotIn('.change === "up"', apply)
+        self.assertNotIn('.change === "down"', apply)
+        self.assertIn("fd-change-pred", apply)
+        self.assertIn("__fdCh === \"gt3\"", apply)
+        once = desk_dash.ensure_mom_status_filter(_page(LEGACY_CHANGE_JS))
+        twice = desk_dash.ensure_mom_status_filter(once)
+        once_build = once.split("function buildFiltBar", 1)[1].split("function paintView", 1)[0]
+        twice_build = twice.split("function buildFiltBar", 1)[1].split("function paintView", 1)[0]
+        self.assertNotIn("Up (+)", once_build)
+        self.assertNotIn("Up (+)", twice_build)
+        self.assertEqual(once_build.count('mkGrp("Change"'), twice_build.count('mkGrp("Change"'))
+        self.assertEqual(once.count("fd-change-pred"), twice.count("fd-change-pred"))
+        self.assertEqual(once.count("fd-change-click"), twice.count("fd-change-click"))
+        self.assertEqual(once.count("fd-change-click"), 1)
+
+    def test_already_injected_row_drops_legacy_sibling(self) -> None:
+        js = _patched_script(BOTH_CHANGE_JS)
+        build = js.split("function buildFiltBar", 1)[1].split("function paintView", 1)[0]
+        self.assertNotIn("Up (+)", build)
+        self.assertEqual(build.count('grp("CHANGE"'), 1)
+        self.assertEqual(build.count('mkGrp("Change"'), 0)
+        expr = r"""
+(function () {
+  var up = buildFiltBar("mom-up");
+  var out = buildFiltBar("outliers");
+  function labs(html) {
+    var outLabs = [];
+    var re = /class="flab">([^<]+)</g;
+    var m;
+    while ((m = re.exec(html))) outLabs.push(m[1]);
+    return outLabs;
+  }
+  return { up: labs(up), out: labs(out), upPlus: up.indexOf("Up (+)") };
+})()
+"""
+        # The placeholder above is invalid. Replaced below if this lands.
+        got = _node_eval(js, expr)
+        self.assertEqual(got["up"].count("CHANGE") + got["up"].count("Change"), 1)
+        self.assertNotIn("Change", got["out"])
+        self.assertNotIn("CHANGE", got["out"])
+        self.assertEqual(got["upPlus"], -1)
+
+    def test_legacy_buckets_filter_mom_score_d10(self) -> None:
+        js = _patched_script(LEGACY_CHANGE_JS)
+        expr = r"""
+(function () {
+  var cards = [
+    {t:"BIG", score:9, mom_score_d10: 4},
+    {t:"THREE", score:9, mom_score_d10: 3},
+    {t:"SMALL", score:9, mom_score_d10: 1},
+    {t:"FLAT", score:9, mom_score_d10: 0},
+    {t:"N3", score:9, mom_score_d10: -3},
+    {t:"N2", score:9, mom_score_d10: -2},
+    {t:"N4", score:9, mom_score_d10: -4},
+    {t:"MISS", score:9},
+    {t:"BLANK", score:9, mom_score_d10: ""},
+    {t:"NAN", score:9, mom_score_d10: "nope"}
+  ];
+  function names(v) {
+    viewFilt["mom-up"].change = v;
+    return applyMomFilters(cards, "mom-up").map(function (c) { return c.t; });
+  }
+  var upHtml = buildFiltBar("mom-up");
+  var outHtml = buildFiltBar("outliers");
+  var changeHtml = upHtml.slice(upHtml.indexOf(">Change<") >= 0 ? upHtml.indexOf(">Change<") : upHtml.indexOf(">CHANGE<"), upHtml.indexOf(">FLOWS<") >= 0 ? upHtml.indexOf(">FLOWS<") : upHtml.length);
+  return {
+    gt3: names("gt3"),
+    le3: names("le3"),
+    flat: names("flat"),
+    nle3: names("nle3"),
+    ngt3: names("ngt3"),
+    labelGt: names("+>3"),
+    labelFlat: names("Flat"),
+    labelNgt: names("\u2212>3"),
+    all: names("all"),
+    up: names("up"),
+    changeCount: (upHtml.match(/>Change<|>CHANGE</g) || []).length,
+    outChange: outHtml.indexOf(">Change<") >= 0 || outHtml.indexOf(">CHANGE<") >= 0,
+    upPlus: upHtml.indexOf("Up (+)")
+  };
+})()
+"""
+        got = _node_eval(js, expr)
+        self.assertEqual(got["gt3"], ["BIG"])
+        self.assertEqual(got["le3"], ["THREE", "SMALL"])
+        self.assertEqual(got["flat"], ["FLAT"])
+        self.assertEqual(got["nle3"], ["N3", "N2"])
+        self.assertEqual(got["ngt3"], ["N4"])
+        self.assertEqual(got["labelGt"], ["BIG"])
+        self.assertEqual(got["labelFlat"], ["FLAT"])
+        self.assertEqual(got["labelNgt"], ["N4"])
+        self.assertEqual(
+            got["all"],
+            ["BIG", "THREE", "SMALL", "FLAT", "N3", "N2", "N4", "MISS", "BLANK", "NAN"],
+        )
+        self.assertEqual(got["up"], [])
+        self.assertEqual(got["changeCount"], 1)
+        self.assertFalse(got["outChange"])
+        self.assertEqual(got["upPlus"], -1)
+
+    def test_chip_click_sets_change_and_paints(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        jsdom_root = Path("/tmp/fd-jsdom")
+        jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+        if not jsdom_mod.is_dir():
+            npm = shutil.which("npm")
+            if not npm:
+                self.skipTest("npm not installed")
+            jsdom_root.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+        page_js = LEGACY_CHANGE_JS + r"""
+var DATA = [
+  {t:"BIG", mom_score_d10: 4},
+  {t:"FLAT", mom_score_d10: 0},
+  {t:"N4", mom_score_d10: -4},
+  {t:"MISS"}
+];
+function render() {
+  var cards = applyMomFilters(DATA, "mom-up");
+  document.getElementById("grid").innerHTML = cards.map(function (c) {
+    return '<article class="card"><h2>' + c.t + '</h2></article>';
+  }).join("");
+  document.getElementById("filt").innerHTML = buildFiltBar("mom-up");
+}
+paintView = function (view) {
+  window.__paintCount = (window.__paintCount || 0) + 1;
+  window.__paintView = view;
+  window.__paintChange = viewFilt[view] && viewFilt[view].change;
+  render();
+};
+document.addEventListener("click", function (ev) {
+  var b = ev.target && ev.target.closest && ev.target.closest("[data-k]");
+  if (!b) return;
+  var k = b.getAttribute("data-k");
+  if (k === "change") return;
+  viewFilt["mom-up"][k] = b.getAttribute("data-v");
+  paintView("mom-up");
+});
+"""
+        live = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<div id="view-mom-up">
+  <h2>MOMENTUM UP</h2>
+  <div id="filt">
+    <div class="fgrp"><span class="flab">Change</span>
+      <button type="button" class="fchip">All</button>
+      <button type="button" class="fchip">Up (+)</button>
+      <button type="button" class="fchip">Down (−)</button>
+      <button type="button" class="fchip">Flat</button>
+    </div>
+  </div>
+  <div id="grid"></div>
+</div>
+<div id="view-mom-down" class="hide"></div>
+<script>
+{page_js}
+document.getElementById("filt").insertAdjacentHTML("beforeend", buildFiltBar("mom-up"));
+</script>
+</body></html>"""
+        html = desk_dash.ensure_mom_status_filter(live)
+        self.assertIn("fd-change-click", html)
+        self.assertNotIn("Up (+)", html.split("function buildFiltBar", 1)[1].split("function paintView", 1)[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            runner = Path(tmp) / "run.js"
+            page.write_text(html, encoding="utf-8")
+            runner.write_text(
+                f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+const dom = new JSDOM(fs.readFileSync({json.dumps(str(page))}, "utf8"), {{
+  runScripts: "dangerously",
+  url: "http://127.0.0.1/factorbook.html"
+}});
+function tick() {{
+  return new Promise(function (resolve) {{ setTimeout(resolve, 40); }});
+}}
+(async function () {{
+  const document = dom.window.document;
+  await tick();
+  function labs() {{
+    return Array.from(document.querySelectorAll("#filt .flab")).map(function (el) {{
+      return (el.textContent || "").trim();
+    }});
+  }}
+  function names() {{
+    return Array.from(document.querySelectorAll("#grid h2")).map(function (el) {{
+      return (el.textContent || "").trim();
+    }});
+  }}
+  const before = labs();
+  const flat = Array.from(document.querySelectorAll("#filt button")).find(function (b) {{
+    return (b.textContent || "").trim() === "Flat";
+  }});
+  flat.click();
+  const afterFlat = names();
+  const flatFilt = dom.window.viewFilt["mom-up"].change;
+  const gt = Array.from(document.querySelectorAll("#filt button")).find(function (b) {{
+    return (b.textContent || "").trim() === "+>3";
+  }});
+  gt.click();
+  const afterGt = names();
+  const gtFilt = dom.window.viewFilt["mom-up"].change;
+  const afterLabs = labs();
+  const upPlus = (document.getElementById("filt").textContent || "").indexOf("Up (+)");
+  process.stdout.write(JSON.stringify({{
+    before: before,
+    afterFlat: afterFlat,
+    flatFilt: flatFilt,
+    afterGt: afterGt,
+    gtFilt: gtFilt,
+    afterLabs: afterLabs,
+    upPlus: upPlus,
+    paints: dom.window.__paintCount || 0
+  }}));
+}})().catch(function (err) {{
+  console.error(err);
+  process.exit(1);
+}});
+""",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [node, str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        report = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertNotIn("Up (+)", "".join(report["before"]))
+        self.assertEqual(report["before"].count("Change") + report["before"].count("CHANGE"), 1)
+        self.assertEqual(report["afterFlat"], ["FLAT"])
+        self.assertEqual(report["flatFilt"], "flat")
+        self.assertEqual(report["afterGt"], ["BIG"])
+        self.assertEqual(report["gtFilt"], "gt3")
+        self.assertEqual(report["afterLabs"].count("Change") + report["afterLabs"].count("CHANGE"), 1)
+        self.assertLess(report["upPlus"], 0)
+        self.assertGreaterEqual(report["paints"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,7 +31,7 @@ Threshold is literal **5**.
 
 A day at 5, or a missing print, breaks an above/below run.
 
-**10 trading days:** the same series also drives a composite-score change versus the print 10 points earlier (`series[-(10+1)]` after today's upsert). Under the big score the card shows only the signed delta (`+3` / `−2` / `0`) — no `10d` prefix and no `mom-score-d10` enrich pill. The streak tag stays. Hover text still says composite score, 10 trading days, prior date, and the delta. Momentum Up and Momentum Down filt-bars add a **Change** row (All / `+>3` / `+≤3` / Flat / `−≤3` / `−>3`) that filters on `mom_score_d10`. `+3` sits in `+≤3`; `−3` sits in `−≤3`. Fewer than 11 points → no caption. Not options `score_v2` or S-score.
+**10 trading days:** the same series also drives a composite-score change versus the print 10 points earlier (`series[-(10+1)]` after today's upsert). Under the big score the card shows only the signed delta (`+3` / `−2` / `0`) — no `10d` prefix and no `mom-score-d10` enrich pill. The streak tag stays. Hover text still says composite score, 10 trading days, prior date, and the delta. Momentum Up and Momentum Down filt-bars add one **Change** row (All / `+>3` / `+≤3` / Flat / `−≤3` / `−>3`) that filters on `mom_score_d10` inside `applyMomFilters`. There is no second Up / Down row. `+3` sits in `+≤3`; `−3` sits in `−≤3`. A missing delta stays hidden while a bucket is selected. Fewer than 11 points → no caption. Not options `score_v2` or S-score.
 
 ## Chart marks
 

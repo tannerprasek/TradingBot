@@ -1238,8 +1238,57 @@ def _patch_viewfilt_change(src: str) -> str:
     return src
 
 
+_CHANGE_LABELS = ("CHANGE", "Change")
+_CHANGE_CHIPS = (
+    '[["all","All"],["gt3","+>3"],["le3","+\u22643"],["flat","Flat"],'
+    '["nle3","\u2212\u22643"],["ngt3","\u2212>3"]]'
+)
+_CHANGE_CLICK_MARK = "/* fd-change-click */"
+
+
+def _change_pred(vf: str, card: str) -> str:
+    """Fail closed unless ``mom_score_d10`` is a finite number in the selected bucket."""
+    return (
+        " /* fd-change-pred */ var __fdD10 = Number("
+        + card
+        + ".mom_score_d10); var __fdD10ok = "
+        + card
+        + ".mom_score_d10 != null && "
+        + card
+        + '.mom_score_d10 !== "" && isFinite(__fdD10); var __fdCh = ('
+        + vf
+        + " && "
+        + vf
+        + '.change) || "all"; if (__fdCh === "+>3") __fdCh = "gt3"; else if (__fdCh === "+\u22643") __fdCh = "le3"; else if (__fdCh === "Flat") __fdCh = "flat"; else if (__fdCh === "\u2212\u22643" || __fdCh === "-\u22643") __fdCh = "nle3"; else if (__fdCh === "\u2212>3" || __fdCh === "->3") __fdCh = "ngt3"; if ('
+        + vf
+        + ' && __fdCh !== "all" && !(__fdD10ok && ((__fdCh === "gt3" && __fdD10 > 3) || (__fdCh === "le3" && __fdD10 > 0 && __fdD10 <= 3) || (__fdCh === "flat" && __fdD10 === 0) || (__fdCh === "nle3" && __fdD10 < 0 && __fdD10 >= -3) || (__fdCh === "ngt3" && __fdD10 < -3)))) return false;'
+    )
+
+
+def _strip_stale_change_pred(body: str) -> str:
+    """Drop an up/down/flat change predicate so the six buckets own the filter."""
+    marker = "/* fd-change-pred */"
+    while marker in body:
+        idx = body.find(marker)
+        end = body.find("return false;", idx)
+        if end < 0:
+            break
+        end += len("return false;")
+        block = body[idx:end]
+        if "+>3" in block and "gt3" in block and "nle3" in block and "ngt3" in block:
+            break
+        body = body[:idx] + body[end:]
+    body = re.sub(
+        r"""if\s*\(\s*[A-Za-z_$][\w$]*\.change\s*===?\s*['"](?:up|down|flat)['"][\s\S]*?\)\s*return\s+false\s*;""",
+        "",
+        body,
+    )
+    return body
+
+
 def _patch_change_apply_body(body: str, _params: str, _script: str) -> str:
-    if "fd-change-pred" in body:
+    body = _strip_stale_change_pred(body)
+    if "fd-change-pred" in body and "+>3" in body and "gt3" in body:
         return body
     vf = _vf_name(body)
     if not vf:
@@ -1261,37 +1310,197 @@ def _patch_change_apply_body(body: str, _params: str, _script: str) -> str:
     if rank(chosen) <= 0 and len(callbacks) != 1:
         return body
     insert_at, card, _brace, _close = chosen
-    pred = (
-        " /* fd-change-pred */ var __fdD10 = Number("
-        + card
-        + ".mom_score_d10); var __fdD10ok = "
-        + card
-        + ".mom_score_d10 != null && "
-        + card
-        + '.mom_score_d10 !== "" && isFinite(__fdD10); if ('
-        + vf
-        + " && "
-        + vf
-        + '.change && '
-        + vf
-        + '.change !== "all" && !(__fdD10ok && (('
-        + vf
-        + '.change === "gt3" && __fdD10 > 3) || ('
-        + vf
-        + '.change === "le3" && __fdD10 > 0 && __fdD10 <= 3) || ('
-        + vf
-        + '.change === "flat" && __fdD10 === 0) || ('
-        + vf
-        + '.change === "nle3" && __fdD10 < 0 && __fdD10 >= -3) || ('
-        + vf
-        + '.change === "ngt3" && __fdD10 < -3)'
-        + "))) return false;"
-    )
-    return body[:insert_at] + pred + body[insert_at:]
+    return body[:insert_at] + _change_pred(vf, card) + body[insert_at:]
 
 
-def _patch_change_build_body(body: str, params: str, _script: str) -> str:
-    if "+>3" in body or "fd-change-row" in body:
+def _find_all_label_calls(src: str, labels: tuple[str, ...]) -> list[tuple[int, int, str, list[tuple[int, int]]]]:
+    """Every call whose string arg equals ``labels``. End index is past ``)``."""
+    want = set(labels)
+    found: list[tuple[int, int, str, list[tuple[int, int]]]] = []
+    i = 0
+    n = len(src)
+    while i < n:
+        m = re.search(r"\b([A-Za-z_$][\w$]*)\s*\(", src[i:])
+        if not m:
+            break
+        name_start = i + m.start(1)
+        paren = i + m.end() - 1
+        close = _match_js_bracket(src, paren)
+        if close < 0:
+            i = paren + 1
+            continue
+        args = _split_js_args(src, paren, close)
+        if any(_full_js_string(src[a:b]) in want for a, b in args):
+            found.append((name_start, close + 1, m.group(1), args))
+            i = close + 1
+            continue
+        i = paren + 1
+    return found
+
+
+def _change_call_kind(src: str, call: tuple[int, int, str, list[tuple[int, int]]]) -> str:
+    chunk = src[call[0] : call[1]]
+    if any(tok in chunk for tok in ("gt3", "+>3", "nle3", "ngt3", "fd-change-row")):
+        return "granular"
+    return "legacy"
+
+
+def _skip_ws_left(src: str, i: int) -> int:
+    while i >= 0 and src[i] in " \t\r\n":
+        i -= 1
+    return i
+
+
+def _skip_ws_right(src: str, i: int) -> int:
+    n = len(src)
+    while i < n and src[i] in " \t\r\n":
+        i += 1
+    return i
+
+
+def _stmt_bounds_around(src: str, start: int, end: int) -> tuple[int, int]:
+    """Innermost statement containing ``src[start:end]`` (previous brace/semicolon through next semicolon)."""
+    n = len(src)
+    depth = 0
+    i = 0
+    breaks: dict[int, int] = {0: 0}
+    while i < start:
+        ch = src[i]
+        if ch in "\"'`":
+            i = _skip_js_string(src, i)
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch in "([{":
+            depth += 1
+            breaks[depth] = i + 1
+        elif ch in ")]}":
+            breaks.pop(depth, None)
+            depth = max(0, depth - 1)
+        elif ch == ";":
+            breaks[depth] = i + 1
+        i += 1
+    stmt_start = breaks.get(depth, 0)
+    depth2 = depth
+    i = end
+    while i < n:
+        ch = src[i]
+        if ch in "\"'`":
+            i = _skip_js_string(src, i)
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch in "([{":
+            depth2 += 1
+        elif ch in ")]}":
+            depth2 = max(0, depth2 - 1)
+        elif ch == ";" and depth2 == depth:
+            return stmt_start, i + 1
+        i += 1
+    return stmt_start, n
+
+
+def _remove_call_expr(src: str, start: int, end: int) -> str:
+    """Drop a call and the ``+`` / comma that joins it. A lone statement goes with it."""
+    left = _skip_ws_left(src, start - 1)
+    right = _skip_ws_right(src, end)
+    if left >= 0 and src[left] == "+" and not (left >= 1 and src[left - 1] in "=+"):
+        return src[:left] + src[end:]
+    if left >= 0 and src[left] == ",":
+        return src[:left] + src[end:]
+    if right < len(src) and src[right] == "+" and not (right + 1 < len(src) and src[right + 1] == "+"):
+        cut = right + 1
+        if cut < len(src) and src[cut] == "=":
+            pass
+        else:
+            return src[:start] + src[cut:]
+    if right < len(src) and src[right] == ",":
+        return src[:start] + src[right + 1 :]
+    stmt_start, stmt_end = _stmt_bounds_around(src, start, end)
+    return src[:stmt_start] + src[stmt_end:]
+
+
+def _rewrite_change_chips(src: str, call: tuple[int, int, str, list[tuple[int, int]]]) -> str | None:
+    """Replace the chips argument of a Change call with the six granular buckets."""
+    start, end, name, args = call
+    new_args: list[str] = []
+    replaced = False
+    for a, b in args:
+        raw = src[a:b]
+        stripped = raw.strip()
+        if _full_js_string(stripped) is not None:
+            new_args.append(raw)
+            continue
+        if not replaced and (
+            stripped.startswith("[") or re.fullmatch(r"[A-Za-z_$][\w$]*", stripped)
+        ):
+            lead = re.match(r"\s*", raw).group(0)  # type: ignore[union-attr]
+            trail = re.search(r"\s*$", raw).group(0)  # type: ignore[union-attr]
+            new_args.append(lead + _CHANGE_CHIPS + trail)
+            replaced = True
+            continue
+        new_args.append(raw)
+    if not replaced:
+        return None
+    return src[:start] + name + "(" + ",".join(new_args) + ")" + src[end:]
+
+
+def _enclosing_brace(src: str, start: int) -> int | None:
+    """Index of the ``{`` that contains ``start``, scanning from the beginning of ``src``."""
+    n = len(src)
+    stack: list[int] = []
+    i = 0
+    while i < start and i < n:
+        ch = src[i]
+        if ch in "\"'`":
+            i = _skip_js_string(src, i)
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i)
+            i = n if nl < 0 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            stack.pop()
+        i += 1
+    return stack[-1] if stack else None
+
+
+def _call_is_mom_gated(body: str, start: int) -> bool:
+    brace = _enclosing_brace(body, start)
+    if brace is None:
+        return False
+    head = body[max(0, brace - 240) : brace]
+    return "mom-up" in head and "mom-down" in head
+
+
+def _strip_up_plus_statements(body: str) -> str:
+    spans = _split_js_statements(body)
+    for start, end in reversed(spans):
+        if "Up (+)" in body[start:end]:
+            body = body[:start] + body[end:]
+    return body
+
+
+def _inject_granular_change(body: str, params: str) -> str:
+    if _find_label_call(body, _CHANGE_LABELS):
         return body
     score = _find_label_call(body, ("SCORE", "Score"))
     if not score:
@@ -1299,10 +1508,7 @@ def _patch_change_build_body(body: str, params: str, _script: str) -> str:
     view = _view_param(params, body)
     vf = _vf_name(body) or "vf"
     name = score[2]
-    new_call = (
-        f'{name}("CHANGE",[["all","All"],["gt3","+>3"],["le3","+\u22643"],["flat","Flat"],'
-        f'["nle3","\u2212\u22643"],["ngt3","\u2212>3"]],"change",{vf}.change)'
-    )
+    new_call = f'{name}("CHANGE",{_CHANGE_CHIPS},"change",{vf}.change)'
     cond = f'({view}==="mom-up"||{view}==="mom-down")'
     spans = _split_js_statements(body)
     score_stmt = _span_containing(spans, score[0])
@@ -1325,6 +1531,61 @@ def _patch_change_build_body(body: str, params: str, _script: str) -> str:
     return body[:end] + inject + body[end:]
 
 
+def _patch_change_build_body(body: str, params: str, _script: str) -> str:
+    """One Change row: All / +>3 / +≤3 / Flat / −≤3 / −>3. Legacy Up/Down is removed."""
+    calls = _find_all_label_calls(body, _CHANGE_LABELS)
+    granular = [c for c in calls if _change_call_kind(body, c) == "granular"]
+    legacy = [c for c in calls if _change_call_kind(body, c) != "granular"]
+    if granular:
+        for call in reversed(legacy):
+            body = _remove_call_expr(body, call[0], call[1])
+    elif legacy:
+        keep = legacy[0]
+        for call in reversed(legacy[1:]):
+            body = _remove_call_expr(body, call[0], call[1])
+        if _call_is_mom_gated(body, keep[0]):
+            rewritten = _rewrite_change_chips(body, keep)
+            body = rewritten if rewritten is not None else _remove_call_expr(body, keep[0], keep[1])
+        else:
+            body = _remove_call_expr(body, keep[0], keep[1])
+    body = _strip_up_plus_statements(body)
+    return _inject_granular_change(body, params)
+
+
+def _change_click_js() -> str:
+    return r"""
+/* fd-change-click */
+if (typeof document !== "undefined") document.addEventListener("click", function (ev) {
+  if (ev.__fdChangeClick) return;
+  var t = ev.target;
+  var b = t && t.closest ? t.closest("[data-k='change']") : null;
+  if (!b) return;
+  var view = "";
+  var upEl = document.getElementById("view-mom-up");
+  var downEl = document.getElementById("view-mom-down");
+  function shown(el) {
+    if (!el) return false;
+    if (el.classList && (el.classList.contains("hide") || el.classList.contains("hidden"))) return false;
+    if (el.hasAttribute && el.hasAttribute("hidden")) return false;
+    return true;
+  }
+  if (shown(upEl) && !shown(downEl)) view = "mom-up";
+  else if (shown(downEl) && !shown(upEl)) view = "mom-down";
+  else if (typeof curView === "string" && (curView === "mom-up" || curView === "mom-down")) view = curView;
+  if (view !== "mom-up" && view !== "mom-down") return;
+  ev.__fdChangeClick = 1;
+  var val = b.getAttribute("data-v") || "all";
+  if (val === "+>3") val = "gt3";
+  else if (val === "+\u22643") val = "le3";
+  else if (val === "Flat") val = "flat";
+  else if (val === "\u2212\u22643" || val === "-\u22643") val = "nle3";
+  else if (val === "\u2212>3" || val === "->3") val = "ngt3";
+  if (typeof viewFilt !== "undefined" && viewFilt && viewFilt[view]) viewFilt[view].change = val;
+  if (typeof paintView === "function") paintView(view);
+}, true);
+""".strip()
+
+
 def _patch_mom_filt_script(src: str) -> str:
     src = _patch_viewfilt(src)
     src = _patch_viewfilt_change(src)
@@ -1332,6 +1593,8 @@ def _patch_mom_filt_script(src: str) -> str:
     src = _patch_named_function(src, "applyMomFilters", _patch_change_apply_body)
     src = _patch_named_function(src, "buildFiltBar", _patch_build_body)
     src = _patch_named_function(src, "buildFiltBar", _patch_change_build_body)
+    if _CHANGE_CLICK_MARK not in src and "viewFilt" in src and "paintView" in src:
+        src = src.rstrip() + "\n" + _change_click_js() + "\n"
     return src
 
 
@@ -1536,7 +1799,17 @@ def _fallback_js() -> str:
     var parsed = Number(t);
     return isFinite(parsed) ? parsed : null;
   }
+  function normChange(v) {
+    if (v === "+>3") return "gt3";
+    if (v === "+\u22643") return "le3";
+    if (v === "Flat" || v === "flat") return "flat";
+    if (v === "\u2212\u22643" || v === "-\u22643") return "nle3";
+    if (v === "\u2212>3" || v === "->3") return "ngt3";
+    if (v === "All" || v === "ALL") return "all";
+    return v || "all";
+  }
   function changeMiss(delta, want) {
+    want = normChange(want);
     if (!want || want === "all") return false;
     if (delta == null || !isFinite(delta)) return true;
     if (want === "gt3") return !(delta > 3);
@@ -1646,15 +1919,37 @@ def _fallback_js() -> str:
       if (onCls && offCls && onCls !== offCls) chips[j].className = (val === cur) ? onCls : offCls;
     }
   }
-  function barHasForeignChange(bar) {
-    if (bar.querySelector("[data-fd-change-row]")) return false;
-    var nodes = bar.querySelectorAll("span, label, b, h3, h4, p");
+  function changeLabelText(el) {
+    var nodes = el.querySelectorAll("span, label, b, h3, h4, p");
     for (var i = 0; i < nodes.length; i++) {
       if (nodes[i].children.length) continue;
       var tx = (nodes[i].textContent || "").replace(/\s+/g, " ").trim();
       if (tx === "CHANGE" || tx === "Change") return true;
     }
     return false;
+  }
+  function dropLegacyChange(root) {
+    if (!root || !root.querySelectorAll) return;
+    var nodes = root.querySelectorAll("div, section, li");
+    var victims = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.getAttribute && el.getAttribute("data-fd-change-row")) continue;
+      if (!changeLabelText(el)) continue;
+      var text = el.textContent || "";
+      if (text.indexOf("+>3") >= 0) continue;
+      if (text.indexOf("Up (+)") < 0 && text.indexOf("Down (\u2212)") < 0 && text.indexOf("Down (-)") < 0) continue;
+      var smaller = false;
+      for (var k = 0; k < nodes.length; k++) {
+        if (nodes[k] === el || !el.contains(nodes[k])) continue;
+        if (nodes[k].getAttribute && nodes[k].getAttribute("data-fd-change-row")) continue;
+        if (changeLabelText(nodes[k])) { smaller = true; break; }
+      }
+      if (!smaller) victims.push(el);
+    }
+    for (var j = 0; j < victims.length; j++) {
+      if (victims[j].parentNode) victims[j].parentNode.removeChild(victims[j]);
+    }
   }
   function relabelChange(group) {
     var nodes = group.querySelectorAll("*");
@@ -1682,7 +1977,8 @@ def _fallback_js() -> str:
   function paintChange(view) {
     var root = document.getElementById(view === "mom-down" ? "view-mom-down" : "view-mom-up") || document.body;
     var bar = smallest(root, isBar);
-    if (!bar || barHasForeignChange(bar)) return;
+    if (!bar) return;
+    dropLegacyChange(bar);
     var existing = bar.querySelector("[data-fd-change-row]");
     if (existing && existing.getAttribute("data-fd-change-row") === view) {
       markChange(existing, view);
@@ -1731,6 +2027,27 @@ def _fallback_js() -> str:
     if (score.parentNode) score.parentNode.insertBefore(g, score.nextSibling);
     else bar.appendChild(g);
   }
+  function onChangeClick(ev) {
+    if (ev.__fdChangeClick) return;
+    var t = ev.target;
+    if (!t || !t.closest) return;
+    var b = t.closest("[data-k='change'], [data-fd-change-val]");
+    if (!b) return;
+    var view = viewOf();
+    if (view !== "mom-up" && view !== "mom-down") return;
+    ev.__fdChangeClick = 1;
+    var raw = b.getAttribute("data-v");
+    if (raw == null || raw === "") raw = b.getAttribute("data-fd-change-val") || "";
+    var val = normChange(raw);
+    rememberChange(view, val);
+    if (typeof window.paintView === "function") {
+      try { window.paintView(view); } catch (e3) {}
+      return;
+    }
+    applyHide(view);
+    var row = document.querySelector("[data-fd-change-row]");
+    if (row) markChange(row, view);
+  }
   function tick() {
     var view = viewOf();
     if (view !== "mom-up" && view !== "mom-down") { clearHide(); return; }
@@ -1748,7 +2065,15 @@ def _fallback_js() -> str:
   function boot() {
     if (booted) return;
     booted = true;
-    if (sourcePatched()) return;
+    document.addEventListener("click", onChangeClick, true);
+    dropLegacyChange(document);
+    if (sourcePatched()) {
+      if (window.MutationObserver && document.documentElement) {
+        var legacyObs = new MutationObserver(function () { dropLegacyChange(document); });
+        legacyObs.observe(document.documentElement, {childList: true, subtree: true});
+      }
+      return;
+    }
     tick();
     if (window.MutationObserver && document.documentElement) {
       var obs = new MutationObserver(function () { schedule(); });
@@ -1812,6 +2137,10 @@ def ensure_mom_status_filter(html_text: str) -> str:
     Mom Up gains All + Strong momentum + Momentum building + Constructive.
     Mom Down gains All + Weak / fading + Softening. Single-select, after Tags
     and before Sort. Outliers keeps no Status row. Does not restyle the bar.
+
+    Mom Up and Mom Down also keep a single Change row (All / +>3 / +≤3 / Flat /
+    −≤3 / −>3) filtered on ``mom_score_d10`` inside ``applyMomFilters``. A legacy
+    Up (+) / Down (−) group is removed rather than left beside the granular chips.
     """
     if not html_text:
         return html_text
