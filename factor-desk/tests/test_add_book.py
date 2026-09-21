@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -307,6 +308,48 @@ class AddPathTests(unittest.TestCase):
             self.assertIn("APFD US Equity", book["names"])
             found = de.search_symbols("apfd", book)
             self.assertEqual(found[0]["ticker"], "APFD US Equity")
+
+    def test_do_add_force_stubs_when_upsert_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls = {"n": 0}
+            real = de.upsert_add_names
+
+            def boom(*args, **kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("disk full mid-enrich")
+                return real(*args, **kwargs)
+
+            with mock.patch.object(add_server.dapi_enrich, "upsert_add_names", side_effect=boom):
+                result = add_server.do_add("TSEM", root=root, session=BoomSession(), rebuild=False)
+            self.assertTrue(result["ok"], msg=result)
+            self.assertTrue(result["in_book"])
+            self.assertTrue(result["searchable"])
+            book = json.loads((root / "dapi_enrichment.json").read_text(encoding="utf-8"))
+            self.assertIn("TSEM US Equity", book["names"])
+            self.assertIn("disk full", str(result.get("enrich_error") or ""))
+
+    def test_search_book_detects_missing_short_symbol(self) -> None:
+        html = '<script type="application/json" id="fd-search-book">{"names":{"AAPL":{"t":"AAPL"}}}</script>'
+        self.assertTrue(desk_dash.search_book_has_symbol(html, "AAPL"))
+        self.assertFalse(desk_dash.search_book_has_symbol(html, "TSEM"))
+        self.assertFalse(desk_dash.search_book_has_symbol("<html></html>", "TSEM"))
+
+    def test_do_add_fails_when_search_book_never_lands(self) -> None:
+        """Prices/extra alone used to report success; search must still fail closed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg, _live = self._desktop(tmp)
+            with mock.patch.object(add_server, "run_rebuild", return_value=None), mock.patch.object(
+                desk_dash, "land_search_book", side_effect=RuntimeError("land blocked")
+            ), mock.patch.object(desk_dash, "search_book_has_symbol", return_value=False):
+                result = add_server.do_add("TSEM", root=pkg, session=BoomSession(), rebuild=True)
+            self.assertFalse(result["ok"], msg=result)
+            self.assertTrue(result["in_book"])
+            self.assertIs(result["searchable"], False)
+            self.assertIn("search payload", result["message"].lower())
+            book = json.loads((pkg / "dapi_enrichment.json").read_text(encoding="utf-8"))
+            self.assertIn("TSEM US Equity", book["names"])
 
 
 if __name__ == "__main__":

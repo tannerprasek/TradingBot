@@ -29,7 +29,9 @@ Add-to-book (``POST /api/add``, :func:`do_add`)::
 
 Enrichment is best-effort. A DAPI miss still stubs ``dapi_enrichment.json``
 so the desk card universe (and ``#fd-search-book``) includes the short symbol.
-The status says the name is in the book when that stub landed.
+After rebuild, Add verifies the short symbol is in the live search payload and
+lands it if missing. Prices/residual alone (TSEM “integrated into the rest”)
+is not treated as success.
 """
 
 from __future__ import annotations
@@ -513,6 +515,7 @@ def _add_message(
     enrich_ok: bool,
     px: Any,
     rebuild_err: str | None,
+    searchable: bool | None = None,
 ) -> str:
     if not in_book:
         return f"{short or 'symbol'} was not added to the book."
@@ -521,6 +524,12 @@ def _add_message(
             f"{short} is in the enrichment book, but the live desk HTML was not updated "
             f"({rebuild_err})."
         )
+    if searchable is False:
+        return (
+            f"{short} prices/residual may have merged into the book, but the live desk "
+            "search payload never received the short symbol. Recopy desk_dash.py / "
+            "add_server.py / dapi_enrich.py and Add again."
+        )
     if enrich_ok:
         return f"Added {short}."
     px_note = " Last price was attached from the price file." if px is not None else ""
@@ -528,6 +537,65 @@ def _add_message(
         f"{short} is in the book.{px_note} "
         "DAPI enrichment did not fill fields; the card is limited-history and still searchable."
     )
+
+
+def _force_stub_book(
+    key: str,
+    *,
+    root: Path,
+    prices_ctx: Mapping[str, Any] | None,
+    enrich_error: str | None,
+) -> dict[str, Any]:
+    """Guarantee ``names[key]`` even when the primary enrich path raised."""
+    book = dapi_enrich.upsert_add_names(
+        [key],
+        root=root,
+        session=dapi_enrich.NullSession(),
+        prices_ctx=prices_ctx,
+        open_session=False,
+    )
+    meta = book.setdefault("meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
+        book["meta"] = meta
+    if enrich_error:
+        skips = list(meta.get("skips") or [])
+        skips.append(f"add_enrich:{enrich_error}")
+        meta["skips"] = skips
+        meta["add_enrich_error"] = enrich_error
+        dapi_enrich.write_enrichment(book, dapi_enrich.default_out_path(root))
+    return book
+
+
+def _live_html_text(root: Path) -> tuple[Path | None, str]:
+    dest = desk_dash.resolve_live_dest(root)
+    if not dest.is_file():
+        return dest, ""
+    return dest, desk_dash._read_html(dest)
+
+
+def _ensure_searchable(short: str, root: Path, *, land: bool) -> tuple[bool, str | None]:
+    """Confirm the short symbol is in ``#fd-search-book``; optionally land it."""
+    cards = desk_dash.cards_from_enrichment(desk_dash.load_enrichment(root), root=root)
+    in_cards = any(
+        dapi_enrich.short_symbol(str(c.get("t") or c.get("ticker") or "")) == short for c in cards
+    )
+    dest, text = _live_html_text(root)
+    if dest is None or not dest.is_file() or not desk_dash.looks_like_live_desk(text):
+        return in_cards, None if in_cards else f"{short} missing from card universe"
+    if desk_dash.search_book_has_symbol(text, short):
+        return True, None
+    if not land:
+        return False, f"{short} missing from #fd-search-book"
+    try:
+        desk_dash.land_search_book(root)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("land_search_book failed: %s", exc)
+        return False, str(exc)
+    text = desk_dash._read_html(dest)
+    if desk_dash.search_book_has_symbol(text, short):
+        return True, None
+    return False, f"{short} missing from #fd-search-book after land"
 
 
 def do_add(
@@ -545,6 +613,10 @@ def do_add(
     is attempted for the new name and merged into ``dapi_enrichment.json``.
     If DAPI does not resolve fields, a stub ``names[ticker]`` is still written
     and the status stays honest: the name is in the book.
+
+    Success also requires the short symbol to appear in the live desk
+    ``#fd-search-book``. Prices/residual alone (the TSEM failure mode) is not
+    enough.
     """
     cb = progress_cb or _progress_cb
     base = Path(root) if root is not None else HERE
@@ -587,17 +659,30 @@ def do_add(
             open_session=session is None,
         )
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("add enrich raised (stub via union): %s", exc)
+        LOG.warning("add enrich raised; forcing stub: %s", exc)
         enrich_error = str(exc)
-        book = dapi_enrich.load_enrichment(dapi_enrich.default_out_path(base)) or {
-            "names": {},
-            "meta": {},
-        }
+        try:
+            book = _force_stub_book(key, root=base, prices_ctx=prices_ctx, enrich_error=enrich_error)
+        except Exception as stub_exc:  # noqa: BLE001
+            LOG.warning("force stub failed: %s", stub_exc)
+            book = dapi_enrich.load_enrichment(dapi_enrich.default_out_path(base)) or {
+                "names": {},
+                "meta": {},
+            }
 
     names = book.get("names") if isinstance(book, Mapping) else None
     rec = None
     if isinstance(names, dict):
         rec = names.get(key) or names.get(short)
+        if not isinstance(rec, Mapping):
+            # Guarantee a discrete enrich row even when only extras/residual know it.
+            try:
+                book = _force_stub_book(key, root=base, prices_ctx=prices_ctx, enrich_error=enrich_error)
+                names = book.get("names") if isinstance(book, Mapping) else None
+                if isinstance(names, dict):
+                    rec = names.get(key) or names.get(short)
+            except Exception as stub_exc:  # noqa: BLE001
+                LOG.warning("ensure enrich row failed: %s", stub_exc)
     in_book = isinstance(rec, Mapping) or key in {
         dapi_enrich.name_key(t) for t in dapi_enrich.book_extra_tickers(base)
     }
@@ -609,21 +694,39 @@ def do_add(
     px = rec.get("px_last") if isinstance(rec, Mapping) else None
 
     rebuild_err = None
+    searchable: bool | None = None
+    search_err: str | None = None
     if rebuild and in_book:
         cb(0.70, "rebuild")
         rebuild_err = run_rebuild(cb, root=base)
+        cb(0.92, "verify search book")
+        searchable, search_err = _ensure_searchable(short, base, land=True)
+        if search_err and not rebuild_err:
+            rebuild_err = search_err
     elif rebuild:
         cb(0.70, "rebuild skipped")
+    else:
+        # No HTML rewrite requested — confirm the card universe only.
+        searchable, search_err = _ensure_searchable(short, base, land=False)
 
     live_failed = bool(rebuild_err) and "legacy-sized" in str(rebuild_err)
-    message = _add_message(short, in_book=in_book, enrich_ok=enrich_ok, px=px, rebuild_err=rebuild_err)
-    ok = bool(in_book) and not live_failed
+    search_failed = searchable is False
+    message = _add_message(
+        short,
+        in_book=in_book,
+        enrich_ok=enrich_ok,
+        px=px,
+        rebuild_err=rebuild_err,
+        searchable=searchable,
+    )
+    ok = bool(in_book) and not live_failed and not search_failed
     cb(1.0, "done" if ok else "failed")
     return {
         "ok": ok,
         "in_book": bool(in_book),
         "enrich_ok": bool(enrich_ok),
         "stubbed": bool(stubbed),
+        "searchable": searchable,
         "ticker": key,
         "short": short,
         "message": message,
@@ -631,6 +734,7 @@ def do_add(
         "merge_err": merge_err,
         "enrich_error": enrich_error,
         "rebuild_err": rebuild_err,
+        "search_err": search_err,
         "px_last": px,
         "kind": "add",
     }
@@ -873,7 +977,7 @@ class DeskHandler(BaseHTTPRequestHandler):
                 "accepted": True,
                 "kind": "add",
                 "ticker": dapi_enrich.canonical_ticker(ticker),
-                "short": dapi_enrich.short_symbol(ticker),
+                "short": dapi_enrich.short_symbol(dapi_enrich.canonical_ticker(ticker)),
             },
         )
 

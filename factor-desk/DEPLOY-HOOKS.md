@@ -707,5 +707,6 @@ Do **not** copy `factorbook.html`, `dapi_enrichment.json`, or `ticker_names.json
 2. Parent `C:\Users\MLP\Desktop\factorbook.html` `#fd-search-book` contains the short symbol `TSEM`.
 3. The file stays ≥ 1MB and still has Refresh / Momentum Up / Momentum Down / Outliers / Options.
 4. If enrich does not fill, the Add status still says the name is in the book.
+5. Add fails closed when prices/residual merged but `#fd-search-book` still lacks the short symbol (the TSEM “integrated into the rest” mode). Recopy the three files above and Add again.
 
 
