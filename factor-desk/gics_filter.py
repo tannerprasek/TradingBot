@@ -93,6 +93,14 @@ def overlay_sector(
     return card
 
 
+def _ordered_sector_names(found: Iterable[str]) -> list[str]:
+    """Official GICS ORDER first, then any extras. Drops blanks."""
+    have = {str(name).strip() for name in found if str(name or "").strip()}
+    known = [s for s in GICS_SECTOR_ORDER if s in have]
+    rest = sorted(s for s in have if s not in GICS_SECTOR_ORDER)
+    return known + rest
+
+
 def sectors_present(
     items: Iterable[Mapping[str, Any]] | Mapping[str, Any] | None,
     cache: Mapping[str, Any] | None = None,
@@ -112,9 +120,16 @@ def sectors_present(
         name = sector_of(item, cache)
         if name:
             found.add(name)
-    known = [s for s in GICS_SECTOR_ORDER if s in found]
-    rest = sorted(s for s in found if s not in GICS_SECTOR_ORDER)
-    return known + rest
+    return _ordered_sector_names(found)
+
+
+def sectors_from_mapping(mapping: Mapping[str, str] | None) -> list[str]:
+    """Chip sectors from the ticker→sector DB (ORDER ∩ DB), not on-screen cards.
+
+    Energy (EN) is included whenever ``Energy`` appears as a DB value, even if
+    home cards happen to omit Energy names. Real Estate only if present in DB.
+    """
+    return _ordered_sector_names((mapping or {}).values())
 
 
 def chip_label(sector: str) -> str:
@@ -159,26 +174,45 @@ def strip_css() -> str:
     """Dark-desk G-chip language. Safe to paste into live factorbook.html."""
     return """
 .filter-strip, .gics-chips {
-  display: inline-flex;
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
-  margin: 0 0 10px;
-  vertical-align: middle;
+  gap: 6px;
+  margin: 0;
+  min-height: 20px;
+}
+#gics-filter-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  flex: 0 0 100%;
+  margin: 0 0 6px;
+  padding: 0;
+  overflow: visible;
 }
 .filter-chip, .gchip {
-  display: inline-block;
-  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.04em;
-  padding: 2px 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 20px;
+  padding: 2px 8px;
   margin: 0;
   border-radius: 3px;
   border: 1px solid #6b7280;
   color: #d1d5db;
   background: #111827;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
   text-transform: none;
-  vertical-align: middle;
   cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
 }
 .filter-chip:hover, .gchip:hover { border-color: #9ca3af; color: #f3f4f6; }
 .filter-chip.active, .gchip.active {
@@ -259,14 +293,19 @@ def strip_js() -> str:
   }
 
   function uniqueSectors(map) {
+    /* have = map values first (ORDER ∩ DB), then on-screen cards.
+       Never drop Energy when it is in the DB just because home cards omit it. */
     var have = {};
+    var keys = Object.keys(map || {});
+    for (var k = 0; k < keys.length; k++) {
+      var name = map[keys[k]];
+      if (name) have[name] = true;
+    }
     var cards = cardNodes();
     for (var i = 0; i < cards.length; i++) {
       var s = sectorOf(cards[i], map);
       if (s) have[s] = true;
     }
-    var keys = Object.keys(map);
-    for (var k = 0; k < keys.length; k++) have[map[keys[k]]] = true;
     var known = [];
     for (var o = 0; o < ORDER.length; o++) if (have[ORDER[o]]) known.push(ORDER[o]);
     var rest = Object.keys(have).filter(function (n) { return known.indexOf(n) < 0; }).sort();
@@ -369,6 +408,23 @@ def render_strip(sectors: Sequence[str] | None) -> str:
 GICS_SECTOR_DB_PLACEHOLDER = "__GICS_SECTOR_DB__"
 DB_SCRIPT_ID = "gics-sector-db"
 STRIP_HOST_ID = "gics-filter-strip"
+CSS_STYLE_ID = "gics-filter-css"
+JS_SCRIPT_ID = "gics-filter-js"
+
+_HOST_RE = re.compile(
+    r"<(div|span)\b[^>]*\bid=['\"]gics-filter-strip['\"][^>]*>.*?</\1>",
+    re.I | re.S,
+)
+_JS_ID_RE = re.compile(
+    rf'<script\b[^>]*\bid=["\']{JS_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
+    re.I | re.S,
+)
+_LEGACY_JS_RE = re.compile(
+    r"<script\b(?![^>]*\bid=['\"]gics-filter-js['\"])[^>]*>"
+    r"(?=[^<]*var STRIP_ID)(?=[^<]*gics-filter-strip)(?=[^<]*gics-hid)"
+    r".*?</script>\s*",
+    re.I | re.S,
+)
 
 
 def sector_db_json(mapping: Mapping[str, str] | None) -> str:
@@ -420,34 +476,38 @@ def markup_attr(sector: str | None) -> str:
 
 
 def _ensure_css(html_text: str) -> str:
-    if ".gics-hid" in html_text and ".gchip" in html_text:
-        return html_text
-    css = strip_css()
-    if "</style>" in html_text:
-        idx = html_text.rfind("</style>")
-        return html_text[:idx] + css + "\n" + html_text[idx:]
-    if "</head>" in html_text:
-        return html_text.replace("</head>", f"<style>\n{css}\n</style>\n</head>", 1)
-    return f"<style>\n{css}\n</style>\n" + html_text
-
-
-def _ensure_host(html_text: str) -> str:
-    if re.search(r'id=["\']gics-filter-strip["\']', html_text, re.I):
-        return html_text
-    host = (
-        f'<div id="{STRIP_HOST_ID}" class="filter-strip gics-chips" '
-        'role="toolbar" aria-label="GICS sector filter"></div>\n'
+    css = f'<style id="{CSS_STYLE_ID}">\n{strip_css()}\n</style>\n'
+    text, n = re.subn(
+        rf'<style\b[^>]*\bid=["\']{CSS_STYLE_ID}["\'][^>]*>.*?</style>\s*',
+        lambda _m: css,
+        html_text,
+        count=1,
+        flags=re.I | re.S,
     )
+    if n:
+        return text
+    if "</head>" in html_text:
+        return html_text.replace("</head>", css + "</head>", 1)
+    return css + html_text
+
+
+def _ensure_host(html_text: str, mapping: Mapping[str, str] | None = None) -> str:
+    """Replace empty-or-any ``#gics-filter-strip`` with baked chips. No early-return."""
+    sectors = sectors_from_mapping(mapping)  # GICS_SECTOR_ORDER ∩ mapping
+    host = render_strip(sectors)  # All + sectors
+    match = _HOST_RE.search(html_text)
+    if match:
+        return html_text[: match.start()] + host + html_text[match.end() :]
     for pat in (
         r"(<nav\b[^>]*>.*?</nav>)",
         r'(<div\b[^>]*class=["\'][^"\']*(?:filter-strip|filters|chip-row|g-row|top-filters)[^"\']*["\'][^>]*>)',
         r"(<h1\b[^>]*>.*?</h1>)",
         r"(<body\b[^>]*>)",
     ):
-        match = re.search(pat, html_text, re.I | re.S)
-        if match:
-            return html_text[: match.end()] + "\n" + host + html_text[match.end() :]
-    return host + html_text
+        found = re.search(pat, html_text, re.I | re.S)
+        if found:
+            return html_text[: found.end()] + "\n" + host + "\n" + html_text[found.end() :]
+    return host + "\n" + html_text
 
 
 def _ensure_db(html_text: str, mapping: Mapping[str, str] | None) -> str:
@@ -477,25 +537,28 @@ def _ensure_db(html_text: str, mapping: Mapping[str, str] | None) -> str:
 
 
 def _ensure_js(html_text: str) -> str:
-    has_strip = "STRIP_ID" in html_text and "gics-filter-strip" in html_text
-    has_fn = "var STRIP_ID" in html_text or "STRIP_ID =" in html_text
-    if has_strip and has_fn and "gics-hid" in html_text and "gics-sector-db" in html_text:
-        return html_text
-    script = "<script>\n" + strip_js() + "\n</script>\n"
+    """Always replace strip JS so uniqueSectors stays map-first, then cards."""
+    script = f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
+    text, n = _JS_ID_RE.subn(lambda _m: script, html_text, count=1)
+    if n:
+        return _LEGACY_JS_RE.sub("", text)
+    text, n = _LEGACY_JS_RE.subn(lambda _m: script, html_text, count=1)
+    if n:
+        return _LEGACY_JS_RE.sub("", text)
     if "</body>" in html_text:
         return html_text.replace("</body>", script + "</body>", 1)
     return html_text + script
 
 
 def ensure_embedded(html_text: str, mapping: Mapping[str, str] | None) -> str:
-    """Re-embed host + CSS + filled sector-db + strip JS after every HTML write.
+    """Re-embed filled chips + CSS + sector-db + strip JS after every HTML write.
 
-    Live ``write_combined`` sometimes keeps the strip/CSS but wipes
-    ``#gics-sector-db`` and the ``STRIP_ID`` script. Call this on the way out.
+    An empty ``#gics-filter-strip`` is replaced with ``render_strip`` (All +
+    ORDER ∩ mapping). Call this on the way out of ``write_combined``.
     """
     text = html_text or ""
     text = _ensure_css(text)
-    text = _ensure_host(text)
+    text = _ensure_host(text, mapping)
     text = _ensure_db(text, mapping)
     text = _ensure_js(text)
     return text

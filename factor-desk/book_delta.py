@@ -46,6 +46,22 @@ def _short(ticker: str) -> str:
     return parts[0].upper() if parts else ""
 
 
+_ARROW_GAP_RE = re.compile(r"\s*→\s*")
+_DIR_GAP_RE = re.compile(r"([↓↑])\s*")
+
+
+def format_streak_fragment(text: Any) -> str:
+    """Reading spaces after ↓/↑ and around →. Does not change streak meaning."""
+    s = str(text or "").strip()
+    s = _ARROW_GAP_RE.sub(" → ", s)
+    s = _DIR_GAP_RE.sub(r"\1 ", s)
+    return re.sub(r" {2,}", " ", s).strip()
+
+
+def format_streak_chip_label(ticker: Any, was: Any, now: Any) -> str:
+    return f"stk {ticker} {format_streak_fragment(was)} → {format_streak_fragment(now)}"
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -292,7 +308,7 @@ def diff_snapshots(
         was = br.get("label_was") or f"{br.get('from')} {br.get('was_streak')}d"
         now = br.get("label_now") or f"{br.get('to')} {br.get('now_streak')}d"
         chip(
-            f"stk {br.get('t')} {was}→{now}",
+            format_streak_chip_label(br.get("t"), was, now),
             "delta-streak",
             f"{br.get('ticker')} streak {was} → {now}",
         )
@@ -346,27 +362,51 @@ def strip_css() -> str:
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
-  margin: 0 0 10px;
-  min-height: 22px;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  flex: 0 0 100%;
+  margin: 0;
+  padding: 0;
+  min-height: 20px;
+  overflow: visible;
 }}
 .fd-book-delta-kicker {{
-  font: 650 10px/1.15 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.06em;
-  color: #6b7280;
-  text-transform: uppercase;
-  margin-right: 4px;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  flex: 0 0 100%;
+  width: 100%;
+  min-height: 20px;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  color: #9ca3af;
+  text-transform: none;
+  white-space: nowrap;
+  overflow: visible;
 }}
 .fd-dchip {{
-  display: inline-block;
-  font: 650 10px/1.15 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.03em;
-  padding: 2px 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 20px;
+  margin: 0;
+  padding: 2px 8px;
   border-radius: 3px;
   border: 1px solid #4b5563;
   color: #d1d5db;
   background: #111827;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans Symbols 2", "Noto Sans Symbols", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }}
+.fd-dchip[hidden], .fd-delta-extra-chip[hidden] {{ display: none !important; }}
 .fd-dchip.delta-flags {{ color: #93c5fd; border-color: #3b82f6; }}
 .fd-dchip.delta-flags-off {{ color: #9ca3af; border-color: #4b5563; }}
 .fd-dchip.delta-watch {{ color: #fde68a; border-color: #a3a3a3; }}
@@ -375,15 +415,34 @@ def strip_css() -> str:
 .fd-dchip.delta-jump {{ color: #6ee7b7; border-color: #34d399; }}
 .fd-dchip.delta-baseline, .fd-dchip.delta-quiet {{ color: #6b7280; border-color: #374151; }}
 .fd-book-delta-more {{
-  font: 650 10px/1.15 "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 20px;
+  margin: 0;
+  padding: 2px 8px;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.04em;
   color: #9ca3af;
-  background: transparent;
+  background: #111827;
   border: 1px dashed #4b5563;
   border-radius: 3px;
-  padding: 2px 7px;
+  white-space: nowrap;
   cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
 }}
-.fd-book-delta-extra {{ display: none; flex-wrap: wrap; gap: 4px; width: 100%; }}
+.fd-book-delta-extra {{
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}}
 .fd-book-delta-extra.is-on {{ display: flex; }}
 """.strip()
 

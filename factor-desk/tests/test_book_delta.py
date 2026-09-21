@@ -68,6 +68,10 @@ class DiffTests(unittest.TestCase):
         self.assertIn("NVDA", labels)
         self.assertIn("WATCH", labels)
         self.assertIn("OUT", labels)
+        stk = next(c["label"] for c in diff["chips"] if c["label"].startswith("stk AAPL"))
+        self.assertEqual(stk, "stk AAPL ↑ 20d>5 → ↓ 1d<5")
+        self.assertNotIn("→↓", stk)
+        self.assertNotIn("↑20", stk)
 
     def test_roundtrip_snapshot_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,6 +92,56 @@ class DiffTests(unittest.TestCase):
         self.assertIn('id="fd-book-delta"', html)
         self.assertIn("baseline set", html)
         self.assertIn("fd-book-delta-db", html)
+        self.assertIn(f'id="{bd.CSS_STYLE_ID}"', html)
+        self.assertIn("gap: 6px", html)
+        self.assertIn("fd-book-delta-kicker", html)
+
+    def test_kicker_own_row_readable_not_crowded(self) -> None:
+        diff = {
+            "baseline": False,
+            "chips": [
+                {"label": "OUT +DKS +GTLB", "cls": "delta-out", "title": "New outliers"},
+                {"label": "CRWD +2", "cls": "delta-jump", "title": "CRWD"},
+            ],
+            "extra": [{"label": "extra", "cls": "delta-jump", "title": "x"}],
+        }
+        html = bd.ensure_embedded("<html><head></head><body><nav></nav></body></html>", diff)
+        self.assertIn("since last Refresh", html)
+        self.assertIn('class="fd-book-delta-kicker">since last Refresh</span>', html)
+        kicker_at = html.index("fd-book-delta-kicker")
+        pills_at = html.index("OUT +DKS")
+        self.assertLess(kicker_at, pills_at)
+        css = bd.strip_css()
+        block = css.split(".fd-book-delta-kicker", 1)[1].split(".fd-dchip", 1)[0]
+        self.assertIn("flex: 0 0 100%", block)
+        self.assertIn("#9ca3af", block)
+        self.assertNotIn("uppercase", block)
+        self.assertNotIn("#6b7280", block)
+        js = bd.strip_js()
+        self.assertIn('kicker.textContent = data.baseline ? "book" : "since last Refresh"', js)
+        again = bd.ensure_embedded(html.replace("since last Refresh", "gone", 1), diff)
+        self.assertIn("since last Refresh", again)
+        self.assertEqual(again.count('id="fd-book-delta"'), 1)
+
+    def test_css_style_id_replaces_on_resync(self) -> None:
+        diff = bd.diff_snapshots(None, {"names": {}, "flags": [], "watch": [], "outliers": []})
+        html = bd.ensure_embedded("<html><head></head><body></body></html>", diff)
+        stale = html.replace("gap: 6px", "gap: 99px", 1)
+        self.assertIn("gap: 99px", stale)
+        again = bd.ensure_embedded(stale, diff)
+        self.assertEqual(again.count(f'id="{bd.CSS_STYLE_ID}"'), 1)
+        self.assertIn("gap: 6px", again)
+        self.assertNotIn("gap: 99px", again)
+
+    def test_streak_fragment_spacing(self) -> None:
+        self.assertEqual(bd.format_streak_fragment("↓1d<5"), "↓ 1d<5")
+        self.assertEqual(bd.format_streak_fragment("↑57d>5"), "↑ 57d>5")
+        self.assertEqual(bd.format_streak_fragment("↓ 1d<5"), "↓ 1d<5")
+        self.assertEqual(bd.format_streak_fragment("=5"), "=5")
+        self.assertEqual(
+            bd.format_streak_chip_label("MANH", "↓1d<5", "↑57d>5"),
+            "stk MANH ↓ 1d<5 → ↑ 57d>5",
+        )
 
 
 if __name__ == "__main__":
