@@ -440,5 +440,204 @@ console.log(JSON.stringify(report));
             self.assertNotRegex(static_html, r'data-key="mom-score-d10"(?!-)')
 
 
+class Chg1dHeaderTests(unittest.TestCase):
+    def test_signed_percent_beside_name_and_distinct_from_d10(self) -> None:
+        up = cr.chg_1d_html({"t": "MSTR", "ret_1d": 0.012, "mom_score_d10": 0, "mom_score_d10_short": "0"})
+        self.assertIn("+1.2%", up)
+        self.assertIn("px-1d", up)
+        self.assertIn("chg-1d", up)
+        self.assertIn('title="1d CHG_PCT_1D"', up)
+        self.assertNotIn("mom-score-d10", up)
+        down = cr.chg_1d_html({"CHG_PCT_1D": -0.8})
+        self.assertIn("\u22120.8%", down)
+        self.assertIn("down", down)
+        flat = cr.chg_1d_html({"day": 0})
+        self.assertIn("0.0%", flat)
+        self.assertIn("flat", flat)
+        self.assertEqual(cr.chg_1d_html({"t": "MSTR", "score": 10, "mom_score_d10": 0}), "")
+        self.assertNotIn("n/a", up.lower())
+
+    def test_decimal_day_wins_over_bloomberg_points(self) -> None:
+        self.assertAlmostEqual(cr.day_decimal({"day": 0.012, "CHG_PCT_1D": 9.0}), 0.012)
+        self.assertAlmostEqual(cr.day_decimal({"ret_1d": -0.008}), -0.008)
+        self.assertAlmostEqual(cr.day_decimal({"CHG_PCT_1D": -0.8}), -0.008)
+        self.assertAlmostEqual(cr.day_decimal({"metrics": {"day_pct": 0.021}}), 0.021)
+        self.assertIsNone(cr.day_decimal({"t": "MSTR", "score": 10}))
+        stamped: dict = {"CHG_PCT_1D": 1.2}
+        cr.alias_stats(stamped)
+        self.assertAlmostEqual(stamped["day"], 0.012)
+        self.assertAlmostEqual(stamped["ret_1d"], 0.012)
+        self.assertAlmostEqual(stamped["metrics"]["day_pct"], 0.012)
+        kept = {"day": 0.05, "CHG_PCT_1D": 1.2, "metrics": {"day_pct": 0.05}}
+        cr.stamp_day(kept)
+        self.assertEqual(kept["day"], 0.05)
+        self.assertEqual(kept["metrics"]["day_pct"], 0.05)
+
+    def test_article_header_places_chip_inside_name_not_score(self) -> None:
+        card = {
+            "ticker": "MSTR",
+            "mom_score": 10,
+            "ret_1d": 0.012,
+            "mom_score_d10": 0,
+            "mom_score_d10_prior": 10,
+            "mom_score_d10_date": "2026-09-07",
+        }
+        html = desk_dash._article_html(card)
+        self.assertRegex(
+            html,
+            r"<h2>MSTR<span class=\"px-1d chg-1d up\"[^>]*title=\"1d CHG_PCT_1D\">\+1\.2%</span></h2>",
+        )
+        score_at = html.find('<span class="score sc">')
+        pills_at = html.find('<div class="pills">', score_at)
+        score_html = html[score_at:pills_at]
+        self.assertGreater(score_at, 0)
+        self.assertIn("mom-score-d10-near", score_html)
+        self.assertIn(">0<", score_html)
+        self.assertNotIn("px-1d", score_html)
+        self.assertNotIn("+1.2%", score_html)
+        bare = desk_dash._article_html({"ticker": "MSTR", "mom_score": 10, "mom_score_d10": 0})
+        self.assertNotIn("px-1d", bare)
+        self.assertNotIn("chg-1d", bare)
+        self.assertIn("mom-score-d10-near", bare)
+
+    def test_detail_and_live_cardhtml_paint_1d_beside_name(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        jsdom_root = Path("/tmp/fd-jsdom")
+        jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+        if not jsdom_mod.is_dir():
+            jsdom_root.mkdir(parents=True, exist_ok=True)
+            npm = shutil.which("npm")
+            if not npm:
+                self.skipTest("npm not installed")
+            subprocess.run(
+                [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        live = """<!DOCTYPE html><html><head></head><body>
+<section id="view-detail" data-t="MSTR US Equity">
+  <article class="card" data-t="MSTR">
+    <header>
+      <h2>MSTR</h2>
+      <span class="score">10<span class="mom-score-d10-near flat" data-key="mom-score-d10-near">0</span></span>
+      <div class="pills"><span class="badge">Momentum building</span></div>
+    </header>
+  </article>
+  <div class="factor-card">
+    <header><h2>MSTR STRATEGY INC</h2><span class="badge">LEADER</span></header>
+  </div>
+</section>
+<script>function cardHTML(c){
+  var t = (c && (c.t || c.d)) || "";
+  var d10 = (c && c.mom_score_d10_short) ? '<span class="mom-score-d10-near flat" data-key="mom-score-d10-near">'+c.mom_score_d10_short+'</span>' : '';
+  return '<article class="card" data-t="'+t+'"><header><h2>'+t+'</h2><span class="score">'+(c.score!=null?c.score:"")+d10+'</span><div class="pills"><span class="badge">OUTLIER</span></div></header></article>';
+}</script>
+</body></html>"""
+        html = cr.ensure_embedded(live, {"MSTR": 0.012, "MSTR US Equity": 0.012})
+        self.assertIn('id="fd-chg-1d-db"', html)
+        self.assertIn("paintChg1d", html)
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            runner = Path(tmp) / "run.js"
+            page.write_text(html, encoding="utf-8")
+            runner.write_text(
+                f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+const html = fs.readFileSync({json.dumps(str(page))}, "utf8");
+const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1/factorbook.html" }});
+const window = dom.window;
+const document = window.document;
+if (typeof window.__FD_PAINT_CHG_1D__ === "function") window.__FD_PAINT_CHG_1D__();
+function chipInfo(root) {{
+  if (!root) return null;
+  var el = root.querySelector(".px-1d, .chg-1d, [data-key='chg-1d']");
+  if (!el) return null;
+  var score = el.closest && el.closest(".score, .sc");
+  return {{ text: el.textContent, title: el.title, cls: el.className, inScore: !!score }};
+}}
+const left = document.querySelector("article.card");
+const right = document.querySelector(".factor-card");
+const hold = document.createElement("div");
+hold.innerHTML = window.cardHTML({{
+  t: "QQQ", score: 4, ret_1d: -0.008,
+  mom_score_d10: 0, mom_score_d10_short: "0"
+}});
+const miss = document.createElement("div");
+miss.innerHTML = window.cardHTML({{ t: "MISS", score: 3, mom_score_d10: 0, mom_score_d10_short: "0" }});
+const bb = document.createElement("div");
+bb.innerHTML = window.cardHTML({{
+  t: "AMD", score: 8, CHG_PCT_1D: 1.2, day: null,
+  mom_score_d10: 1, mom_score_d10_short: "+1"
+}});
+const zero = document.createElement("div");
+zero.innerHTML = window.cardHTML({{
+  t: "ZERO", score: 6, day: 0,
+  mom_score_d10: 0, mom_score_d10_short: "0"
+}});
+const report = {{
+  leftChip: chipInfo(left),
+  leftScore: left.querySelector(".score") ? left.querySelector(".score").textContent : "",
+  leftPills: left.querySelector(".pills") ? left.querySelector(".pills").textContent : "",
+  leftD10: left.querySelectorAll(".mom-score-d10-near, [data-key='mom-score-d10-near']").length,
+  rightChip: chipInfo(right),
+  rightName: right.querySelector("h2") ? right.querySelector("h2").textContent : "",
+  rightBadge: right.textContent.indexOf("LEADER") >= 0,
+  qqq: hold.innerHTML,
+  qqqChip: chipInfo(hold),
+  qqqScore: hold.querySelector(".score") ? hold.querySelector(".score").textContent : "",
+  missChip: chipInfo(miss),
+  amd: bb.innerHTML,
+  amdChip: chipInfo(bb),
+  amdScore: bb.querySelector(".score") ? bb.querySelector(".score").textContent : "",
+  zeroChip: chipInfo(zero),
+  zeroScore: zero.querySelector(".score") ? zero.querySelector(".score").textContent : ""
+}};
+console.log(JSON.stringify(report));
+""",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [node, str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            report = json.loads(proc.stdout.strip().splitlines()[-1])
+            self.assertEqual(report["leftChip"]["text"], "+1.2%")
+            self.assertIn("up", report["leftChip"]["cls"])
+            self.assertEqual(report["leftChip"]["title"], "1d CHG_PCT_1D")
+            self.assertFalse(report["leftChip"]["inScore"])
+            self.assertEqual(report["leftD10"], 1)
+            self.assertIn("0", report["leftScore"])
+            self.assertNotIn("+1.2%", report["leftScore"])
+            self.assertIn("Momentum building", report["leftPills"])
+            self.assertEqual(report["rightChip"]["text"], "+1.2%")
+            self.assertFalse(report["rightChip"]["inScore"])
+            self.assertIn("MSTR STRATEGY INC", report["rightName"])
+            self.assertTrue(report["rightBadge"])
+            self.assertEqual(report["qqqChip"]["text"], "\u22120.8%")
+            self.assertIn("down", report["qqqChip"]["cls"])
+            self.assertNotIn("\u22120.8%", report["qqqScore"])
+            self.assertIn("0", report["qqqScore"])
+            self.assertIn('data-key="mom-score-d10-near"', report["qqq"])
+            self.assertIsNone(report["missChip"])
+            self.assertNotIn("px-1d", report["miss"] if "miss" in report else "")
+            self.assertNotIn("n/a", report["qqq"].lower())
+            self.assertEqual(report["amdChip"]["text"], "+1.2%")
+            self.assertIn("+1", report["amdScore"])
+            self.assertNotIn("+1.2%", report["amdScore"])
+            self.assertEqual(report["zeroChip"]["text"], "0.0%")
+            self.assertIn("flat", report["zeroChip"]["cls"])
+            self.assertNotIn("0.0%", report["zeroScore"])
+            self.assertIn("0", report["zeroScore"])
+
+
 if __name__ == "__main__":
     unittest.main()

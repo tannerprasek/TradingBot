@@ -246,13 +246,14 @@ def _article_html(card: Mapping[str, Any], cache: Mapping[str, Any] | None = Non
     if score is None:
         score, _src = mom_streak.resolve_card_score(card)
     score_html = _score_html(card, score)
+    chg_html = card_render.chg_1d_html(card)
     spark = chart_marks.render_svg(card)
     mark = paper_trade.mark_of(card)
     px_attr = f' data-px="{mark}"' if mark is not None else ""
     return f"""
             <article class="card" data-t="{ticker}" data-ticker="{ticker}" data-gics-sector="{sector_attr}"{px_attr}>
               <header>
-                <h2>{ticker}</h2>
+                <h2>{ticker}{chg_html}</h2>
                 {score_html}
                 <div class="pills">{pills}</div>
               </header>
@@ -355,6 +356,9 @@ def cards_from_enrichment(book: Mapping[str, Any] | None) -> list[dict[str, Any]
             "tag_triggers": rec.get("tag_triggers") or rec.get("tags"),
             "px_last": rec.get("px_last"),
             "px_series": rec.get("px_series") or rec.get("prices") or rec.get("closes"),
+            "chg_pct_1d": rec.get("chg_pct_1d"),
+            "day": rec.get("day"),
+            "ret_1d": rec.get("ret_1d"),
         }
         cards.append(card)
     return cards
@@ -2413,7 +2417,7 @@ def render_html(
     html_text = gics_filter.ensure_embedded(html_text, None)  # BINNED: remove leftover GICS strip
     html_text = mom_streak.ensure_embedded(html_text, streak_map)
     html_text = chart_marks.ensure_embedded(html_text, chart_map)
-    html_text = card_render.ensure_embedded(html_text)
+    html_text = card_render.ensure_embedded(html_text, card_render.chg_1d_db(cards, book))
     html_text = breakout.ensure_embedded(html_text, ranked)
     html_text = book_delta.ensure_embedded(html_text, None)  # BINNED: remove leftover book-delta strip
     html_text = desk_hitch.ensure_embedded(html_text, hitch_map)
@@ -2483,7 +2487,7 @@ def write_combined(
     text = gics_filter.ensure_embedded(text, None)  # BINNED: remove leftover GICS strip
     text = mom_streak.ensure_embedded(text, mom_streak.streak_db(cards, hist=hist))
     text = chart_marks.ensure_embedded(text, chart_marks.chart_db(cards))
-    text = card_render.ensure_embedded(text)
+    text = card_render.ensure_embedded(text, card_render.chg_1d_db(cards, book))
     text = breakout.ensure_embedded(text, ranked)
     text = book_delta.ensure_embedded(text, None)  # BINNED: remove leftover book-delta strip
     text = desk_hitch.ensure_embedded(text, hitch_map)

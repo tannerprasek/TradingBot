@@ -15,13 +15,16 @@ module next to live ``desk_dash.py`` and call ``ensure_embedded``.
 
 from __future__ import annotations
 
+import html
 import json
+import math
 import re
 from typing import Any, Mapping, MutableMapping
 
 CSS_STYLE_ID = "fd-card-css"
 JS_SCRIPT_ID = "fd-card-js"
-JS_VER = "pr20-d10-short"
+JS_VER = "pr21-chg-1d"
+DB_SCRIPT_ID = "fd-chg-1d-db"
 
 _BAND_WHY_RE = re.compile(r"^band\s", re.I)
 _DUMP_PILL_KEYS = frozenset({"fd-bb"})
@@ -93,6 +96,13 @@ DAY_KEYS: tuple[str, ...] = (
     "R1",
     "ret1",
 )
+# Bloomberg ``CHG_PCT_1D`` is percent points (1.2 = +1.2%). ``day`` / ``ret_1d`` /
+# ``metrics.day_pct`` stay decimals (0.012 = +1.2%), same as ``r20_pct`` / ``ret_n``.
+PCT_POINT_KEYS: tuple[str, ...] = (
+    "CHG_PCT_1D",
+    "chg_pct_1d",
+)
+_METRIC_DAY_KEYS: tuple[str, ...] = ("day_pct", "r1_pct", "ret_1d", "day")
 _SKIP_PORTABLE = frozenset(
     {
         "px_series",
@@ -265,7 +275,132 @@ def alias_stats(card: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         card.setdefault("atr", atr)
         card.setdefault("ATR", atr)
         card.setdefault("ATRS", atr)
+    stamp_day(card)
     return card
+
+
+def _as_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(num) or math.isinf(num):
+        return None
+    return num
+
+
+def day_decimal(card: Mapping[str, Any] | None) -> float | None:
+    """1-day return as a decimal (``0.012`` → ``+1.2%``).
+
+    Decimal fields (``metrics.day_pct`` / ``ret_1d`` / ``day``) win. Bloomberg
+    ``CHG_PCT_1D`` (percent points) is used only when those are empty.
+    """
+    if not isinstance(card, Mapping):
+        return None
+    metrics = card.get("metrics") if isinstance(card.get("metrics"), Mapping) else None
+    for src, keys in (
+        (metrics, _METRIC_DAY_KEYS),
+        (card, DAY_KEYS),
+    ):
+        picked = _pick_num(src, keys)
+        num = _as_float(picked)
+        if num is not None:
+            return num
+    for src in (metrics, card):
+        picked = _pick_num(src, PCT_POINT_KEYS)
+        num = _as_float(picked)
+        if num is not None:
+            return num / 100.0
+    return None
+
+
+def _js_round1(value: float) -> float:
+    """Match ``Math.round(x * 10) / 10`` (ties towards +∞)."""
+    return math.floor(value * 10.0 + 0.5) / 10.0
+
+
+def format_chg_1d(decimal: float) -> tuple[str, str]:
+    """Signed 1-day percent and side: ``('+1.2%', 'up')`` / ``('−0.8%', 'down')`` / ``('0.0%', 'flat')``."""
+    rounded = _js_round1(float(decimal) * 100.0)
+    if rounded == 0:
+        return "0.0%", "flat"
+    if rounded > 0:
+        return f"+{rounded:.1f}%", "up"
+    return f"\u2212{abs(rounded):.1f}%", "down"
+
+
+def chg_1d_html(card: Mapping[str, Any] | None) -> str:
+    """Compact header chip. Empty string when the 1-day change is missing."""
+    dec = day_decimal(card)
+    if dec is None:
+        return ""
+    label, side = format_chg_1d(dec)
+    shown = html.escape(label)
+    attr = html.escape(f"{dec:.8g}", quote=True)
+    return (
+        f'<span class="px-1d chg-1d {side}" data-key="chg-1d" data-chg-1d="{attr}" '
+        f'title="1d CHG_PCT_1D">{shown}</span>'
+    )
+
+
+def stamp_day(card: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    """Copy a resolved 1-day decimal onto ``day`` / ``ret_1d`` / ``metrics.day_pct`` when empty."""
+    dec = day_decimal(card)
+    if dec is None:
+        return card
+    if _pick_num(card, DAY_KEYS) is None:
+        card["day"] = dec
+        card.setdefault("Day", dec)
+        card.setdefault("ret_1d", dec)
+    metrics = card.get("metrics")
+    chg = _pick_num(card, PCT_POINT_KEYS)
+    if isinstance(metrics, Mapping) and not isinstance(metrics, dict):
+        metrics = dict(metrics)
+        card["metrics"] = metrics
+    if isinstance(card.get("metrics"), dict):
+        blob = card["metrics"]
+        if blob.get("day_pct") is None and blob.get("r1_pct") is None:
+            blob["day_pct"] = dec
+    elif chg is not None:
+        card["metrics"] = {"day_pct": dec}
+    return card
+
+
+def chg_1d_db(
+    cards: Any = None,
+    book: Mapping[str, Any] | None = None,
+) -> dict[str, float]:
+    """Ticker → decimal 1-day return for baked cards (Bloomberg fills gaps)."""
+    out: dict[str, float] = {}
+
+    def put(ticker: Any, src: Mapping[str, Any] | None) -> None:
+        if not isinstance(src, Mapping):
+            return
+        dec = day_decimal(src)
+        if dec is None:
+            return
+        key = str(ticker or "").strip()
+        if not key:
+            return
+        val = round(float(dec), 8)
+        if key not in out:
+            out[key] = val
+        short = _short(key)
+        if short and short not in out:
+            out[short] = val
+
+    if cards:
+        for card in cards:
+            if not isinstance(card, Mapping):
+                continue
+            put(card.get("ticker") or card.get("t") or card.get("name") or card.get("d"), card)
+    names = book.get("names") if isinstance(book, Mapping) else None
+    if isinstance(names, dict):
+        for ticker, rec in names.items():
+            put(ticker, rec if isinstance(rec, Mapping) else None)
+    return out
 
 
 def portable_card(
@@ -393,7 +528,7 @@ def normalize_card(
                 continue
             if out.get(key) is None or out.get(key) == "":
                 out[key] = val
-    for key in DAY_KEYS + R20_KEYS + RS63_KEYS + ATR_KEYS + ("score", "mom_score"):
+    for key in DAY_KEYS + PCT_POINT_KEYS + R20_KEYS + RS63_KEYS + ATR_KEYS + ("score", "mom_score"):
         if out.get(key) is None and row.get(key) is not None and row.get(key) != "":
             out[key] = row.get(key)
     if out.get("score") is None and row.get("score") is not None:
@@ -526,6 +661,22 @@ article.card .mom-score-d10-near {
 article.card .mom-score-d10-near.up { color: #6ee7b7 !important; }
 article.card .mom-score-d10-near.down { color: #fda4af !important; }
 article.card .mom-score-d10-near.flat { color: #9ca3af !important; }
+/* 1-day price change beside the ticker / company name. Not the 10d score delta. */
+.px-1d, .chg-1d {
+  display: inline !important;
+  margin-left: 8px;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  font: 600 12px/1.15 ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace !important;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  vertical-align: baseline;
+  flex: 0 0 auto;
+}
+.px-1d.up, .chg-1d.up { color: #6ee7b7 !important; }
+.px-1d.down, .chg-1d.down { color: #fda4af !important; }
+.px-1d.flat, .chg-1d.flat { color: #9ca3af !important; }
 """.strip()
 
 
@@ -533,7 +684,7 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
-  var CARD_VER = "pr20-d10-short";
+  var CARD_VER = "pr21-chg-1d";
   if (window.__FD_CARD_BOUND__ === CARD_VER) return;
   window.__FD_CARD_BOUND__ = CARD_VER;
 
@@ -564,6 +715,8 @@ def strip_js() -> str:
   var RS63_KEYS = ["rs63","RS63","rs_63","rel_63","rel_63d","RS_63"];
   var ATR_KEYS = ["atr_pct","atrpct","ATR_PCT","atr%","atrs","ATRS","atr","ATR","atrp"];
   var DAY_KEYS = ["day","Day","d1","ret_1d","r1","R1","ret1"];
+  var PCT_POINT_KEYS = ["CHG_PCT_1D","chg_pct_1d"];
+  var METRIC_DAY_KEYS = ["day_pct","r1_pct","ret_1d","day"];
   var SKIP_COPY = {px_series:1,prices:1,closes:1,history:1,px_hist:1,mom_score_series:1,series:1,spark:1,html:1,svg:1,_card:1,card:1,why:1,pills:1};
 
   function catalogKey(text) {
@@ -607,7 +760,56 @@ def strip_js() -> str:
       if (card.atr == null) card.atr = atr;
       if (card.ATR == null) card.ATR = atr;
     }
+    stampDay(card);
     return card;
+  }
+  function dayDecimal(card) {
+    if (!card) return null;
+    var m = card.metrics || {};
+    var dec = pickNum(m, METRIC_DAY_KEYS);
+    if (dec == null) dec = pickNum(card, DAY_KEYS);
+    if (dec != null) {
+      var n = Number(dec);
+      return isFinite(n) ? n : null;
+    }
+    var pts = pickNum(m, PCT_POINT_KEYS);
+    if (pts == null) pts = pickNum(card, PCT_POINT_KEYS);
+    if (pts == null) return null;
+    var p = Number(pts);
+    return isFinite(p) ? p / 100 : null;
+  }
+  function stampDay(card) {
+    if (!card) return card;
+    var dec = dayDecimal(card);
+    if (dec == null) return card;
+    if (pickNum(card, DAY_KEYS) == null) {
+      card.day = dec;
+      if (card.Day == null) card.Day = dec;
+      if (card.ret_1d == null) card.ret_1d = dec;
+    }
+    var chg = pickNum(card, PCT_POINT_KEYS);
+    if (chg == null && card.metrics) chg = pickNum(card.metrics, PCT_POINT_KEYS);
+    if (!card.metrics || typeof card.metrics !== "object") {
+      if (chg != null) card.metrics = { day_pct: dec };
+      return card;
+    }
+    if (card.metrics.day_pct == null && card.metrics.r1_pct == null) card.metrics.day_pct = dec;
+    return card;
+  }
+  function formatChg1d(dec) {
+    var pct = Number(dec) * 100;
+    if (!isFinite(pct)) return null;
+    var rounded = Math.round(pct * 10) / 10;
+    if (rounded === 0) return { label: "0.0%", side: "flat" };
+    if (rounded > 0) return { label: "+" + rounded.toFixed(1) + "%", side: "up" };
+    return { label: "\u2212" + Math.abs(rounded).toFixed(1) + "%", side: "down" };
+  }
+  function chg1dHTML(card) {
+    var dec = dayDecimal(card);
+    if (dec == null) return "";
+    var view = formatChg1d(dec);
+    if (!view) return "";
+    return '<span class="px-1d chg-1d ' + view.side + '" data-key="chg-1d" data-chg-1d="' + esc(dec) + '" title="1d CHG_PCT_1D">' + esc(view.label) + "</span>";
   }
   function activeTagsFromCard(card) {
     var out = [];
@@ -782,7 +984,7 @@ def strip_js() -> str:
     }
     if (out.score == null && row.score != null) out.score = row.score;
     if (out.mom_score == null && row.score != null) out.mom_score = row.score;
-    ["day","r20","rs63","atr_pct","R20","RS63"].forEach(function (k) {
+    ["day","ret_1d","CHG_PCT_1D","chg_pct_1d","r20","rs63","atr_pct","R20","RS63"].forEach(function (k) {
       if ((out[k] == null || out[k] === "") && row[k] != null && row[k] !== "") out[k] = row[k];
     });
     if (isBandDump(out.why) || (row.why && out.why === row.why)) delete out.why;
@@ -877,7 +1079,7 @@ def strip_js() -> str:
       return p && p.key !== "mom-score-d10";
     });
     return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(c.ticker || t) + '">' +
-      "<header><h2>" + t + '</h2><span class="sc score">' + esc(String(score)) + near + "</span>" +
+      "<header><h2>" + t + chg1dHTML(c) + '</h2><span class="sc score">' + esc(String(score)) + near + "</span>" +
       '<div class="pills">' + pillsHTML(pills) + "</div></header>" +
       '<div class="stats"><span>Day ' + esc(day) + "</span><span>R20 " + esc(r20) + "</span><span>RS63 " + esc(rs63) + "</span><span>ATR% " + esc(atr) + "</span></div>" +
       "</article>";
@@ -1179,12 +1381,136 @@ def strip_js() -> str:
     if (d10.delta != null && d10.delta !== "") cap.setAttribute("data-mom-score-d10", String(d10.delta));
     cap.textContent = d10.label;
   }
+  function readChgDb() {
+    var el = document.getElementById("fd-chg-1d-db");
+    if (!el) return {};
+    try { return JSON.parse(el.textContent || "{}") || {}; } catch (e) { return {}; }
+  }
+  function tickerOfNode(node) {
+    var n = node;
+    while (n && n.getAttribute) {
+      var t = n.getAttribute("data-t") || n.getAttribute("data-ticker") || n.getAttribute("data-name") || "";
+      if (String(t).trim()) return String(t).trim();
+      n = n.parentElement;
+    }
+    return "";
+  }
+  function dayFromDb(node) {
+    var db = readChgDb();
+    var t = tickerOfNode(node);
+    if (!t) return null;
+    if (db[t] != null && isFinite(Number(db[t]))) return Number(db[t]);
+    var short = shortOf(t);
+    if (short && db[short] != null && isFinite(Number(db[short]))) return Number(db[short]);
+    var keys = Object.keys(db);
+    for (var i = 0; i < keys.length; i++) {
+      if (short && shortOf(keys[i]) === short && isFinite(Number(db[keys[i]]))) return Number(db[keys[i]]);
+    }
+    return null;
+  }
+  function isNameNode(el) {
+    if (!el || !el.tagName) return false;
+    var tag = el.tagName;
+    if (tag === "H1" || tag === "H2" || tag === "H3") return true;
+    var cls = String(el.className || "");
+    return /(^|\s)(name|company|sec-name|long-name|nm|ticker)(\s|$)/.test(cls);
+  }
+  function looksLikeChromeTitle(text) {
+    var t = String(text || "").replace(/\s+/g, " ").trim().toUpperCase();
+    if (!t || t.length > 80) return true;
+    return t === "DETAIL" || t === "HOME" || t === "FLAGS" || t === "WATCH" || t === "OUTLIERS" ||
+      t === "OPTIONS" || t === "EXPERIMENTAL" || t === "PAPER" || t === "FACTOR DESK" ||
+      t.indexOf("MOMENTUM") === 0 || t.indexOf("BREAKOUT") === 0 || t.indexOf("BREAKDOWN") === 0;
+  }
+  function nameEl(node) {
+    if (!node || !node.querySelector) return null;
+    if (isNameNode(node) && !looksLikeChromeTitle(ownText(node) || node.textContent)) return node;
+    var header = node.querySelector("header, .hd, .head, .row1, .name-row, .title-row") || node;
+    var el = header.querySelector("h1, h2, h3, .name, .company, .sec-name, .long-name, .nm, .ticker");
+    if (!el) return null;
+    if (el.closest && el.closest(".score, .sc, .pills, .chips, .badges, .stats, svg, nav, .topnav")) return null;
+    if (looksLikeChromeTitle(ownText(el) || el.textContent)) return null;
+    var owner = el.closest && el.closest("article.card, article[data-t], .card, .name-card, .factor-card, .detail-card, .fd-name-card");
+    if (owner && owner !== node && node.contains && node.contains(owner)) return null;
+    return el;
+  }
+  function resolveDay(node, card) {
+    var dec = dayDecimal(card);
+    if (dec == null && node) {
+      var found = null;
+      try { found = findCard(tickerOfNode(node)); } catch (e0) { found = null; }
+      if (found && found !== card) dec = dayDecimal(found);
+    }
+    if (dec == null && node) dec = dayFromDb(node);
+    return dec;
+  }
+  function paintChg1d(node, card) {
+    if (!node || node.nodeType !== 1) return;
+    if (node.closest && node.closest("nav, .topnav, #topnav, #gics-filter-strip")) return;
+    var host = nameEl(node);
+    if (!host) return;
+    var dec = resolveDay(node, card);
+    var chip = null;
+    for (var c = host.firstElementChild; c; c = c.nextElementSibling) {
+      if (c.classList && (c.classList.contains("px-1d") || c.classList.contains("chg-1d"))) { chip = c; break; }
+    }
+    if (!chip && host.nextElementSibling && host.nextElementSibling.classList &&
+        (host.nextElementSibling.classList.contains("px-1d") || host.nextElementSibling.classList.contains("chg-1d"))) {
+      chip = host.nextElementSibling;
+    }
+    if (dec == null) {
+      if (chip && chip.parentNode) chip.parentNode.removeChild(chip);
+      return;
+    }
+    var view = formatChg1d(dec);
+    if (!view) {
+      if (chip && chip.parentNode) chip.parentNode.removeChild(chip);
+      return;
+    }
+    if (chip && chip.textContent === view.label && chip.classList.contains(view.side) && chip.parentNode === host) return;
+    if (!chip) chip = document.createElement("span");
+    chip.className = "px-1d chg-1d " + view.side;
+    chip.setAttribute("data-key", "chg-1d");
+    chip.setAttribute("data-chg-1d", String(dec));
+    chip.title = "1d CHG_PCT_1D";
+    chip.textContent = view.label;
+    var score = host.querySelector(".score, .sc, .mom-score-d10-near");
+    if (score && host.contains(score)) host.insertBefore(chip, score);
+    else host.appendChild(chip);
+  }
+  var CARD_SEL = "article.card, article[data-t], article[data-ticker], .card, .name-card, .factor-card, .detail-card, .fd-name-card";
+  var DETAIL_SEL = "#detail, #view-detail, #fd-detail, .view-detail, .detail-pane, .detail-grid, [data-view='detail']";
+  function paintAllChg1d() {
+    var nodes = document.querySelectorAll(CARD_SEL);
+    var i;
+    for (i = 0; i < nodes.length; i++) paintChg1d(nodes[i], null);
+    var details = document.querySelectorAll(DETAIL_SEL);
+    for (i = 0; i < details.length; i++) {
+      var kids = details[i].children || [];
+      var k;
+      for (k = 0; k < kids.length; k++) {
+        var kid = kids[k];
+        if (!kid || kid.nodeType !== 1) continue;
+        if (kid.closest && kid.closest("svg, .chart, .fd-chart")) continue;
+        if (isNameNode(kid) && looksLikeChromeTitle(ownText(kid) || kid.textContent)) continue;
+        paintChg1d(kid, null);
+      }
+      var heads = details[i].querySelectorAll("h1, h2, h3, .company, .sec-name, .long-name, .nm");
+      for (k = 0; k < heads.length; k++) {
+        var head = heads[k];
+        if (head.closest && head.closest("svg, .chart, .fd-chart, .stats, .score, .sc, nav, .topnav, .pills, .chips, .badges")) continue;
+        if (looksLikeChromeTitle(ownText(head) || head.textContent)) continue;
+        paintChg1d(head, null);
+      }
+    }
+  }
   function polishNode(node, card) {
     if (!node || node.nodeType !== 1) return node;
     node.classList.add("fd-card");
     fillStats(node, card);
     stripBandWhy(node, card);
     paintScoreD10(node, card);
+    paintChg1d(node, card);
     node.setAttribute("data-fd-card-polished", "1");
     return node;
   }
@@ -1255,6 +1581,17 @@ def strip_js() -> str:
       if (m.r20_pct == null && (rm.r20_pct != null || row.r20 != null)) m.r20_pct = rm.r20_pct != null ? rm.r20_pct : row.r20;
       if (m.rs_63 == null && (rm.rs_63 != null || row.rs63 != null)) m.rs_63 = rm.rs_63 != null ? rm.rs_63 : row.rs63;
       if (m.atr_pct == null && (rm.atr_pct != null || row.atr_pct != null)) m.atr_pct = rm.atr_pct != null ? rm.atr_pct : row.atr_pct;
+      if (m.day_pct == null && (rm.day_pct != null || row.day != null || row.ret_1d != null)) {
+        m.day_pct = rm.day_pct != null ? rm.day_pct : (row.day != null ? row.day : row.ret_1d);
+      }
+      if (m.day_pct == null) {
+        var pts = pickNum(rm, PCT_POINT_KEYS);
+        if (pts == null) pts = pickNum(row, PCT_POINT_KEYS);
+        if (pts == null) pts = pickNum(card, PCT_POINT_KEYS);
+        if (pts != null && isFinite(Number(pts))) m.day_pct = Number(pts) / 100;
+      }
+      if (card.day == null && m.day_pct != null) card.day = m.day_pct;
+      if (card.ret_1d == null && m.day_pct != null) card.ret_1d = m.day_pct;
     }
     var node = renderCard(card);
     if (!node) return null;
@@ -1279,10 +1616,43 @@ def strip_js() -> str:
   window.__FD_CARD_COLLECT__ = collectCards;
   window.__FD_POLISH_NODE__ = polishNode;
   window.__FD_HIDE_GHOST__ = hideGhostMatrix;
+  window.__FD_PAINT_CHG_1D__ = paintAllChg1d;
+  function wrapSelectChg() {
+    var orig = null;
+    try { orig = window.selectTicker; } catch (e0) { orig = null; }
+    if (typeof orig !== "function") {
+      try { if (typeof selectTicker === "function") orig = selectTicker; } catch (e1) { orig = null; }
+    }
+    if (typeof orig !== "function" || orig.__fdChg1d) return;
+    var wrapped = function () {
+      var r = orig.apply(this, arguments);
+      setTimeout(paintAllChg1d, 0);
+      setTimeout(paintAllChg1d, 50);
+      return r;
+    };
+    wrapped.__fdChg1d = true;
+    window.selectTicker = wrapped;
+    try { selectTicker = wrapped; } catch (e2) {}
+  }
+  function bootChg1d() {
+    wrapCardHTML();
+    wrapSelectChg();
+    paintAllChg1d();
+  }
   wrapCardHTML();
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wrapCardHTML);
-  setTimeout(wrapCardHTML, 0);
-  setTimeout(wrapCardHTML, 50);
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bootChg1d);
+  else bootChg1d();
+  setTimeout(bootChg1d, 0);
+  setTimeout(bootChg1d, 50);
+  if (window.MutationObserver && document.documentElement) {
+    var chgTimer = null;
+    var chgObs = new MutationObserver(function () {
+      if (chgTimer) return;
+      chgTimer = setTimeout(function () { chgTimer = null; paintAllChg1d(); }, 80);
+    });
+    var chgRoot = document.body || document.documentElement;
+    if (chgRoot) chgObs.observe(chgRoot, { childList: true, subtree: true });
+  }
 })();
 """.strip()
 
@@ -1316,13 +1686,40 @@ def _ensure_js(html_text: str) -> str:
     return text + script
 
 
-def ensure_embedded(html_text: str) -> str:
+def embed_chg_db(mapping: Mapping[str, Any] | None) -> str:
+    blob = json.dumps(dict(mapping or {}), separators=(",", ":"), ensure_ascii=True)
+    blob = blob.replace("</", "<\\/")
+    return f'<script type="application/json" id="{DB_SCRIPT_ID}">{blob}</script>\n'
+
+
+def _ensure_chg_db(html_text: str, day_map: Mapping[str, Any] | None) -> str:
+    """Embed ticker → decimal 1d. ``None`` keeps an existing db."""
+    if day_map is None and re.search(rf"""\bid=["']{DB_SCRIPT_ID}["']""", html_text or "", re.I):
+        return html_text or ""
+    tag = embed_chg_db(day_map or {})
+    text, n = re.subn(
+        rf'<script\b[^>]*\bid=["\']{DB_SCRIPT_ID}["\'][^>]*>.*?</script>\s*',
+        lambda _m: tag,
+        html_text or "",
+        count=1,
+        flags=re.I | re.S,
+    )
+    if n:
+        return text
+    if "</body>" in text:
+        return text.replace("</body>", tag + "</body>", 1)
+    return text + tag
+
+
+def ensure_embedded(html_text: str, day_map: Mapping[str, Any] | None = None) -> str:
     """Inject portable card CSS + wrap live ``cardHTML``. Safe on ~2.7–4.8MB HTML.
 
-    Breakout/Breakdown then mount via ``__FD_RENDER_ROW__``. Paper Buy/Sell is
+    ``day_map`` is ticker → decimal 1-day return (Bloomberg ``CHG_PCT_1D`` / 100).
+    Baked cards and the DETAIL name card pick it up on embed. Paper Buy/Sell is
     not part of this renderer.
     """
     text = html_text or ""
     text = _ensure_css(text)
+    text = _ensure_chg_db(text, day_map)
     text = _ensure_js(text)
     return text

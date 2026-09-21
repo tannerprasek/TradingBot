@@ -149,6 +149,8 @@ FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     # 4. Liquidity / friction
     "volume_avg_20d": ("VOLUME_AVG_20D", "VOLUME_AVG_30D", "AVG_DAILY_VOLUME_20D"),
     "px_last": ("PX_LAST", "LAST_PRICE", "PX_CLOSE"),
+    # 1-day price change, percent points (1.2 = +1.2%). Not a decimal return.
+    "chg_pct_1d": ("CHG_PCT_1D",),
     "free_float_pct": ("EQY_FREE_FLOAT_PCT", "EQY_FREE_FLOAT_PERCENT"),
     # 5. Ownership
     "inst_pct": ("EQY_INST_PCT_SH_OUT",),
@@ -194,6 +196,7 @@ EQUITY_PACK_KEYS = (
     "iv_mid",
     "volume_avg_20d",
     "px_last",
+    "chg_pct_1d",
     "free_float_pct",
     "inst_pct",
     "etf_pct",
@@ -960,6 +963,14 @@ def build_name_record(
 
     adv = _put(rec, used, reasons, "adv_shares", raw, "volume_avg_20d")
     px = _put(rec, used, reasons, "px_last", raw, "px_last")
+    chg = _put(rec, used, reasons, "chg_pct_1d", raw, "chg_pct_1d")
+    if chg is not None:
+        dec = chg / 100.0
+        rec["day"] = dec
+        rec["ret_1d"] = dec
+    else:
+        rec["day"] = None
+        rec["ret_1d"] = None
     if px is None:
         px = as_float(px_ctx_row.get("px_last") or px_ctx_row.get("PX_LAST"))
         if px is not None:
@@ -1117,7 +1128,45 @@ def attach_card_fields(card: MutableMapping[str, Any], rec: Mapping[str, Any] | 
     card["enrich_pills"] = list(pills) if isinstance(pills, list) else []
     name, _reason = parse_gics_sector_name(rec.get("gics_sector_name"))
     card["gics_sector_name"] = name
+    _attach_day(card, rec)
     return card
+
+
+def _blank(value: Any) -> bool:
+    return value is None or value == ""
+
+
+def _attach_day(card: MutableMapping[str, Any], rec: Mapping[str, Any]) -> None:
+    """Map Bloomberg ``CHG_PCT_1D`` into ``day`` / ``ret_1d`` / ``metrics.day_pct`` when empty.
+
+    Stored decimals match ``r20_pct`` (``1.2`` percent points → ``0.012``). Does not
+    overwrite a day the live card already has.
+    """
+    chg = as_float(rec.get("chg_pct_1d"))
+    if chg is not None:
+        card["chg_pct_1d"] = chg
+    dec = as_float(rec.get("day"))
+    if dec is None and chg is not None:
+        dec = chg / 100.0
+    if dec is None:
+        dec = as_float(rec.get("ret_1d"))
+    if dec is None:
+        return
+    if _blank(card.get("day")) and _blank(card.get("ret_1d")) and _blank(card.get("Day")):
+        card["day"] = dec
+        card["ret_1d"] = dec
+    metrics = card.get("metrics")
+    if isinstance(metrics, Mapping) and not isinstance(metrics, dict):
+        metrics = dict(metrics)
+        card["metrics"] = metrics
+    elif not isinstance(metrics, dict):
+        metrics = {}
+        card["metrics"] = metrics
+    if _blank(metrics.get("day_pct")) and _blank(metrics.get("r1_pct")):
+        src = as_float(card.get("day"))
+        if src is None:
+            src = as_float(card.get("ret_1d"))
+        metrics["day_pct"] = src if src is not None else dec
 
 
 # ---------------------------------------------------------------------------

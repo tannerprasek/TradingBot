@@ -184,6 +184,18 @@ class RankingTests(unittest.TestCase):
         self.assertNotIn("px_series", blob)
         self.assertIn("fd-bb-band", json.dumps(payload["breakout"][0]["pills"]))
 
+    def test_px_stats_uses_chg_pct_1d_when_day_empty(self) -> None:
+        stats = bo.px_stats({"ticker": "MSTR US Equity", "CHG_PCT_1D": 1.2})
+        self.assertAlmostEqual(stats["day"], 0.012)
+        kept = bo.px_stats({"ticker": "MSTR US Equity", "day": 0.05, "CHG_PCT_1D": 1.2})
+        self.assertAlmostEqual(kept["day"], 0.05)
+        html = (
+            '<script>var cards=[{metrics:{CHG_PCT_1D:1.2,r20_pct:0.05,rs_63:0.01,atr_pct:3.1},t:"MSTR"}];'
+        )
+        got = bo.extract_live_metrics_map(html)
+        self.assertAlmostEqual(got["MSTR"]["day_pct"], 0.012)
+        self.assertEqual(got["MSTR"]["r20_pct"], 0.05)
+
     def test_px_stats_from_close_history(self) -> None:
         spy = [100.0]
         spcx = [50.0]

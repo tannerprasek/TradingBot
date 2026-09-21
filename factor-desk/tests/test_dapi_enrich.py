@@ -277,6 +277,29 @@ class EnrichBookTests(unittest.TestCase):
 
 
 class CardHookTests(unittest.TestCase):
+    def test_chg_pct_1d_maps_into_day_when_empty(self) -> None:
+        rec = de.build_name_record("MSTR US Equity", {"CHG_PCT_1D": -0.8, "PX_LAST": 300.0})
+        self.assertEqual(rec["fields_used"]["chg_pct_1d"], "CHG_PCT_1D")
+        self.assertAlmostEqual(rec["chg_pct_1d"], -0.8)
+        self.assertAlmostEqual(rec["day"], -0.008)
+        self.assertAlmostEqual(rec["ret_1d"], -0.008)
+        card: dict = {"ticker": "MSTR US Equity", "metrics": {"r20_pct": 0.1}}
+        de.attach_card_fields(card, rec)
+        self.assertAlmostEqual(card["day"], -0.008)
+        self.assertAlmostEqual(card["ret_1d"], -0.008)
+        self.assertAlmostEqual(card["metrics"]["day_pct"], -0.008)
+        self.assertEqual(card["metrics"]["r20_pct"], 0.1)
+        kept = {"day": 0.02, "ret_1d": 0.02, "metrics": {"day_pct": 0.02, "r20_pct": 0.1}}
+        de.attach_card_fields(kept, rec)
+        self.assertEqual(kept["day"], 0.02)
+        self.assertEqual(kept["ret_1d"], 0.02)
+        self.assertEqual(kept["metrics"]["day_pct"], 0.02)
+        self.assertEqual(kept["metrics"]["r20_pct"], 0.1)
+        missing = de.build_name_record("ZZ US Equity", {"PX_LAST": 1.0})
+        self.assertIsNone(missing["chg_pct_1d"])
+        self.assertIsNone(missing["day"])
+        self.assertEqual(missing["null_reasons"]["chg_pct_1d"], "no_candidate_resolved")
+
     def test_attach_fields(self) -> None:
         rec = de.build_name_record("A US Equity", {"EQY_BETA": 1.1, "EQY_INST_PCT_SH_OUT": 90})
         card: dict = {"ticker": "A US Equity"}
