@@ -350,11 +350,11 @@ console.log(JSON.stringify(report));
                 timeout=60,
             )
         live = """<!DOCTYPE html><html><head></head><body>
-<article class="card" data-t="AAA US Equity"><header><h2>AAA</h2><span class="score">9</span><div class="pills"></div></header></article>
+<article class="card" data-t="AAA US Equity"><header><h2>AAA</h2><span class="score">9<span class="score-d10">+3</span><span class="mom-score-d10-near up">+3</span></span><div class="pills"></div></header></article>
 <script type="application/json" id="mom-streak-db">{"AAA US Equity":{"label":"↑4d>5","cls":"mom-streak-up","title":"streak","score":9,"mom_score_d10":3,"mom_score_d10_prior":6,"mom_score_d10_date":"2026-09-01","mom_score_d10_label":"10d +3","d10_cls":"mom-score-d10-up","d10_side":"up","d10_title":"composite score 10 trading days: was 6 on 2026-09-01 → now 9 (Δ +3)"}}</script>
 <script>function cardHTML(c){
   var t = (c && (c.t || c.d)) || "";
-  return '<article class="card" data-t="'+t+'"><header><h2>'+t+'</h2><span class="score">'+(c.score!=null?c.score:"")+'</span><div class="pills"></div></header></article>';
+  return '<article class="card" data-t="'+t+'"><header><h2>'+t+'</h2><span class="score">'+(c.score!=null?c.score:"")+'<span class="score-d10">'+(c.mom_score_d10_label||"")+'</span></span><div class="pills"></div></header></article>';
 }</script>
 </body></html>"""
         html = ms.ensure_embedded(
@@ -393,8 +393,19 @@ const rendered = window.cardHTML({{
   mom_score_d10_label: "10d \\u22122"
 }});
 const staticCard = window.document.querySelector('[data-t="AAA US Equity"]');
+function capCount(root) {{
+  if (!root) return 0;
+  var host = root.querySelectorAll ? root : null;
+  if (!host && root.innerHTML != null) host = root;
+  return host ? host.querySelectorAll(".score-d10, .mom-score-d10-near").length : 0;
+}}
+const hold = window.document.createElement("div");
+hold.innerHTML = rendered;
 const report = {{
   rendered: rendered,
+  renderedCaps: capCount(hold),
+  staticCaps: capCount(staticCard),
+  staticScoreText: staticCard && staticCard.querySelector(".score") ? staticCard.querySelector(".score").textContent : "",
   staticHtml: staticCard ? staticCard.outerHTML : ""
 }};
 console.log(JSON.stringify(report));
@@ -414,17 +425,19 @@ console.log(JSON.stringify(report));
             self.assertIn('class="score"', rendered)
             self.assertIn("\u22122", rendered)
             self.assertNotIn("10d", rendered)
+            self.assertEqual(report["renderedCaps"], 1)
             self.assertIn('data-key="mom-score-d10-near"', rendered)
             self.assertNotRegex(rendered, r'data-key="mom-score-d10"(?!-)')
             self.assertIn("mom-score-d10-near down", rendered)
             self.assertIn("10 trading days", rendered)
+            self.assertNotIn("scoreEl.appendChild", ms.strip_js())
             static_html = report["staticHtml"]
-            self.assertIn("+3", static_html)
+            self.assertEqual(report["staticCaps"], 1)
+            self.assertEqual(report["staticScoreText"].count("+3"), 1)
             self.assertNotIn("10d +3", static_html)
             self.assertIn('data-key="mom-streak"', static_html)
-            self.assertIn('data-key="mom-score-d10-near"', static_html)
+            self.assertIn("mom-score-d10-near", static_html)
             self.assertNotRegex(static_html, r'data-key="mom-score-d10"(?!-)')
-            self.assertIn("10 trading days", static_html)
 
 
 if __name__ == "__main__":

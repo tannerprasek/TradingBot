@@ -1115,17 +1115,6 @@ def strip_js() -> str:
     }
     return null;
   }
-  function d10Text(rec) {
-    if (!rec) return "";
-    if (rec.mom_score_d10_short) return String(rec.mom_score_d10_short);
-    var n = Number(rec.mom_score_d10);
-    if (isFinite(n)) {
-      if (n > 0) return "+" + n;
-      if (n < 0) return "\u2212" + String(n).replace(/^-/, "");
-      return "0";
-    }
-    return String(rec.mom_score_d10_label || "").replace(/^10d\s+/, "");
-  }
   function dropD10Pills(node) {
     var old = node.querySelectorAll('[data-key="mom-score-d10"]');
     for (var i = old.length - 1; i >= 0; i--) {
@@ -1133,24 +1122,25 @@ def strip_js() -> str:
       if (old[i].parentNode) old[i].parentNode.removeChild(old[i]);
     }
   }
+  function d10Caps(node) {
+    return node.querySelectorAll(".score-d10, .mom-score-d10-near, [data-key='mom-score-d10-near']");
+  }
   function paintD10(node, rec) {
     dropD10Pills(node);
-    var text = d10Text(rec);
-    if (!text) return;
-    var title = rec.d10_title || "";
-    var side = rec.d10_side || (Number(rec.mom_score_d10) > 0 ? "up" : (Number(rec.mom_score_d10) < 0 ? "down" : "flat"));
-    var cap = node.querySelector("[data-key='mom-score-d10-near']");
-    if (!cap) {
-      var scoreEl = node.querySelector(".score, .sc");
-      if (!scoreEl) return;
-      cap = document.createElement("span");
-      cap.setAttribute("data-key", "mom-score-d10-near");
-      scoreEl.appendChild(cap);
+    var caps = d10Caps(node);
+    if (!caps.length) return;
+    var keep = caps[0];
+    for (var i = 0; i < caps.length; i++) {
+      var cls = caps[i].className || "";
+      if (cls.indexOf("mom-score-d10-near") >= 0) { keep = caps[i]; break; }
     }
-    cap.className = "mom-score-d10-near " + side;
-    if (title) cap.title = title;
-    if (rec.mom_score_d10 != null && rec.mom_score_d10 !== "") cap.setAttribute("data-mom-score-d10", String(rec.mom_score_d10));
-    cap.textContent = text;
+    for (var j = caps.length - 1; j >= 0; j--) {
+      if (caps[j] !== keep && caps[j].parentNode) caps[j].parentNode.removeChild(caps[j]);
+    }
+    if ((keep.className || "").indexOf("mom-score-d10-near") < 0) {
+      keep.className = ((keep.className || "") + " mom-score-d10-near").replace(/\s+/g, " ").replace(/^\s+/, "");
+    }
+    if (rec && rec.d10_title && !keep.title) keep.title = rec.d10_title;
   }
   function apply() {
     var nodes = document.querySelectorAll("[data-t], [data-ticker], article.card, .card");

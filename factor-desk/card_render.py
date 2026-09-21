@@ -1152,19 +1152,29 @@ def strip_js() -> str:
     if (!node) return;
     var stale = node.querySelectorAll('[data-key="mom-score-d10"]');
     for (var i = stale.length - 1; i >= 0; i--) {
+      if (stale[i].getAttribute("data-key") !== "mom-score-d10") continue;
       if (stale[i].parentNode) stale[i].parentNode.removeChild(stale[i]);
     }
     var d10 = d10View(card);
+    var caps = node.querySelectorAll(".score-d10, .mom-score-d10-near, [data-key='mom-score-d10-near']");
+    var cap = null;
+    for (var c = 0; c < caps.length; c++) {
+      var cls = caps[c].className || "";
+      if (!cap || cls.indexOf("mom-score-d10-near") >= 0) cap = caps[c];
+    }
+    for (var k = caps.length - 1; k >= 0; k--) {
+      if (caps[k] !== cap && caps[k].parentNode) caps[k].parentNode.removeChild(caps[k]);
+    }
     if (!d10) return;
-    var cap = node.querySelector("[data-key='mom-score-d10-near']");
     if (!cap) {
       var scoreEl = node.querySelector(".score, .sc");
       if (!scoreEl) return;
       cap = document.createElement("span");
-      cap.setAttribute("data-key", "mom-score-d10-near");
+      cap.className = "score-d10";
       scoreEl.appendChild(cap);
     }
-    cap.className = "mom-score-d10-near " + d10.side;
+    cap.setAttribute("data-key", "mom-score-d10-near");
+    cap.className = "score-d10 mom-score-d10-near " + d10.side;
     if (d10.title) cap.title = d10.title;
     if (d10.delta != null && d10.delta !== "") cap.setAttribute("data-mom-score-d10", String(d10.delta));
     cap.textContent = d10.label;

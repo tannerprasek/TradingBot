@@ -603,6 +603,7 @@ class ScoreD10Tests(unittest.TestCase):
         out = ms.ensure_embedded(old, ms.streak_db([card]))
         self.assertEqual(out.count("momentum score streak vs 5"), 1)
         self.assertIn("paintD10", out)
+        self.assertNotIn("scoreEl.appendChild", out)
         self.assertIn(".mom-score-d10-near.up", out)
         self.assertIn("+3", out)
         self.assertNotIn("10d +3", out)
