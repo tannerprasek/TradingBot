@@ -175,15 +175,15 @@ class NavIntegrityTests(unittest.TestCase):
         html += "<script>if(window.__FD_PF_SHOW__)window.__FD_PF_SHOW__();</script>"
         self.assertIn("window.__FD_PF_SHOW__", html)
         self.assertNotRegex(html, r"window\.__FD_PF_SHOW__\s*=(?!=)")
-        with self.assertRaises(RuntimeError) as ctx:
+        with self.assertRaises(desk_dash.LiveDeskShrinkError) as ctx:
             desk_dash.assert_nav_integrity(html)
         self.assertIn("__FD_PF_SHOW__", str(ctx.exception))
 
     def test_ensure_embedded_satisfies_portfolio_gate(self) -> None:
         html = self._with_portfolio_button(_fat_desk_html())
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(desk_dash.LiveDeskShrinkError):
             desk_dash.assert_nav_integrity(html)
-        fixed = portfolio.ensure_embedded(html, scorecard=None, desk=None)
+        fixed = portfolio.ensure_embedded(html)
         desk_dash.assert_nav_integrity(fixed)
         self.assertRegex(fixed, r"window\.__FD_PF_SHOW__\s*=(?!=)")
         self.assertGreaterEqual(len(fixed.encode("utf-8")), desk_dash.LIVE_MIN_BYTES)
@@ -198,8 +198,8 @@ class NavIntegrityTests(unittest.TestCase):
         self.assertGreaterEqual(prior, desk_dash.LIVE_MIN_BYTES)
         shrunk = fixed.split("<!--", 1)[0]
         self.assertLess(len(shrunk.encode("utf-8")), desk_dash.LIVE_MIN_BYTES)
-        with self.assertRaises(RuntimeError) as ctx:
-            desk_dash.assert_nav_integrity(shrunk, prior_bytes=prior)
+        with self.assertRaises(desk_dash.LiveDeskShrinkError) as ctx:
+            desk_dash.assert_nav_integrity(shrunk)
         self.assertIn("legacy-sized", str(ctx.exception))
 
     def test_write_combined_embeds_portfolio_show_and_keeps_size(self) -> None:
@@ -219,7 +219,7 @@ class NavIntegrityTests(unittest.TestCase):
             self.assertIn("Momentum Up", text)
             self.assertIn("Refresh", text)
             self.assertNotIn("__PAYLOAD__", text)
-            desk_dash.assert_nav_integrity(text, prior_bytes=before)
+            desk_dash.assert_nav_integrity(text)
 
     def test_write_combined_does_not_keep_nav_that_fails_the_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -240,7 +240,7 @@ class NavIntegrityTests(unittest.TestCase):
                 return text
 
             with patch.object(portfolio, "ensure_embedded", side_effect=drop_show):
-                with self.assertRaises(RuntimeError) as ctx:
+                with self.assertRaises(desk_dash.LiveDeskShrinkError) as ctx:
                     desk_dash.write_combined(dest, root=root, book=_book())
             self.assertIn("__FD_PF_SHOW__", str(ctx.exception))
             self.assertEqual(dest.read_bytes(), before)

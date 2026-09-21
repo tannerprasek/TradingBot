@@ -37,13 +37,8 @@ def write(path: Path | str | None = None, root: Path | None = None) -> Path:
     base = Path(root) if root is not None else HERE
     dest = desk_dash.resolve_live_dest(base, path)
     out = desk_dash.write_combined(dest, root=base)
-    if out.is_file():
-        written_html = out.read_text(encoding="utf-8")
-        prior = out.stat().st_size
-        desk_dash.assert_nav_integrity(
-            written_html,
-            prior_bytes=prior if prior >= desk_dash.LIVE_MIN_BYTES else 0,
-        )
+    if out.is_file() and out.stat().st_size >= desk_dash.LIVE_MIN_BYTES:
+        desk_dash.assert_nav_integrity(out.read_text(encoding="utf-8"))
     if _is_desktop_live(out, base) and out.is_file():
         size = out.stat().st_size
         if size < desk_dash.LIVE_MIN_BYTES:

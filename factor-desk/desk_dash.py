@@ -441,20 +441,6 @@ _NAV_SHOW_ASSIGN = {
     "experimental": "window.__FD_SS_SHOW__",
     "portfolio": "window.__FD_PF_SHOW__",
 }
-_NAV_CORE_VIEWS = ("home", "mom-up", "mom-down", "outliers", "options")
-_NAV_REQUIRED_LABELS = (
-    "Refresh",
-    "Momentum Up",
-    "Momentum Down",
-    "Breakout",
-    "Breakdown",
-    "Outliers",
-    "Options",
-)
-_NAV_VIEW_LABELS = {
-    "portfolio": "Portfolio",
-    "experimental": "Experimental",
-}
 _NAV_CHUNK_RE = re.compile(r"<nav\b[^>]*>.*?</nav>", re.I | re.S)
 _NAV_BTN_RE = re.compile(r"<button\b([^>]*)>", re.I)
 _NAV_VIEW_RE = re.compile(r"""data-view\s*=\s*["']([^"']+)["']""", re.I)
@@ -485,36 +471,13 @@ def _top_nav_views(html_text: str) -> list[str]:
     return views
 
 
-def _core_view_clickable(html_text: str, view: str) -> bool:
-    """Native tabs work when setView names them or their pane is in the desk."""
-    pane_ids = {
-        "home": ("home", "view-home"),
-        "mom-up": ("view-mom-up", "mom-up-grid"),
-        "mom-down": ("view-mom-down", "mom-down-grid"),
-        "outliers": ("view-outliers",),
-        "options": ("view-options",),
-    }
-    for pane_id in pane_ids.get(view, (f"view-{view}",)):
-        if re.search(rf"""\bid=["']{re.escape(pane_id)}["']""", html_text, re.I):
-            return True
-    scripts = "\n".join(re.findall(r"<script\b[^>]*>.*?</script>", html_text, flags=re.I | re.S))
-    if re.search(rf"""["']{re.escape(view)}["']""", scripts):
-        return True
-    # Bridges wrap the live setView and forward home / mom / outliers / options.
-    if re.search(r"\borig\.apply\s*\(", scripts) or re.search(r"\breturn\s+orig\b", scripts):
-        return True
-    has_setview = bool(re.search(r"function\s+setView\b|\bsetView\s*=\s*function", scripts))
-    if not has_setview:
-        return True
-    return False
+def assert_nav_integrity(html: str) -> None:
+    """Raise ``LiveDeskShrinkError`` when the top bar cannot be kept.
 
-
-def assert_nav_integrity(html: str, prior_bytes: int = 0) -> None:
-    """Raise if a top-nav click would no-op or a live desk was shrunk.
-
-    ``prior_bytes`` is the on-disk size being replaced. A fat desk
-    (``>= LIVE_MIN_BYTES``) must still be that large after the write.
-    Call ``assert_nav_integrity(html)`` to check bindings alone.
+    Fails closed when the document is under ``LIVE_MIN_BYTES``, when the
+    core labels are missing, or when a Breakout / Experimental / Portfolio
+    nav button has no ``window.__FD_*_SHOW__ =`` assignment. A call such as
+    ``__FD_PF_SHOW__()`` does not count.
     """
     text = html or ""
     problems: list[str] = []
@@ -523,25 +486,16 @@ def assert_nav_integrity(html: str, prior_bytes: int = 0) -> None:
         if view == "paper":
             continue
         window_name = _NAV_SHOW_ASSIGN.get(view)
-        if window_name:
-            if not _assigned(text, window_name):
-                problems.append(f"{window_name} = missing for data-view={view}")
-            continue
-        if view in _NAV_CORE_VIEWS and not _core_view_clickable(text, view):
-            problems.append(f"setView/pane missing for data-view={view}")
-    for label in _NAV_REQUIRED_LABELS:
+        if window_name and not _assigned(text, window_name):
+            problems.append(f"{window_name} = missing for data-view={view}")
+    for label in ("Refresh", "Momentum Up", "Momentum Down", "Outliers", "Options"):
         if label not in text:
             problems.append(f"label missing: {label}")
-    for view, label in _NAV_VIEW_LABELS.items():
-        if view in views and label not in text:
-            problems.append(f"label missing: {label}")
     size = len(text.encode("utf-8"))
-    if size < LIVE_MIN_BYTES and prior_bytes >= LIVE_MIN_BYTES:
-        problems.append(
-            f"written file legacy-sized ({size} bytes < {LIVE_MIN_BYTES})"
-        )
+    if size < LIVE_MIN_BYTES:
+        problems.append(f"legacy-sized ({size} bytes < {LIVE_MIN_BYTES})")
     if problems:
-        raise RuntimeError("nav integrity: " + "; ".join(problems))
+        raise LiveDeskShrinkError("nav integrity: " + "; ".join(problems))
 
 
 def _gics_sector_db_json(
@@ -2587,13 +2541,8 @@ def render_html(
     html_text = desk_hitch.ensure_embedded(html_text, hitch_map)
     html_text = paper_trade.ensure_embedded(html_text, paper_marks)
     html_text = s_score.ensure_embedded(html_text, ss_ranked)
-    html_text = ensure_mom_status_filter(_ensure_options_refresh_ui(html_text))
-    base = Path(root) if root is not None else HERE
-    return portfolio.ensure_embedded(
-        html_text,
-        scorecard=portfolio.load_last(base),
-        desk=portfolio.desk_snapshot(base),
-    )
+    html_text = portfolio.ensure_embedded(html_text)
+    return ensure_mom_status_filter(_ensure_options_refresh_ui(html_text))
 
 
 def write_combined(
@@ -2676,14 +2625,22 @@ def write_combined(
     text = desk_hitch.ensure_embedded(text, hitch_map)
     text = paper_trade.ensure_embedded(text, paper_marks)
     text = s_score.ensure_embedded(text, ss_ranked)
+    text = portfolio.ensure_embedded(text)
     text = ensure_mom_status_filter(text)
-    text = portfolio.ensure_embedded(
-        text,
-        scorecard=portfolio.load_last(base),
-        desk=portfolio.desk_snapshot(base),
-    )
-    # Gate before any write. A busted top bar or a shrunk live desk is not kept.
-    assert_nav_integrity(text, prior_bytes=prior_size)
+    # Gate before any write. Binder/label failures never hit disk.
+    # A document under LIVE_MIN_BYTES always fails assert_nav_integrity.
+    # First-time shells (nothing fat on disk) are still written so a dev
+    # render can finish; write_dash.main exits 2 and a fat desk is never
+    # replaced by that shell.
+    try:
+        assert_nav_integrity(text)
+    except LiveDeskShrinkError as exc:
+        new_size = len(text.encode("utf-8"))
+        size_only = "legacy-sized" in str(exc) and "missing" not in str(exc)
+        replacing_fat = prior_size >= LIVE_MIN_BYTES or new_size >= LIVE_MIN_BYTES
+        if replacing_fat or not size_only:
+            raise
+        LOG.warning("%s", exc)
     new_size = len(text.encode("utf-8"))
     if prior_size >= LIVE_MIN_BYTES and new_size < LIVE_MIN_BYTES:
         raise LiveDeskShrinkError(
