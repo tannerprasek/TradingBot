@@ -175,7 +175,7 @@ def strip_css() -> str:
   box-sizing: border-box;
   flex: 0 0 100%;
   margin: 0;
-  padding: 0 0 8px;
+  padding: 0 0 10px;
 }
 .filter-chip, .gchip {
   display: inline-flex;
@@ -189,7 +189,7 @@ def strip_css() -> str:
   border: 1px solid #6b7280;
   color: #d1d5db;
   background: #111827;
-  font: 650 10px/1 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
   letter-spacing: 0.04em;
   white-space: nowrap;
   text-transform: none;

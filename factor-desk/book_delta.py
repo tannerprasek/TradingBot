@@ -367,7 +367,7 @@ def strip_css() -> str:
   box-sizing: border-box;
   flex: 0 0 100%;
   margin: 0;
-  padding: 2px 0 0;
+  padding: 0;
   min-height: 20px;
 }}
 .fd-book-delta-kicker {{
@@ -378,7 +378,7 @@ def strip_css() -> str:
   height: 20px;
   margin: 0;
   padding: 0;
-  font: 650 10px/1 "Segoe UI", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
   letter-spacing: 0.08em;
   color: #6b7280;
   text-transform: uppercase;
@@ -397,11 +397,13 @@ def strip_css() -> str:
   border: 1px solid #4b5563;
   color: #d1d5db;
   background: #111827;
-  font: 650 10px/1 ui-monospace, "Cascadia Mono", "Segoe UI Mono", "DejaVu Sans Mono", "Noto Sans Mono", monospace;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans Symbols 2", "Noto Sans Symbols", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
   white-space: nowrap;
   flex: 0 0 auto;
 }}
+.fd-dchip[hidden], .fd-delta-extra-chip[hidden] {{ display: none !important; }}
 .fd-dchip.delta-flags {{ color: #93c5fd; border-color: #3b82f6; }}
 .fd-dchip.delta-flags-off {{ color: #9ca3af; border-color: #4b5563; }}
 .fd-dchip.delta-watch {{ color: #fde68a; border-color: #a3a3a3; }}
@@ -417,7 +419,7 @@ def strip_css() -> str:
   height: 20px;
   margin: 0;
   padding: 2px 8px;
-  font: 650 10px/1 "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  font: 650 10px/1.15 "Segoe UI", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans", ui-sans-serif, system-ui, sans-serif;
   letter-spacing: 0.04em;
   color: #9ca3af;
   background: #111827;
