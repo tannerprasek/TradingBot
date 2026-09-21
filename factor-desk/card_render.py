@@ -21,7 +21,7 @@ from typing import Any, Mapping, MutableMapping
 
 CSS_STYLE_ID = "fd-card-css"
 JS_SCRIPT_ID = "fd-card-js"
-JS_VER = "pr18-mom-html"
+JS_VER = "pr20-d10-short"
 
 _BAND_WHY_RE = re.compile(r"^band\s", re.I)
 _DUMP_PILL_KEYS = frozenset({"fd-bb"})
@@ -516,6 +516,16 @@ article.card .stats {
 article.card .stats span {
   white-space: nowrap;
 }
+article.card .mom-score-d10-near {
+  display: block !important;
+  margin-top: 1px;
+  text-align: right;
+  font: 600 10px/1.15 ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace !important;
+  letter-spacing: 0.01em;
+}
+article.card .mom-score-d10-near.up { color: #6ee7b7 !important; }
+article.card .mom-score-d10-near.down { color: #fda4af !important; }
+article.card .mom-score-d10-near.flat { color: #9ca3af !important; }
 """.strip()
 
 
@@ -523,7 +533,7 @@ def strip_js() -> str:
     """Wrap live ``cardHTML``. Tabs call ``__FD_RENDER_CARD__(card)`` only."""
     return r"""
 (function () {
-  var CARD_VER = "pr18-mom-html";
+  var CARD_VER = "pr20-d10-short";
   if (window.__FD_CARD_BOUND__ === CARD_VER) return;
   window.__FD_CARD_BOUND__ = CARD_VER;
 
@@ -806,6 +816,51 @@ def strip_js() -> str:
     }
     return bits.join("");
   }
+  function readStreakDb() {
+    var el = document.getElementById("mom-streak-db");
+    if (!el) return {};
+    try { return JSON.parse(el.textContent || "{}") || {}; } catch (e) { return {}; }
+  }
+  function d10From(card) {
+    var src = card || {};
+    if (src.mom_score_d10_short || src.mom_score_d10_label || src.mom_score_d10 != null) return src;
+    var db = readStreakDb();
+    var keys = [];
+    ["ticker", "name", "t", "d", "symbol"].forEach(function (k) {
+      if (src[k]) keys.push(String(src[k]));
+    });
+    var i;
+    for (i = 0; i < keys.length; i++) if (db[keys[i]]) return db[keys[i]];
+    var short = shortOf(keys[0] || "");
+    if (short && db[short]) return db[short];
+    var all = Object.keys(db);
+    for (i = 0; i < all.length; i++) if (short && shortOf(all[i]) === short) return db[all[i]];
+    return null;
+  }
+  function d10ShortText(src) {
+    if (!src) return "";
+    if (src.mom_score_d10_short) return String(src.mom_score_d10_short);
+    var n = Number(src.mom_score_d10);
+    if (isFinite(n)) {
+      if (n > 0) return "+" + n;
+      if (n < 0) return "\u2212" + String(src.mom_score_d10).replace(/^-/, "");
+      return "0";
+    }
+    return String(src.mom_score_d10_label || "").replace(/^10d\s+/, "");
+  }
+  function d10View(card) {
+    var src = d10From(card);
+    var label = d10ShortText(src);
+    if (!src || !label) return null;
+    var n = Number(src.mom_score_d10);
+    var side = n > 0 ? "up" : (n < 0 ? "down" : "flat");
+    var title = src.d10_title || "";
+    if (!title && src.mom_score_d10_prior != null && src.mom_score_d10_date) {
+      var now = (card && card.score != null) ? card.score : ((card && card.mom_score != null) ? card.mom_score : src.score);
+      title = "composite score 10 trading days: was " + src.mom_score_d10_prior + " on " + src.mom_score_d10_date + " \u2192 now " + now + " (\u0394 " + label + ")";
+    }
+    return { label: label, side: side, title: title, delta: src.mom_score_d10 };
+  }
   function fallbackHTML(c) {
     c = c || {};
     var t = esc(shortOf(c.d || c.t || c.ticker || c.name || ""));
@@ -814,9 +869,16 @@ def strip_js() -> str:
     var r20 = fmt(c.r20 != null ? c.r20 : (c.R20 != null ? c.R20 : null));
     var rs63 = fmt(c.rs63 != null ? c.rs63 : (c.RS63 != null ? c.RS63 : null));
     var atr = fmt(c.atr_pct != null ? c.atr_pct : (c.atrs != null ? c.atrs : (c.atr != null ? c.atr : (c.ATRS != null ? c.ATRS : (c.ATR != null ? c.ATR : null)))));
+    var d10 = d10View(c);
+    var near = d10 ? '<span class="mom-score-d10-near ' + d10.side + '" data-key="mom-score-d10-near"' +
+      (d10.delta != null ? ' data-mom-score-d10="' + esc(d10.delta) + '"' : "") +
+      (d10.title ? ' title="' + esc(d10.title) + '"' : "") + ">" + esc(d10.label) + "</span>" : "";
+    var pills = (Array.isArray(c.enrich_pills) ? c.enrich_pills : []).filter(function (p) {
+      return p && p.key !== "mom-score-d10";
+    });
     return '<article class="card fd-card" data-t="' + t + '" data-ticker="' + esc(c.ticker || t) + '">' +
-      "<header><h2>" + t + '</h2><span class="sc">' + esc(String(score)) + "</span>" +
-      '<div class="pills">' + pillsHTML(c.enrich_pills) + "</div></header>" +
+      "<header><h2>" + t + '</h2><span class="sc score">' + esc(String(score)) + near + "</span>" +
+      '<div class="pills">' + pillsHTML(pills) + "</div></header>" +
       '<div class="stats"><span>Day ' + esc(day) + "</span><span>R20 " + esc(r20) + "</span><span>RS63 " + esc(rs63) + "</span><span>ATR% " + esc(atr) + "</span></div>" +
       "</article>";
   }
@@ -1086,11 +1148,33 @@ def strip_js() -> str:
       }
     }
   }
+  function paintScoreD10(node, card) {
+    if (!node) return;
+    var stale = node.querySelectorAll('[data-key="mom-score-d10"]');
+    for (var i = stale.length - 1; i >= 0; i--) {
+      if (stale[i].parentNode) stale[i].parentNode.removeChild(stale[i]);
+    }
+    var d10 = d10View(card);
+    if (!d10) return;
+    var cap = node.querySelector("[data-key='mom-score-d10-near']");
+    if (!cap) {
+      var scoreEl = node.querySelector(".score, .sc");
+      if (!scoreEl) return;
+      cap = document.createElement("span");
+      cap.setAttribute("data-key", "mom-score-d10-near");
+      scoreEl.appendChild(cap);
+    }
+    cap.className = "mom-score-d10-near " + d10.side;
+    if (d10.title) cap.title = d10.title;
+    if (d10.delta != null && d10.delta !== "") cap.setAttribute("data-mom-score-d10", String(d10.delta));
+    cap.textContent = d10.label;
+  }
   function polishNode(node, card) {
     if (!node || node.nodeType !== 1) return node;
     node.classList.add("fd-card");
     fillStats(node, card);
     stripBandWhy(node, card);
+    paintScoreD10(node, card);
     node.setAttribute("data-fd-card-polished", "1");
     return node;
   }
@@ -1225,8 +1309,8 @@ def _ensure_js(html_text: str) -> str:
 def ensure_embedded(html_text: str) -> str:
     """Inject portable card CSS + wrap live ``cardHTML``. Safe on ~2.7–4.8MB HTML.
 
-    Call **before** ``paper_trade.ensure_embedded`` so Buy/Sell still wrap the
-    polished renderer. Breakout/Breakdown then mount via ``__FD_RENDER_ROW__``.
+    Breakout/Breakdown then mount via ``__FD_RENDER_ROW__``. Paper Buy/Sell is
+    not part of this renderer.
     """
     text = html_text or ""
     text = _ensure_css(text)

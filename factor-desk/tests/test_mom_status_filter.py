@@ -206,6 +206,8 @@ class MomStatusPatchTests(unittest.TestCase):
         self.assertEqual(once.count('status:"all"'), twice.count('status:"all"'))
         self.assertEqual(once.count("fd-status-pred"), twice.count("fd-status-pred"))
         self.assertEqual(once.count('grp("STATUS"'), twice.count('grp("STATUS"'))
+        self.assertEqual(once.count("fd-change-pred"), twice.count("fd-change-pred"))
+        self.assertEqual(once.count('grp("CHANGE"'), twice.count('grp("CHANGE"'))
         self.assertEqual(once.count('id="fd-mom-status-js"'), 1)
         self.assertEqual(twice.count('id="fd-mom-status-js"'), 1)
 
@@ -297,6 +299,96 @@ class MomStatusPatchTests(unittest.TestCase):
         self.assertTrue(all(i >= 0 for i in order), order)
         self.assertEqual(order, sorted(order))
 
+    def test_change_row_filters_mom_score_d10(self) -> None:
+        js = _patched_script(FILT_JS)
+        self.assertIn("fd-change-pred", js)
+        self.assertIn('change:"all"', js)
+        self.assertNotIn("Up (+)", js)
+        build_src = js.split("function buildFiltBar", 1)[1]
+        for label in ("+>3", "+\u22643", "Flat", "\u2212\u22643", "\u2212>3"):
+            self.assertIn(label, build_src)
+        up = js.split('"mom-up":', 1)[1].split('"mom-down":', 1)[0]
+        out = js.split('"outliers":', 1)[1].split("};", 1)[0]
+        self.assertIn('change:"all"', up)
+        self.assertNotIn("change", out)
+        build = js.split("function buildFiltBar", 1)[1].split("function ", 1)[0]
+        score_at = build.find('grp("SCORE"')
+        change_at = build.find('grp("CHANGE"')
+        flows_at = build.find('grp("FLOWS"')
+        self.assertGreater(score_at, 0)
+        self.assertGreater(change_at, score_at)
+        self.assertGreater(flows_at, change_at)
+        self.assertIn('(viewKey==="mom-up"||viewKey==="mom-down")', build)
+        appended = _patched_script(APPEND_JS)
+        self.assertNotIn('grp("CHANGE"', appended)
+        expr = r"""
+(function () {
+  var cards = [
+    {t:"BIG", score:9, mom_score_d10: 4, status:"Strong momentum"},
+    {t:"THREE", score:9, mom_score_d10: 3, status:"Strong momentum"},
+    {t:"SMALL", score:9, mom_score_d10: 1, status:"Strong momentum"},
+    {t:"FLAT", score:9, mom_score_d10: 0, status:"Constructive"},
+    {t:"N3", score:9, mom_score_d10: -3, status:"Strong momentum"},
+    {t:"N2", score:9, mom_score_d10: -2, status:"Strong momentum"},
+    {t:"N4", score:9, mom_score_d10: -4, status:"Strong momentum"},
+    {t:"MISS", score:9, status:"Strong momentum"},
+    {t:"BLANK", score:9, mom_score_d10: "", status:"Strong momentum"},
+    {t:"NAN", score:9, mom_score_d10: "nope", status:"Strong momentum"}
+  ];
+  function names(list) { return list.map(function (c) { return c.t; }); }
+  viewFilt["mom-up"].change = "gt3";
+  var gt3 = names(applyMomFilters(cards, "mom-up"));
+  viewFilt["mom-up"].change = "le3";
+  var le3 = names(applyMomFilters(cards, "mom-up"));
+  viewFilt["mom-up"].change = "flat";
+  var flatNames = names(applyMomFilters(cards, "mom-up"));
+  viewFilt["mom-up"].change = "nle3";
+  var nle3 = names(applyMomFilters(cards, "mom-up"));
+  viewFilt["mom-up"].change = "ngt3";
+  var ngt3 = names(applyMomFilters(cards, "mom-up"));
+  viewFilt["mom-up"].change = "all";
+  viewFilt["mom-up"].status = "Constructive";
+  var statusNames = names(applyMomFilters(cards, "mom-up"));
+  viewFilt["mom-up"].status = "all";
+  var allNames = names(applyMomFilters(cards, "mom-up"));
+  viewFilt["mom-up"].change = "gt3";
+  var upHtml = buildFiltBar("mom-up");
+  var outHtml = buildFiltBar("outliers");
+  var changeHtml = upHtml.slice(upHtml.indexOf(">CHANGE<"), upHtml.indexOf(">FLOWS<"));
+  var on = (changeHtml.match(/class="fchip on"/g) || []).length;
+  return {
+    gt3: gt3,
+    le3: le3,
+    flatNames: flatNames,
+    nle3: nle3,
+    ngt3: ngt3,
+    statusNames: statusNames,
+    allNames: allNames,
+    on: on,
+    hasGt: changeHtml.indexOf(">+>3<") >= 0,
+    hasLe: changeHtml.indexOf(">+\u22643<") >= 0,
+    hasFlat: changeHtml.indexOf(">Flat<") >= 0,
+    hasNle: changeHtml.indexOf(">\u2212\u22643<") >= 0,
+    hasNgt: changeHtml.indexOf(">\u2212>3<") >= 0,
+    outChange: outHtml.indexOf(">CHANGE<") >= 0
+  };
+})()
+"""
+        got = _node_eval(js, expr)
+        self.assertEqual(got["gt3"], ["BIG"])
+        self.assertEqual(got["le3"], ["THREE", "SMALL"])
+        self.assertEqual(got["flatNames"], ["FLAT"])
+        self.assertEqual(got["nle3"], ["N3", "N2"])
+        self.assertEqual(got["ngt3"], ["N4"])
+        self.assertEqual(got["statusNames"], ["FLAT"])
+        self.assertEqual(
+            got["allNames"],
+            ["BIG", "THREE", "SMALL", "FLAT", "N3", "N2", "N4", "MISS", "BLANK", "NAN"],
+        )
+        self.assertEqual(got["on"], 1)
+        self.assertTrue(got["hasGt"] and got["hasLe"] and got["hasFlat"] and got["hasNle"] and got["hasNgt"])
+        self.assertFalse(got["outChange"])
+
     def test_dom_fallback_filters_when_builder_is_unknown(self) -> None:
         node = shutil.which("node")
         if not node:
@@ -327,9 +419,9 @@ class MomStatusPatchTests(unittest.TestCase):
     <div class="fgrp"><span class="flab">SORT</span><button type="button" class="fchip on">Score</button><button type="button" class="fchip">Name</button><button type="button" class="fchip">RS</button><button type="button" class="fchip">Opt</button></div>
   </div>
   <div class="grid dense" id="mom-up-grid">
-    <article class="card"><h2>AMD</h2><span class="status">Strong momentum</span></article>
-    <article class="card"><h2>MU</h2><span class="status">Constructive</span></article>
-    <article class="card"><h2>SOFT</h2><span class="status">Softening</span></article>
+    <article class="card"><h2>AMD</h2><span class="status">Strong momentum</span><span data-mom-score-d10="5">+5</span></article>
+    <article class="card"><h2>MU</h2><span class="status">Constructive</span><span data-mom-score-d10="-2">−2</span></article>
+    <article class="card"><h2>SOFT</h2><span class="status">Softening</span><span data-mom-score-d10="0">0</span></article>
   </div>
 </div>
 <div id="view-mom-down" class="hide">
@@ -382,6 +474,21 @@ function tick() {{
   const afterStrong = hidden();
   row.querySelector('[data-fd-status-val="all"]').click();
   const afterAll = hidden();
+  const changeRow = document.querySelector("#view-mom-up [data-fd-change-row]");
+  const changeLabels = changeRow ? Array.from(changeRow.querySelectorAll("[data-fd-change-val]")).map(function (b) {{
+    return b.textContent.trim();
+  }}) : [];
+  changeRow.querySelector('[data-fd-change-val="gt3"]').click();
+  function changeHidden() {{
+    return Array.from(document.querySelectorAll("#view-mom-up article.card")).filter(function (el) {{
+      return el.classList.contains("fd-change-hid");
+    }}).map(function (el) {{ return (el.querySelector("h2").textContent || "").trim(); }});
+  }}
+  const afterUp = changeHidden();
+  changeRow.querySelector('[data-fd-change-val="flat"]').click();
+  const afterFlat = changeHidden();
+  changeRow.querySelector('[data-fd-change-val="all"]').click();
+  const afterChangeAll = changeHidden();
   document.getElementById("view-mom-up").classList.add("hide");
   document.getElementById("view-mom-down").classList.remove("hide");
   document.body.appendChild(document.createElement("i"));
@@ -390,7 +497,7 @@ function tick() {{
   const downLabels = downRow ? Array.from(downRow.querySelectorAll("[data-fd-status-val]")).map(function (b) {{
     return b.getAttribute("data-fd-status-val");
   }}) : [];
-  const report = {{ kids: kids, labels: labels, afterStrong: afterStrong, afterAll: afterAll, downLabels: downLabels }};
+  const report = {{ kids: kids, labels: labels, afterStrong: afterStrong, afterAll: afterAll, downLabels: downLabels, changeLabels: changeLabels, afterUp: afterUp, afterFlat: afterFlat, afterChangeAll: afterChangeAll }};
   process.stdout.write(JSON.stringify(report));
 }})().catch(function (err) {{
   console.error(err);
@@ -408,7 +515,11 @@ function tick() {{
             )
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
         report = json.loads(proc.stdout.strip().splitlines()[-1])
-        self.assertEqual(report["kids"], ["SCORE", "FLOWS", "TAGS", "STATUS", "SORT"])
+        self.assertEqual(report["kids"], ["SCORE", "CHANGE", "FLOWS", "TAGS", "STATUS", "SORT"])
+        self.assertEqual(report["changeLabels"], ["All", "+>3", "+\u22643", "Flat", "\u2212\u22643", "\u2212>3"])
+        self.assertEqual(sorted(report["afterUp"]), ["MU", "SOFT"])
+        self.assertEqual(report["afterFlat"], ["AMD", "MU"])
+        self.assertEqual(report["afterChangeAll"], [])
         self.assertEqual(
             report["labels"],
             ["all", "Strong momentum", "Momentum building", "Constructive"],

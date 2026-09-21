@@ -1036,8 +1036,10 @@ console.log(JSON.stringify(report));
             self.assertNotIn("baseline set", text)
             self.assertNotIn('id="gics-filter-strip"', text)
             self.assertIn('id="fd-hitch-db"', text)
-            self.assertIn('id="fd-paper-marks"', text)
-            self.assertIn('id="fd-paper-js"', text)
+            self.assertNotIn('id="fd-paper-marks"', text)
+            self.assertNotIn('id="fd-paper-js"', text)
+            self.assertNotIn('id="fd-nav-paper"', text)
+            self.assertNotIn('id="view-paper"', text)
             self.assertIn('id="view-experimental"', text)
             self.assertNotIn('data-tab="sectors"', text)
             bb_js = re.search(

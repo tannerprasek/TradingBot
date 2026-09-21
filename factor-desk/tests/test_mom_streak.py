@@ -459,5 +459,176 @@ class WriteCombinedSurviveTests(unittest.TestCase):
         self.assertNotIn("var STRIP_ID", out)
 
 
+def _dated_scores(scores: list[float], start: date | None = None) -> list[tuple[date, float]]:
+    start = start or date(2026, 6, 1)
+    days: list[date] = []
+    d = start
+    while len(days) < len(scores):
+        if d.weekday() < 5:
+            days.append(d)
+        d += timedelta(days=1)
+    return list(zip(days, scores))
+
+
+def _hist_for(ticker: str, scores: list[float]) -> tuple[dict, list[tuple[date, float]]]:
+    series = _dated_scores(scores)
+    hist = {
+        "names": {
+            ticker: {
+                "series": [{"date": d.isoformat(), "score": s} for d, s in series],
+            }
+        }
+    }
+    return hist, series
+
+
+class ScoreD10Tests(unittest.TestCase):
+    def test_lookback_is_ten_prints(self) -> None:
+        self.assertEqual(ms.D10_LOOKBACK, 10)
+
+    def test_positive_negative_and_zero(self) -> None:
+        up_hist, up_series = _hist_for("UP US Equity", [4] * 10 + [7])
+        up = ms.compute_for_ticker("UP US Equity", {"score": 7}, up_hist, asof=up_series[-1][0])
+        self.assertEqual(up["mom_score_d10"], 3)
+        self.assertEqual(up["mom_score_d10_prior"], 4)
+        self.assertEqual(up["mom_score_d10_date"], up_series[0][0].isoformat())
+        self.assertEqual(up["mom_score_d10_label"], "+3")
+        self.assertEqual(up["mom_score_d10_short"], "+3")
+        self.assertNotIn("pill_d10", up)
+        self.assertEqual(
+            ms.d10_title(7, 4, up_series[0][0], 3),
+            f"composite score 10 trading days: was 4 on {up_series[0][0].isoformat()} → now 7 (Δ +3)",
+        )
+        self.assertTrue(up["mom_streak_label"].startswith("\u2191"))
+
+        dn_hist, dn_series = _hist_for("DN US Equity", [9] * 10 + [7])
+        dn = ms.compute_for_ticker("DN US Equity", {"score": 7}, dn_hist, asof=dn_series[-1][0])
+        self.assertEqual(dn["mom_score_d10"], -2)
+        self.assertEqual(dn["mom_score_d10_label"], "\u22122")
+        self.assertEqual(dn["mom_score_d10_short"], "\u22122")
+        self.assertEqual(ms.d10_cls(-2), "mom-score-d10-down")
+        self.assertIn("\u0394 \u22122", ms.d10_title(7, 9, dn_series[-11][0], -2))
+
+        flat_hist, flat_series = _hist_for("FLAT US Equity", [8] * 11)
+        flat = ms.compute_for_ticker("FLAT US Equity", {"score": 8}, flat_hist, asof=flat_series[-1][0])
+        self.assertEqual(flat["mom_score_d10"], 0)
+        self.assertEqual(flat["mom_score_d10_label"], "0")
+        self.assertEqual(flat["mom_score_d10_short"], "0")
+        self.assertEqual(ms.d10_cls(0), "mom-score-d10")
+        self.assertIn("\u0394 0", ms.d10_title(8, 8, flat_series[-11][0], 0))
+
+    def test_prior_is_eleventh_point_not_the_first(self) -> None:
+        scores = list(range(15))  # 0..14
+        hist, series = _hist_for("AAPL US Equity", [float(s) for s in scores])
+        rec = ms.compute_for_ticker("AAPL US Equity", {"score": 14}, hist, asof=series[-1][0])
+        self.assertEqual(rec["mom_score_d10_prior"], 4)
+        self.assertEqual(rec["mom_score_d10_date"], series[-11][0].isoformat())
+        self.assertEqual(rec["mom_score_d10"], 10)
+        self.assertEqual(rec["mom_score_d10_label"], "+10")
+        self.assertEqual(rec["mom_score_d10_short"], "+10")
+
+    def test_live_score_upsert_then_delta(self) -> None:
+        hist, series = _hist_for("AAPL US Equity", [6] * 11)
+        rec = ms.compute_for_ticker("AAPL US Equity", {"score": 9}, hist, asof=series[-1][0])
+        self.assertEqual(rec["mom_score"], 9)
+        self.assertEqual(rec["mom_score_d10_prior"], 6)
+        self.assertEqual(rec["mom_score_d10"], 3)
+        self.assertEqual(rec["series"][-1]["score"], 9)
+
+    def test_short_history_omits_chip(self) -> None:
+        hist, series = _hist_for("AAPL US Equity", [8] * 10)
+        rec = ms.compute_for_ticker("AAPL US Equity", {"score": 8}, hist, asof=series[-1][0])
+        self.assertNotIn("mom_score_d10", rec)
+        self.assertNotIn("pill_d10", rec)
+        self.assertNotIn("mom_score_d10_short", rec)
+        self.assertEqual(rec["mom_streak_label"], "\u219110d>5")
+        card = {"ticker": "AAPL US Equity", "score": 8, "enrich_pills": [{"key": "si", "label": "SI"}]}
+        ms.attach_card(card, hist, asof=series[-1][0])
+        keys = [p["key"] for p in card["enrich_pills"]]
+        self.assertNotIn("mom_score_d10", card)
+        self.assertNotIn("mom-score-d10", keys)
+        self.assertEqual(keys[0], "si")
+        self.assertIn("mom-streak", keys)
+
+    def test_attach_puts_d10_pill_beside_streak(self) -> None:
+        hist, series = _hist_for("AAPL US Equity", [5] * 10 + [8])
+        card = {"ticker": "AAPL US Equity", "score": 8}
+        ms.attach_card(card, hist, asof=series[-1][0])
+        keys = [p["key"] for p in card["enrich_pills"]]
+        self.assertEqual(keys, ["mom-streak"])
+        self.assertNotIn("mom-score-d10", keys)
+        self.assertEqual(card["mom_streak_label"], "\u21911d>5")
+        self.assertEqual(card["mom_score_d10_label"], "+3")
+        self.assertEqual(card["mom_score_d10_short"], "+3")
+        self.assertEqual(card["mom_score_d10"], 3)
+        db = ms.streak_db([card])
+        rec = db["AAPL US Equity"]
+        self.assertEqual(rec["mom_score_d10"], 3)
+        self.assertEqual(rec["mom_score_d10_prior"], 5)
+        self.assertEqual(rec["mom_score_d10_label"], "+3")
+        self.assertEqual(rec["mom_score_d10_short"], "+3")
+        self.assertIn("composite score 10 trading days", rec["d10_title"])
+        html = ms.ensure_embedded("<html><head></head><body></body></html>", db)
+        self.assertIn('id="mom-streak-db"', html)
+        self.assertIn('id="mom-streak-js"', html)
+        self.assertIn("+3", html)
+        self.assertNotIn("10d +3", html)
+        self.assertIn("mom-score-d10-near", html)
+        self.assertIn("dropD10Pills", html)
+        self.assertNotRegex(html, r'<span[^>]*data-key="mom-score-d10"(?!-)')
+        self.assertEqual(html.count("momentum score streak vs 5"), 1)
+
+    def test_hist_only_db_computes_d10(self) -> None:
+        hist, series = _hist_for("MSFT US Equity", [2] * 10 + [6])
+        db = ms.streak_db_from_hist(hist)
+        rec = db["MSFT US Equity"]
+        self.assertEqual(rec["mom_score_d10"], 4)
+        self.assertEqual(rec["mom_score_d10_date"], series[-11][0].isoformat())
+        self.assertEqual(rec["label"][0], "\u2191")
+
+    def test_ensure_embedded_replaces_legacy_painter(self) -> None:
+        old = """<!DOCTYPE html><html><head><style>.badge.mom-streak-up { color: #6ee7b7; }</style></head><body>
+<script type="application/json" id="mom-streak-db">{}</script>
+<script>
+(function () {
+  var el = document.getElementById("mom-streak-db");
+  if (!el) return;
+  span.title = "momentum score streak vs 5";
+})();
+</script>
+</body></html>"""
+        hist, _series = _hist_for("IBM US Equity", [1] * 10 + [4])
+        card = {"ticker": "IBM US Equity", "score": 4}
+        ms.attach_card(card, hist, asof=_series[-1][0])
+        out = ms.ensure_embedded(old, ms.streak_db([card]))
+        self.assertEqual(out.count("momentum score streak vs 5"), 1)
+        self.assertIn("paintD10", out)
+        self.assertIn(".mom-score-d10-near.up", out)
+        self.assertIn("+3", out)
+        self.assertNotIn("10d +3", out)
+        self.assertIn('id="mom-streak-db"', out)
+
+    def test_render_html_shows_score_and_label(self) -> None:
+        hist, series = _hist_for("AAPL US Equity", [4] * 10 + [9])
+        rec = de.build_name_record(
+            "AAPL US Equity",
+            {"GICS_SECTOR_NAME": "Information Technology", "EQY_BETA": 1.1},
+        )
+        rec["mom_score"] = 9
+        html = desk_dash.render_html(
+            book={"asof": "test", "names": {"AAPL US Equity": rec}, "meta": {}},
+            cache={},
+            hist=hist,
+        )
+        self.assertIn('class="score sc"', html)
+        self.assertIn("+5", html)
+        self.assertNotIn("10d +5", html)
+        self.assertIn('data-key="mom-score-d10-near"', html)
+        self.assertNotRegex(html, r'<span[^>]*data-key="mom-score-d10"(?!-)')
+        self.assertIn("data-key=\"mom-streak\"", html)
+        self.assertIn("10 trading days", html)
+        self.assertIn(series[-11][0].isoformat(), html)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 import card_render as cr  # noqa: E402
 import desk_dash  # noqa: E402
+import mom_streak as ms  # noqa: E402
 
 
 class WhyPillsTests(unittest.TestCase):
@@ -172,6 +173,9 @@ class EmbedTests(unittest.TestCase):
         self.assertIn("labels[t]", out)
         self.assertIn("article.card .badge", out)
         self.assertIn("Day ", out)
+        self.assertIn("mom_score_d10_label", out)
+        self.assertIn("paintScoreD10", out)
+        self.assertIn("mom-score-d10", out)
         self.assertIn(cr.JS_VER, out)
         again = cr.ensure_embedded(out)
         self.assertEqual(len(re.findall(r'id="fd-card-js"', again)), 1)
@@ -326,6 +330,101 @@ console.log(JSON.stringify(report));
             self.assertNotIn("210%", text)
             self.assertNotIn("230%", text)
             self.assertIn("fmtAtr", cr.strip_js())
+
+    def test_cardhtml_paints_d10_beside_score(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        jsdom_root = Path("/tmp/fd-jsdom")
+        jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+        if not jsdom_mod.is_dir():
+            jsdom_root.mkdir(parents=True, exist_ok=True)
+            npm = shutil.which("npm")
+            if not npm:
+                self.skipTest("npm not installed")
+            subprocess.run(
+                [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        live = """<!DOCTYPE html><html><head></head><body>
+<article class="card" data-t="AAA US Equity"><header><h2>AAA</h2><span class="score">9</span><div class="pills"></div></header></article>
+<script type="application/json" id="mom-streak-db">{"AAA US Equity":{"label":"↑4d>5","cls":"mom-streak-up","title":"streak","score":9,"mom_score_d10":3,"mom_score_d10_prior":6,"mom_score_d10_date":"2026-09-01","mom_score_d10_label":"10d +3","d10_cls":"mom-score-d10-up","d10_side":"up","d10_title":"composite score 10 trading days: was 6 on 2026-09-01 → now 9 (Δ +3)"}}</script>
+<script>function cardHTML(c){
+  var t = (c && (c.t || c.d)) || "";
+  return '<article class="card" data-t="'+t+'"><header><h2>'+t+'</h2><span class="score">'+(c.score!=null?c.score:"")+'</span><div class="pills"></div></header></article>';
+}</script>
+</body></html>"""
+        html = ms.ensure_embedded(
+            live,
+            {
+                "AAA US Equity": {
+                    "label": "↑4d>5",
+                    "cls": "mom-streak-up",
+                    "title": "streak",
+                    "score": 9,
+                    "mom_score_d10": 3,
+                    "mom_score_d10_prior": 6,
+                    "mom_score_d10_date": "2026-09-01",
+                    "mom_score_d10_label": "10d +3",
+                    "d10_cls": "mom-score-d10-up",
+                    "d10_side": "up",
+                    "d10_title": "composite score 10 trading days: was 6 on 2026-09-01 → now 9 (Δ +3)",
+                }
+            },
+        )
+        html = cr.ensure_embedded(html)
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            runner = Path(tmp) / "run.js"
+            page.write_text(html, encoding="utf-8")
+            runner.write_text(
+                f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+const html = fs.readFileSync({json.dumps(str(page))}, "utf8");
+const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1/factorbook.html" }});
+const window = dom.window;
+const rendered = window.cardHTML({{
+  t: "BBB", score: 4, mom_score: 4,
+  mom_score_d10: -2, mom_score_d10_prior: 6, mom_score_d10_date: "2026-09-01",
+  mom_score_d10_label: "10d \\u22122"
+}});
+const staticCard = window.document.querySelector('[data-t="AAA US Equity"]');
+const report = {{
+  rendered: rendered,
+  staticHtml: staticCard ? staticCard.outerHTML : ""
+}};
+console.log(JSON.stringify(report));
+""",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [node, str(runner)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+            report = json.loads(proc.stdout.strip().splitlines()[-1])
+            rendered = report["rendered"]
+            self.assertIn('class="score"', rendered)
+            self.assertIn("\u22122", rendered)
+            self.assertNotIn("10d", rendered)
+            self.assertIn('data-key="mom-score-d10-near"', rendered)
+            self.assertNotRegex(rendered, r'data-key="mom-score-d10"(?!-)')
+            self.assertIn("mom-score-d10-near down", rendered)
+            self.assertIn("10 trading days", rendered)
+            static_html = report["staticHtml"]
+            self.assertIn("+3", static_html)
+            self.assertNotIn("10d +3", static_html)
+            self.assertIn('data-key="mom-streak"', static_html)
+            self.assertIn('data-key="mom-score-d10-near"', static_html)
+            self.assertNotRegex(static_html, r'data-key="mom-score-d10"(?!-)')
+            self.assertIn("10 trading days", static_html)
 
 
 if __name__ == "__main__":

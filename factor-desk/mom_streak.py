@@ -30,6 +30,12 @@ Literal **5**. Current regime is the side of today's score:
 
 ``n`` is consecutive **trading days** of history on the same side, including
 today. A day at 5, or a missing print, breaks the streak.
+
+10-day change
+-------------
+``D10_LOOKBACK`` (10) is a count of **points** in the score series, not
+calendar days. After today's upsert, ``prior = series[-(10+1)]`` and
+``delta = current_score - prior.score``. Fewer than 11 points → no chip.
 """
 
 from __future__ import annotations
@@ -54,6 +60,8 @@ LOG = logging.getLogger("mom_streak")
 
 HIST_FILENAME = "mom_score_hist.json"
 THRESHOLD = 5.0
+# Points in the hist series (trading prints), not calendar days.
+D10_LOOKBACK = 10
 MAX_SERIES = 252
 # Fri→Mon is 3 calendar days. A longer hole in the series breaks the streak.
 MAX_GAP_DAYS = 4
@@ -107,8 +115,13 @@ PX_COLS = ("px_last", "px", "close", "adj_close", "px_close", "last", "PX_LAST")
 RESIDUAL_COLS = ("residual", "resid", "v0", "residual_v0", "residual_20d")
 
 DB_SCRIPT_ID = "mom-streak-db"
+JS_SCRIPT_ID = "mom-streak-js"
 
 PILL_KEY = "mom-streak"
+D10_PILL_KEY = "mom-score-d10"
+# Unicode minus, same glyph in labels and tooltips.
+MINUS = "\u2212"
+ARROW_RIGHT = "\u2192"
 
 
 def _today() -> date:
@@ -324,6 +337,86 @@ def pill_for(streak: int, side: str | None, score: float | None, threshold: floa
         "cls": tag_cls(side),
         "title": tag_title(streak, side, score, threshold),
     }
+
+
+def _whole(value: float) -> int | float:
+    f = float(value)
+    if abs(f - round(f)) < 1e-9:
+        return int(round(f))
+    return f
+
+
+def _signed(value: float) -> str:
+    n = _whole(value)
+    if n > 0:
+        return f"+{n}"
+    if n < 0:
+        return f"{MINUS}{abs(n)}"
+    return "0"
+
+
+def d10_short(delta: float) -> str:
+    """Signed delta under the composite score: ``+3``, ``−2``, ``0``."""
+    return _signed(delta)
+
+
+def d10_label(delta: float) -> str:
+    """Display label under the score. No ``10d`` prefix."""
+    return d10_short(delta)
+
+
+def d10_cls(delta: float) -> str:
+    if delta > 0:
+        return "mom-score-d10-up"
+    if delta < 0:
+        return "mom-score-d10-down"
+    return "mom-score-d10"
+
+
+def d10_side(delta: float) -> str:
+    if delta > 0:
+        return "up"
+    if delta < 0:
+        return "down"
+    return "flat"
+
+
+def d10_title(current: float, prior: float, prior_date: date | str, delta: float) -> str:
+    when = prior_date.isoformat() if isinstance(prior_date, date) else str(prior_date)[:10]
+    return (
+        f"composite score 10 trading days: was {_whole(prior)} on {when}"
+        f" {ARROW_RIGHT} now {_whole(current)} (\u0394 {_signed(delta)})"
+    )
+
+
+def score_change_d10(
+    series: Sequence[tuple[date, float]] | None,
+    current_score: float | None,
+    lookback: int = D10_LOOKBACK,
+) -> dict[str, Any] | None:
+    """Delta vs the score ``lookback`` prints earlier. ``None`` if the series is short."""
+    if current_score is None or not series:
+        return None
+    if len(series) < lookback + 1:
+        return None
+    prior_date, prior_score = series[-(lookback + 1)]
+    delta = float(current_score) - float(prior_score)
+    return {
+        "mom_score_d10": _whole(delta),
+        "mom_score_d10_prior": _whole(prior_score),
+        "mom_score_d10_date": prior_date.isoformat(),
+        "mom_score_d10_label": d10_label(delta),
+        "mom_score_d10_short": d10_short(delta),
+    }
+
+
+D10_CARD_KEYS: tuple[str, ...] = (
+    "mom_score_d10",
+    "mom_score_d10_prior",
+    "mom_score_d10_date",
+    "mom_score_d10_label",
+    "mom_score_d10_short",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -763,7 +856,8 @@ def compute_for_ticker(
     streak, side = streak_vs_threshold(scores, threshold, dates=dates)
     label = tag_label(streak, side, threshold)
     span = streak_span(series, threshold)
-    return {
+    d10 = score_change_d10(series, score)
+    out: dict[str, Any] = {
         "ticker": key,
         "mom_score": score,
         "mom_score_source": src,
@@ -778,6 +872,9 @@ def compute_for_ticker(
         "pill": pill_for(streak, side, score, threshold),
         "series": [{"date": d.isoformat(), "score": s} for d, s in series],
     }
+    if d10:
+        out.update(d10)
+    return out
 
 
 def attach_card(
@@ -804,6 +901,11 @@ def attach_card(
     card["mom_streak_start"] = rec.get("mom_streak_start")
     card["mom_streak_end"] = rec.get("mom_streak_end")
     card["mom_streak_open"] = rec.get("mom_streak_open")
+    for key in D10_CARD_KEYS:
+        if rec.get(key) is not None:
+            card[key] = rec[key]
+        else:
+            card.pop(key, None)
     if rec.get("series"):
         card["mom_score_series"] = rec["series"]
     pill = rec.get("pill")
@@ -811,7 +913,11 @@ def attach_card(
     if not isinstance(pills, list):
         pills = []
         card["enrich_pills"] = pills
-    pills = [p for p in pills if not (isinstance(p, Mapping) and p.get("key") == PILL_KEY)]
+    pills = [
+        p
+        for p in pills
+        if not (isinstance(p, Mapping) and p.get("key") in (PILL_KEY, D10_PILL_KEY))
+    ]
     if pill:
         pills.append(pill)
     card["enrich_pills"] = pills
@@ -866,7 +972,7 @@ def _streak_db_rec(item: Mapping[str, Any] | None) -> dict[str, Any] | None:
     start = item.get("mom_streak_start") or item.get("start")
     end = item.get("mom_streak_end") or item.get("end")
     open_flag = item.get("mom_streak_open") if "mom_streak_open" in item else item.get("open")
-    return {
+    out: dict[str, Any] = {
         "_ticker": ticker,
         "label": label,
         "cls": tag_cls(str(side or "")),
@@ -878,6 +984,27 @@ def _streak_db_rec(item: Mapping[str, Any] | None) -> dict[str, Any] | None:
         "open": open_flag,
         "title": tag_title(streak, side, dapi_enrich.as_float(score)),
     }
+    d10_label_txt = item.get("mom_score_d10_short") or item.get("mom_score_d10_label")
+    if d10_label_txt or item.get("mom_score_d10") is not None:
+        delta = dapi_enrich.as_float(item.get("mom_score_d10"))
+        prior = dapi_enrich.as_float(item.get("mom_score_d10_prior"))
+        when = item.get("mom_score_d10_date")
+        cur = dapi_enrich.as_float(score)
+        shown = d10_short(delta) if delta is not None else str(d10_label_txt or "").removeprefix("10d").strip()
+        if shown:
+            out["mom_score_d10_label"] = shown
+            out["mom_score_d10_short"] = shown
+        if delta is not None:
+            out["mom_score_d10"] = _whole(delta)
+            out["d10_cls"] = d10_cls(delta)
+            out["d10_side"] = d10_side(delta)
+        if prior is not None:
+            out["mom_score_d10_prior"] = _whole(prior)
+        if when:
+            out["mom_score_d10_date"] = str(when)[:10]
+        if delta is not None and prior is not None and when and cur is not None:
+            out["d10_title"] = d10_title(cur, prior, str(when), delta)
+    return out
 
 
 def streak_db_from_hist(hist: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -909,6 +1036,13 @@ def streak_db_from_hist(hist: Mapping[str, Any] | None) -> dict[str, dict[str, A
                 payload["mom_streak_start"] = span.get("start")
                 payload["mom_streak_end"] = span.get("end")
                 payload["mom_streak_open"] = span.get("open")
+        if series and payload.get("mom_score_d10_label") is None:
+            current = dapi_enrich.as_float(payload.get("mom_score"))
+            if current is None:
+                current = series[-1][1]
+            d10 = score_change_d10(series, current)
+            if d10:
+                payload.update(d10)
         db_rec = _streak_db_rec(payload)
         if db_rec is None:
             continue
@@ -933,12 +1067,26 @@ def embed_db(mapping: Mapping[str, Any] | None) -> str:
     return f'<script type="application/json" id="{DB_SCRIPT_ID}">{_script_json(blob)}</script>'
 
 
-def streak_css() -> str:
+def d10_css() -> str:
     return """
+.mom-score-d10-near { display: block; margin-top: 1px; text-align: right; font: 600 10px/1.15 ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace; letter-spacing: 0.01em; }
+.score .mom-score-d10-near, .sc .mom-score-d10-near { display: block; font-size: 10px !important; font-weight: 600 !important; line-height: 1.15 !important; font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace !important; }
+.mom-score-d10-near.up { color: #6ee7b7; }
+.mom-score-d10-near.down { color: #fda4af; }
+.mom-score-d10-near.flat { color: #9ca3af; }
+""".strip()
+
+
+def streak_css() -> str:
+    return (
+        """
 .badge.mom-streak-up, .spike-chip.mom-streak-up { color: #6ee7b7; border-color: #34d399; }
 .badge.mom-streak-down, .spike-chip.mom-streak-down { color: #fda4af; border-color: #fb7185; }
 .badge.mom-streak-at, .spike-chip.mom-streak-at { color: #fde68a; border-color: #a3a3a3; }
 """.strip()
+        + "\n"
+        + d10_css()
+    )
 
 
 def strip_js() -> str:
@@ -967,6 +1115,43 @@ def strip_js() -> str:
     }
     return null;
   }
+  function d10Text(rec) {
+    if (!rec) return "";
+    if (rec.mom_score_d10_short) return String(rec.mom_score_d10_short);
+    var n = Number(rec.mom_score_d10);
+    if (isFinite(n)) {
+      if (n > 0) return "+" + n;
+      if (n < 0) return "\u2212" + String(n).replace(/^-/, "");
+      return "0";
+    }
+    return String(rec.mom_score_d10_label || "").replace(/^10d\s+/, "");
+  }
+  function dropD10Pills(node) {
+    var old = node.querySelectorAll('[data-key="mom-score-d10"]');
+    for (var i = old.length - 1; i >= 0; i--) {
+      if (old[i].getAttribute("data-key") !== "mom-score-d10") continue;
+      if (old[i].parentNode) old[i].parentNode.removeChild(old[i]);
+    }
+  }
+  function paintD10(node, rec) {
+    dropD10Pills(node);
+    var text = d10Text(rec);
+    if (!text) return;
+    var title = rec.d10_title || "";
+    var side = rec.d10_side || (Number(rec.mom_score_d10) > 0 ? "up" : (Number(rec.mom_score_d10) < 0 ? "down" : "flat"));
+    var cap = node.querySelector("[data-key='mom-score-d10-near']");
+    if (!cap) {
+      var scoreEl = node.querySelector(".score, .sc");
+      if (!scoreEl) return;
+      cap = document.createElement("span");
+      cap.setAttribute("data-key", "mom-score-d10-near");
+      scoreEl.appendChild(cap);
+    }
+    cap.className = "mom-score-d10-near " + side;
+    if (title) cap.title = title;
+    if (rec.mom_score_d10 != null && rec.mom_score_d10 !== "") cap.setAttribute("data-mom-score-d10", String(rec.mom_score_d10));
+    cap.textContent = text;
+  }
   function apply() {
     var nodes = document.querySelectorAll("[data-t], [data-ticker], article.card, .card");
     for (var i = 0; i < nodes.length; i++) {
@@ -974,20 +1159,57 @@ def strip_js() -> str:
       if (node.closest && node.closest("nav, .topnav, #gics-filter-strip, #refresh, #options-refresh, #sidecar-progress")) continue;
       var rec = recOf(tickerOf(node));
       if (!rec || !rec.label) continue;
-      if (node.querySelector('[data-key="mom-streak"]')) continue;
-      var host = node.querySelector(".pills, .chips, .badges") || node;
-      var span = document.createElement("span");
-      span.className = "badge spike-chip " + (rec.cls || "mom-streak");
-      span.setAttribute("data-key", "mom-streak");
-      span.title = rec.title || "momentum score streak vs 5";
-      span.textContent = rec.label;
-      host.appendChild(span);
+      if (!node.querySelector('[data-key="mom-streak"]')) {
+        var host = node.querySelector(".pills, .chips, .badges") || node;
+        var span = document.createElement("span");
+        span.className = "badge spike-chip " + (rec.cls || "mom-streak");
+        span.setAttribute("data-key", "mom-streak");
+        span.title = rec.title || "momentum score streak vs 5";
+        span.textContent = rec.label;
+        host.appendChild(span);
+      }
+      paintD10(node, rec);
     }
   }
+  apply();
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", apply);
-  else apply();
 })();
 """.strip()
+
+
+def _inject_css(text: str, css: str) -> str:
+    if "</style>" in text:
+        idx = text.rfind("</style>")
+        return text[:idx] + css + "\n" + text[idx:]
+    if "</head>" in text:
+        return text.replace("</head>", f"<style>\n{css}\n</style>\n</head>", 1)
+    return f"<style>{css}</style>\n" + text
+
+
+_SCRIPT_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
+
+
+def _streak_script_tag() -> str:
+    return f'<script id="{JS_SCRIPT_ID}">\n{strip_js()}\n</script>\n'
+
+
+def _replace_streak_script(text: str) -> str:
+    """Refresh the streak painter so a prior embed picks up the 10d chip."""
+    script = _streak_script_tag()
+    matches = list(_SCRIPT_RE.finditer(text))
+    for match in matches:
+        body = match.group(0)
+        if re.search(rf"""\bid=["']{JS_SCRIPT_ID}["']""", body, re.I):
+            return text[: match.start()] + script + text[match.end() :]
+    for match in matches:
+        body = match.group(0)
+        if re.search(r"""type=["']application/json["']""", body, re.I):
+            continue
+        if "momentum score streak vs 5" in body and "mom-streak-db" in body:
+            return text[: match.start()] + script + text[match.end() :]
+    if "</body>" in text:
+        return text.replace("</body>", script + "</body>", 1)
+    return text + script
 
 
 def ensure_embedded(html_text: str, mapping: Mapping[str, Any] | None) -> str:
@@ -995,14 +1217,9 @@ def ensure_embedded(html_text: str, mapping: Mapping[str, Any] | None) -> str:
     text = html_text or ""
     tag = embed_db(mapping)
     if ".mom-streak-up" not in text:
-        css = streak_css()
-        if "</style>" in text:
-            idx = text.rfind("</style>")
-            text = text[:idx] + css + "\n" + text[idx:]
-        elif "</head>" in text:
-            text = text.replace("</head>", f"<style>\n{css}\n</style>\n</head>", 1)
-        else:
-            text = f"<style>{css}</style>\n" + text
+        text = _inject_css(text, streak_css())
+    elif ".mom-score-d10-near" not in text:
+        text = _inject_css(text, d10_css())
     if re.search(r'id=["\']mom-streak-db["\']', text, re.I):
         text = re.sub(
             r'<script\b[^>]*\bid=["\']mom-streak-db["\'][^>]*>.*?</script>',
@@ -1015,13 +1232,7 @@ def ensure_embedded(html_text: str, mapping: Mapping[str, Any] | None) -> str:
         text = text.replace("</body>", tag + "\n</body>", 1)
     else:
         text += tag
-    if 'getElementById("mom-streak-db")' not in text and "getElementById('mom-streak-db')" not in text:
-        script = "<script>\n" + strip_js() + "\n</script>\n"
-        if "</body>" in text:
-            text = text.replace("</body>", script + "</body>", 1)
-        else:
-            text += script
-    return text
+    return _replace_streak_script(text)
 
 
 def rebuild_hist_for_cards(

@@ -1,4 +1,8 @@
-"""Factor Desk paper book — 1-unit Buy/Sell on dense MOM cards.
+"""Factor Desk paper book — 1-unit Buy/Sell math (desk UI binned).
+
+The click rules below stay in this module. Factor Desk does **not** show
+Buy/Sell, Previous trades, or the Paper tab. ``ensure_embedded`` strips those
+hosts so Refresh cannot put them back. On-disk history is not deleted.
 
 Paper only (no brokerage). Positions persist in ``localStorage`` across Refresh.
 Optional JSON schema is here for a later sidecar file; Desktop does not need it.
@@ -2369,21 +2373,141 @@ def _ensure_js(html_text: str) -> str:
     return text + script
 
 
-def ensure_embedded(html_text: str, marks: Mapping[str, Any] | None = None) -> str:
-    """CSS + marks db + Paper tab + cardHTML wrap JS. Safe on live ~2.7MB HTML.
+_BUTTON_RE = re.compile(r"<button\b([^>]*)>.*?</button>\s*", re.I | re.S)
+_CLASS_ATTR_RE = re.compile(r"""\bclass\s*=\s*(['"])(.*?)\1""", re.I | re.S)
+_PAPER_ALLOW_RE = re.compile(
+    r"(home\|mom-up\|mom-down\|outliers\|options"
+    r"(?:\|sectors)?(?:\|breakout\|breakdown)?(?:\|experimental)?)\|paper\b",
+    re.I,
+)
 
-    ``marks=None`` still injects JS/CSS so Buy/Sell hydrate from ``MOM.cards`` /
-    localStorage after Refresh. Pass ``marks_db(cards, book=book)`` on a write.
-    ``#view-paper`` is a top-nav tab (not a home chrome strip) and reads
-    ``fd-paper-book``. Leftover ``#fd-paper-home`` is stripped.
-    """
+
+def _strip_tag_by_id(html_text: str, tag: str, elem_id: str) -> str:
+    return re.sub(
+        rf"<{tag}\b[^>]*\bid=[\"']{re.escape(elem_id)}[\"'][^>]*>.*?</{tag}>\s*",
+        "",
+        html_text or "",
+        flags=re.I | re.S,
+    )
+
+
+def _strip_div_id(html_text: str, elem_id: str) -> str:
     text = html_text or ""
-    text = _strip_home_host(text)
-    text = _ensure_nav(text)
-    text = _ensure_css(text)
-    text = _patch_setview(text)
-    text = _ensure_panes(text, replace=True)
-    if marks is not None or not re.search(rf'id=["\']{DB_SCRIPT_ID}["\']', text, re.I):
-        text = _ensure_db(text, marks if marks is not None else {})
-    text = _ensure_js(text)
+    span = _find_tag_span(text, elem_id)
+    while span:
+        start, end = span
+        while end < len(text) and text[end] in " \t\r\n":
+            end += 1
+        text = text[:start] + text[end:]
+        span = _find_tag_span(text, elem_id)
     return text
+
+
+def _class_has_token(attrs: str, token: str) -> bool:
+    match = _CLASS_ATTR_RE.search(attrs or "")
+    if not match:
+        return False
+    return token in match.group(2).split()
+
+
+def _find_div_class_token(html_text: str, token: str) -> tuple[int, int] | None:
+    text = html_text or ""
+    for tok in _DIV_TOKEN_RE.finditer(text):
+        if tok.group(1):
+            continue
+        rest = tok.group(2) or ""
+        self_close = rest.rstrip().endswith("/")
+        if not _class_has_token(rest, token):
+            continue
+        if self_close:
+            return tok.start(), tok.end()
+        depth = 1
+        for inner in _DIV_TOKEN_RE.finditer(text, tok.end()):
+            closing = bool(inner.group(1))
+            irest = inner.group(2) or ""
+            inner_close = irest.rstrip().endswith("/")
+            if closing:
+                depth -= 1
+                if depth == 0:
+                    return tok.start(), inner.end()
+            elif inner_close:
+                continue
+            else:
+                depth += 1
+        return None
+    return None
+
+
+def _strip_divs_with_class_token(html_text: str, token: str) -> str:
+    text = html_text or ""
+    span = _find_div_class_token(text, token)
+    while span:
+        start, end = span
+        while end < len(text) and text[end] in " \t\r\n":
+            end += 1
+        text = text[:start] + text[end:]
+        span = _find_div_class_token(text, token)
+    return text
+
+
+def _strip_paper_nav(html_text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        attrs = match.group(1) or ""
+        if re.search(rf'\bid=["\']{re.escape(NAV_ID)}["\']', attrs, re.I):
+            return ""
+        if re.search(r'\bdata-view=["\']paper["\']', attrs, re.I):
+            return ""
+        if re.search(r'\bdata-fd-paper-nav=["\']1["\']', attrs, re.I):
+            return ""
+        return match.group(0)
+
+    return _BUTTON_RE.sub(repl, html_text or "")
+
+
+def _unpatch_paper_nav(html_text: str) -> str:
+    """Drop ``|paper`` and the setView / paintView / hideAll hooks this module added."""
+    text = html_text or ""
+    early = r'if\(\w+==="paper"\)\{.*?return;\}'
+    text = re.sub(re.escape(SETVIEW_MARKER) + early, "", text, flags=re.S)
+    text = re.sub(re.escape(PAINTVIEW_MARKER) + early, "", text, flags=re.S)
+    text = re.sub(
+        re.escape(HIDEALL_MARKER) + r'\["view-paper"\]\.forEach\(function\(id\)\{.*?\}\);',
+        "",
+        text,
+        flags=re.S,
+    )
+    text = _PAPER_ALLOW_RE.sub(r"\1", text)
+    text = re.sub(r',\s*["\']view-paper["\']', "", text)
+    text = re.sub(r",\s*#view-paper\b", "", text)
+    return text
+
+
+def strip_ui(html_text: str, marks: Mapping[str, Any] | None = None) -> str:
+    """Remove Paper nav, pane, card Buy/Sell, and nav allowlist hooks.
+
+    ``marks`` is ignored. Book math and on-disk history stay; this only
+    stops the desk from showing Paper.
+    """
+    del marks
+    text = html_text or ""
+    text = _strip_tag_by_id(text, "style", CSS_STYLE_ID)
+    text = _strip_tag_by_id(text, "script", JS_SCRIPT_ID)
+    text = _strip_tag_by_id(text, "script", DB_SCRIPT_ID)
+    text = _strip_stale_paper_scripts(text)
+    text = _strip_paper_nav(text)
+    text = _strip_div_id(text, VIEW_ID)
+    text = _strip_home_host(text)
+    text = _strip_div_id(text, "fd-paper-toast")
+    text = _strip_div_id(text, TAB_ID)
+    text = _strip_divs_with_class_token(text, HOST_CLASS)
+    return _unpatch_paper_nav(text)
+
+
+def ensure_embedded(html_text: str, marks: Mapping[str, Any] | None = None) -> str:
+    """Refresh path removes Paper UI so a prior bake cannot resurrect it.
+
+    Does not inject Buy/Sell, Previous trades, ``#fd-nav-paper``, or
+    ``#view-paper``. ``marks`` is ignored. ``paper_trade.py`` and any
+    on-disk book stay in place.
+    """
+    return strip_ui(html_text, marks)
