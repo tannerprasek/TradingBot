@@ -101,7 +101,7 @@ PX_SERIES_KEYS: tuple[str, ...] = (
 
 DB_SCRIPT_ID = "fd-breakout-db"
 JS_SCRIPT_ID = "fd-breakout-js"
-JS_VER = "pr21-ignore-paper"
+JS_VER = "pr32-mom-filter"
 CSS_STYLE_ID = "fd-breakout-css"
 PANE_BREAKOUT_ID = "fd-bb-breakout"
 PANE_BREAKDOWN_ID = "fd-bb-breakdown"
@@ -1285,13 +1285,16 @@ article.fd-bb-card, .fd-bb-card {{
 
 
 def strip_js() -> str:
-    """Fill #breakout-grid / #breakdown-grid via live ``cardHTML(momCard)``.
+    """Filter the live Momentum Up/Down cards into the Breakout panes.
 
-    Look up the Momentum card by ticker and pass that object unchanged into
-    the same ``cardHTML`` Momentum Up/Down uses. Do **not** paint the skinny
-    dense substitute as the primary path. Capture-phase click on nav still
-    stops the live topnav listener; card clicks call ``selectTicker``.
-    ``show`` is ``window.__FD_BB_SHOW__``.
+    Membership is the mom-up / mom-down articles (or the ``MOM`` card objects
+    behind them), not ``#fd-breakout-db``. Matching cards are cloned so the
+    pane keeps the same ``cardHTML`` chrome, ``data-t``, and filter attributes.
+    A missing gate field skips that card. The empty line is used only when the
+    live universe has zero matches. ``window.__FD_BB_SHOW__`` is assigned after
+    ``show`` exists; ``__FD_BB_BOUND__`` is stamped only then, so a throw cannot
+    lock the binder. Capture-phase click on nav still stops the live topnav
+    listener; card clicks call ``selectTicker``.
 
     Paper is not a BB view: ``kindOf`` returns ``""`` for ``data-view=paper`` /
     ``#fd-nav-paper`` / ``data-fd-paper-nav`` so capture never ``show("")``.
@@ -1301,9 +1304,9 @@ def strip_js() -> str:
     return rf"""
 (function () {{
   var BB_VER = "{JS_VER}";
-  if (window.__FD_BB_BOUND__ === BB_VER) return;
-  window.__FD_BB_BOUND__ = BB_VER;
+  if (window.__FD_BB_BOUND__ === BB_VER && typeof window.__FD_BB_SHOW__ === "function") return;
   window.__FD_BB_CARDHTML__ = true;
+  window.__FD_BB_MOM_FILTER__ = true;
   window.__FD_BB_IGNORE_PAPER__ = true;
   var DB_ID = "fd-breakout-db";
   var VIEW_BO = "view-breakout";
@@ -1316,6 +1319,15 @@ def strip_js() -> str:
   var TAG_CATALOG = ["MA FAN","CLOSE HI","52W HI","HM/HL","V.EMA","ABOVE 50","ABOVE 200","MOM+","TREND↑","SQUEEZE","RS+","BREAKOUT"];
   var TAG_SET = {{}};
   for (var ti = 0; ti < TAG_CATALOG.length; ti++) TAG_SET[TAG_CATALOG[ti]] = true;
+  var BO_MIN = {BREAKOUT_SCORE_MIN};
+  var BO_MAX = {BREAKOUT_SCORE_MAX};
+  var BD_MIN = {BREAKDOWN_SCORE_MIN};
+  var BD_MAX = {BREAKDOWN_SCORE_MAX};
+  var BO_D10 = {D10_BREAKOUT_MIN};
+  var BD_D10 = {D10_BREAKDOWN_MAX};
+  var STREAK_LO = {STREAK_JUST_CROSSED};
+  var STREAK_HI = {STREAK_FRESH_MAX};
+  var RANK_CAP_N = {RANK_CAP};
 
   function $(id) {{ return document.getElementById(id); }}
   function db() {{
@@ -1640,9 +1652,318 @@ def strip_js() -> str:
     for (var i = 0; i < rows.length; i++) {{
       var row = rows[i] || {{}};
       if (!shortOf(row.t || row.ticker || row.d || "")) continue;
-      var node = renderRow(row);
+      var node = null;
+      try {{ node = renderRow(row); }} catch (eRow) {{ node = null; }}
       if (node) grid.appendChild(node);
     }}
+  }}
+  function numOf(v) {{
+    if (v == null || v === "" || v === true || v === false) return null;
+    if (typeof v === "number" && isFinite(v)) return v;
+    var s = String(v).trim().replace(/\u2212/g, "-").replace(/,/g, "");
+    if (!s || s === "—" || s === "-" || s === "–") return null;
+    var n = parseFloat(s.replace("%", ""));
+    return isFinite(n) ? n : null;
+  }}
+  function presentNum(obj, key) {{
+    if (!obj || typeof obj !== "object") return null;
+    if (!Object.prototype.hasOwnProperty.call(obj, key)) return null;
+    var raw = obj[key];
+    if (raw == null || raw === "") return null;
+    return numOf(raw);
+  }}
+  function firstOwn(obj, keys) {{
+    if (!obj || typeof obj !== "object") return null;
+    for (var i = 0; i < keys.length; i++) {{
+      var n = presentNum(obj, keys[i]);
+      if (n != null) return n;
+    }}
+    return null;
+  }}
+  function tickerOfNode(node) {{
+    if (!node || !node.getAttribute) return "";
+    var t = node.getAttribute("data-t") || node.getAttribute("data-ticker") || node.getAttribute("data-name") || "";
+    if (!t) {{
+      var h = node.querySelector ? node.querySelector("h2, h3, .tkr, .ticker, .sym") : null;
+      t = h ? h.textContent : "";
+    }}
+    return shortOf(t);
+  }}
+  function pushBag(list, src) {{
+    if (!src) return;
+    if (Array.isArray(src)) {{
+      for (var i = 0; i < src.length; i++) {{
+        if (src[i] && typeof src[i] === "object") list.push(src[i]);
+      }}
+      return;
+    }}
+    if (typeof src !== "object") return;
+    if (src.t || src.ticker || src.d || src.mom_score != null || src.score != null) {{
+      list.push(src);
+      return;
+    }}
+    var keys = Object.keys(src);
+    for (var k = 0; k < keys.length; k++) {{
+      var v = src[keys[k]];
+      if (v && typeof v === "object" && (v.t || v.ticker || v.d || v.mom_score != null || v.score != null)) list.push(v);
+    }}
+  }}
+  function momArticles() {{
+    var ids = ["view-mom-up", "view-mom-down", "mom-up-grid", "mom-down-grid"];
+    var nodes = [];
+    var seen = [];
+    function take(root) {{
+      if (!root || !root.querySelectorAll) return;
+      var found = root.querySelectorAll("article.card, article.fd-card");
+      for (var i = 0; i < found.length; i++) {{
+        var node = found[i];
+        if (node.closest && node.closest("#view-breakout, #view-breakdown, #breakout-grid, #breakdown-grid, #fd-bb-breakout, #fd-bb-breakdown")) continue;
+        if (seen.indexOf(node) >= 0) continue;
+        seen.push(node);
+        nodes.push(node);
+      }}
+    }}
+    for (var i = 0; i < ids.length; i++) take($(ids[i]));
+    return nodes;
+  }}
+  function momUniverse() {{
+    var cards = [];
+    var mom = window.MOM || {{}};
+    pushBag(cards, mom.up);
+    pushBag(cards, mom.down);
+    if (!cards.length) {{
+      pushBag(cards, mom.cards);
+      pushBag(cards, mom.all);
+      pushBag(cards, window.CARDS);
+      pushBag(cards, window.MOM_CARDS);
+    }}
+    var byT = {{}};
+    function slot(t) {{
+      t = shortOf(t);
+      if (!t) return null;
+      if (!byT[t]) byT[t] = {{ t: t, card: null, node: null }};
+      return byT[t];
+    }}
+    for (var i = 0; i < cards.length; i++) {{
+      var c = cards[i];
+      var s = slot(c.t || c.ticker || c.d || c.name || "");
+      if (s && !s.card) s.card = c;
+    }}
+    var nodes = momArticles();
+    for (var n = 0; n < nodes.length; n++) {{
+      var node = nodes[n];
+      var s2 = slot(tickerOfNode(node));
+      if (s2 && !s2.node) s2.node = node;
+    }}
+    var out = [];
+    var names = Object.keys(byT);
+    for (var j = 0; j < names.length; j++) out.push(byT[names[j]]);
+    return out;
+  }}
+  function streakRec(t) {{
+    var el = $("mom-streak-db");
+    if (!el || !t) return null;
+    var db = null;
+    try {{ db = JSON.parse(el.textContent || "{{}}") || {{}}; }} catch (e) {{ return null; }}
+    if (db[t]) return db[t];
+    var keys = Object.keys(db);
+    for (var i = 0; i < keys.length; i++) {{
+      if (shortOf(keys[i]) === t) return db[keys[i]];
+    }}
+    return null;
+  }}
+  function scoreFromNode(node) {{
+    if (!node || !node.querySelector) return null;
+    var attr = node.getAttribute("data-score") || node.getAttribute("data-mom-score");
+    if (attr != null && attr !== "") {{
+      var fromAttr = numOf(attr);
+      if (fromAttr != null) return fromAttr;
+    }}
+    var el = node.querySelector(".score, .sc");
+    if (!el) return null;
+    var own = "";
+    for (var n = el.firstChild; n; n = n.nextSibling) {{
+      if (n.nodeType === 3) own += n.textContent;
+    }}
+    var m = String(own || el.textContent || "").match(/-?\d+(?:\.\d+)?/);
+    return m ? numOf(m[0]) : null;
+  }}
+  function parseStreakLabel(text) {{
+    var s = String(text || "").replace(/\s+/g, "").replace(/\u2212/g, "-");
+    var up = s.match(/(\d+)d?>5/);
+    if (up) return {{ streak: parseInt(up[1], 10), side: "above" }};
+    var down = s.match(/(\d+)d?<5/);
+    if (down) return {{ streak: parseInt(down[1], 10), side: "below" }};
+    if (s === "=5" || s.indexOf("=5") >= 0) return {{ streak: 0, side: "at" }};
+    return null;
+  }}
+  function streakFromNode(node) {{
+    if (!node || !node.querySelector) return null;
+    var pill = node.querySelector("[data-key='mom-streak'], .mom-streak-up, .mom-streak-down, .mom-streak-at");
+    var parsed = parseStreakLabel(pill ? pill.textContent : "");
+    if (!parsed) parsed = parseStreakLabel(node.textContent || "");
+    return parsed;
+  }}
+  function d10FromNode(node) {{
+    if (!node || !node.querySelector) return null;
+    var el = node.querySelector("[data-mom-score-d10]");
+    if (!el) return null;
+    return numOf(el.getAttribute("data-mom-score-d10"));
+  }}
+  function dispersionOf(card, node) {{
+    var metrics = (card && card.metrics && typeof card.metrics === "object") ? card.metrics : null;
+    var keys = ["residual_20d", "factor_residual", "factor_resid", "vs_group", "vs_sleeve"];
+    var blobs = [card, metrics];
+    var b, i, n;
+    for (b = 0; b < blobs.length; b++) {{
+      if (!blobs[b]) continue;
+      for (i = 0; i < keys.length; i++) {{
+        n = presentNum(blobs[b], keys[i]);
+        if (n != null) return n;
+      }}
+    }}
+    var rsKeys = ["rs_63", "rs63", "RS63", "rs_63d"];
+    for (b = 0; b < blobs.length; b++) {{
+      if (!blobs[b]) continue;
+      for (i = 0; i < rsKeys.length; i++) {{
+        n = presentNum(blobs[b], rsKeys[i]);
+        if (n != null) return n;
+      }}
+    }}
+    if (!node) return null;
+    var blob = String(node.textContent || "").replace(/\u2212/g, "-");
+    var m = blob.match(/RS\s*63[^0-9\-]*(-?\d+(?:\.\d+)?)\s*(%)?/i);
+    if (!m) return null;
+    n = numOf(m[1]);
+    if (n == null) return null;
+    if (m[2]) n = n / 100;
+    return n;
+  }}
+  function readFields(item) {{
+    var card = item.card || {{}};
+    var node = item.node;
+    var rec = streakRec(item.t) || {{}};
+    var score = firstOwn(card, ["mom_score", "momentum_score", "mom_rank", "trend_rank", "score"]);
+    if (score == null) score = numOf(rec.score);
+    if (score == null) score = scoreFromNode(node);
+    var d10 = null;
+    if (card.mom_score_d10 != null && card.mom_score_d10 !== "") d10 = numOf(card.mom_score_d10);
+    if (d10 == null && rec.mom_score_d10 != null && rec.mom_score_d10 !== "") d10 = numOf(rec.mom_score_d10);
+    if (d10 == null) d10 = d10FromNode(node);
+    var streak = null;
+    var side = null;
+    var streakRaw = (card.mom_streak != null && card.mom_streak !== "") ? card.mom_streak : card.streak;
+    var sideRaw = card.mom_streak_side || card.side || "";
+    if (streakRaw != null && streakRaw !== "" && sideRaw) {{
+      streak = parseInt(streakRaw, 10);
+      side = String(sideRaw);
+    }}
+    if ((streak == null || !isFinite(streak) || !side) && rec.streak != null && rec.streak !== "" && rec.side) {{
+      streak = parseInt(rec.streak, 10);
+      side = String(rec.side);
+    }}
+    if (streak == null || !isFinite(streak) || !side) {{
+      var parsed = streakFromNode(node);
+      if (parsed) {{ streak = parsed.streak; side = parsed.side; }}
+    }}
+    return {{
+      score: score,
+      d10: d10,
+      streak: (streak != null && isFinite(streak)) ? streak : null,
+      side: side || "",
+      dispersion: dispersionOf(card, node)
+    }};
+  }}
+  function passes(kind, f) {{
+    if (!f || f.score == null || f.d10 == null || f.streak == null || !f.side || f.dispersion == null) return false;
+    if (kind === "breakout") {{
+      if (f.score < BO_MIN || f.score > BO_MAX) return false;
+      if (f.d10 <= BO_D10) return false;
+      if (f.side !== "above") return false;
+      if (f.streak < STREAK_LO || f.streak > STREAK_HI) return false;
+      if (f.dispersion <= 0) return false;
+      return true;
+    }}
+    if (kind === "breakdown") {{
+      if (f.score < BD_MIN || f.score > BD_MAX) return false;
+      if (f.d10 >= BD_D10) return false;
+      if (f.side !== "below") return false;
+      if (f.streak < STREAK_LO || f.streak > STREAK_HI) return false;
+      if (f.dispersion >= 0) return false;
+      return true;
+    }}
+    return false;
+  }}
+  function inflectionOf(kind, f) {{
+    var span = kind === "breakout" ? Math.max(BO_MAX - BO_MIN, 0.01) : Math.max(BD_MAX - BD_MIN, 0.01);
+    var band = kind === "breakout"
+      ? (1 - 0.45 * (f.score - BO_MIN) / span)
+      : (1 - 0.45 * (BD_MAX - f.score) / span);
+    var n = f.streak;
+    var fresh = 0;
+    if (n >= 5 && n <= 12) fresh = 1;
+    else if (n < 5) fresh = 0.35 + 0.65 * (n - 1) / 4;
+    else fresh = 1 - 0.35 * (n - 12) / 3;
+    var mag = 3 * band + 1.6 * (Math.min(Math.abs(f.d10), 8) / 8) + 2 * fresh + 1.4 * (Math.min(Math.abs(f.dispersion), 0.15) / 0.15);
+    return kind === "breakout" ? mag : -mag;
+  }}
+  function filterUniverse(universe, kind) {{
+    var matches = [];
+    for (var i = 0; i < universe.length; i++) {{
+      try {{
+        var fields = readFields(universe[i]);
+        if (!passes(kind, fields)) continue;
+        universe[i].fields = fields;
+        universe[i].inflection = inflectionOf(kind, fields);
+        matches.push(universe[i]);
+      }} catch (eOne) {{}}
+    }}
+    matches.sort(function (a, b) {{
+      if (kind === "breakdown") return (a.inflection || 0) - (b.inflection || 0);
+      return (b.inflection || 0) - (a.inflection || 0);
+    }});
+    if (matches.length > RANK_CAP_N) matches = matches.slice(0, RANK_CAP_N);
+    return matches;
+  }}
+  function materialize(item) {{
+    var card = item.card || {{ t: item.t, d: item.t, ticker: item.t }};
+    var row = {{
+      t: item.t,
+      ticker: card.ticker || item.t,
+      card: card,
+      score: card.score != null ? card.score : card.mom_score
+    }};
+    if (item.node && item.node.cloneNode) {{
+      var copy = item.node.cloneNode(true);
+      if (copy.classList) copy.classList.remove("hide", "fd-bb-hid", "gics-hid");
+      if (copy.removeAttribute) copy.removeAttribute("id");
+      if (!copy.getAttribute("data-t") && item.t) copy.setAttribute("data-t", item.t);
+      copy.setAttribute("data-fd-bb-clone", "1");
+      return bindSelect(copy, row, card);
+    }}
+    return renderRow(row);
+  }}
+  function emptyLine() {{
+    var empty = document.createElement("p");
+    empty.className = "fd-bb-empty";
+    empty.textContent = "No early inflections this Refresh.";
+    return empty;
+  }}
+  function paintFiltered(grid, matches) {{
+    if (!grid) return 0;
+    var nodes = [];
+    for (var i = 0; i < matches.length; i++) {{
+      var node = null;
+      try {{ node = materialize(matches[i]); }} catch (eMat) {{ node = null; }}
+      if (node) nodes.push(node);
+    }}
+    grid.innerHTML = "";
+    if (!matches.length) {{
+      grid.appendChild(emptyLine());
+      return 0;
+    }}
+    for (var j = 0; j < nodes.length; j++) grid.appendChild(nodes[j]);
+    return nodes.length;
   }}
   function hideLegacy() {{
     var a = $(LEGACY_BO), b = $(LEGACY_BD);
@@ -1680,21 +2001,32 @@ def strip_js() -> str:
     }}
   }}
   function show(kind) {{
-    hideNativeViews();
-    hideLegacy();
-    var data = db();
-    if (kind === "breakout" || kind === "breakdown") {{
-      var pane = $(kind === "breakout" ? VIEW_BO : VIEW_BD);
-      var grid = $(kind === "breakout" ? GRID_BO : GRID_BD);
-      if (pane) pane.classList.remove("hide");
-      fillGrid(grid, data[kind] || []);
-      document.body.setAttribute("data-view", kind);
-      document.body.setAttribute("data-fd-bb", kind);
-      syncNav(kind);
-      return;
-    }}
-    document.body.removeAttribute("data-fd-bb");
-    syncNav("");
+    try {{
+      hideNativeViews();
+      hideLegacy();
+      if (kind === "breakout" || kind === "breakdown") {{
+        var pane = $(kind === "breakout" ? VIEW_BO : VIEW_BD);
+        var grid = $(kind === "breakout" ? GRID_BO : GRID_BD);
+        if (pane) pane.classList.remove("hide");
+        var universe = [];
+        try {{ universe = momUniverse(); }} catch (eU) {{ universe = []; }}
+        if (universe.length) {{
+          paintFiltered(grid, filterUniverse(universe, kind));
+        }} else {{
+          var data = {{ breakout: [], breakdown: [] }};
+          try {{ data = db(); }} catch (eD) {{ data = {{ breakout: [], breakdown: [] }}; }}
+          fillGrid(grid, (data && data[kind]) || []);
+        }}
+        if (document.body) {{
+          document.body.setAttribute("data-view", kind);
+          document.body.setAttribute("data-fd-bb", kind);
+        }}
+        syncNav(kind);
+        return;
+      }}
+      if (document.body) document.body.removeAttribute("data-fd-bb");
+      syncNav("");
+    }} catch (eShow) {{}}
   }}
   window.__FD_BB_SHOW__ = show;
   window.__FD_BB_SYNC_NAV__ = syncNav;
@@ -1773,6 +2105,7 @@ def strip_js() -> str:
   }}
   installSetViewBridge();
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", installSetViewBridge);
+  window.__FD_BB_BOUND__ = BB_VER;
 }})();
 """.strip()
 
@@ -1865,6 +2198,27 @@ def _ensure_css(html_text: str) -> str:
     if "</head>" in html_text:
         return html_text.replace("</head>", css + "</head>", 1)
     return css + html_text
+
+
+_SHOW_ASSIGN_RE = re.compile(r"window\.__FD_BB_SHOW__\s*=")
+
+
+def show_binder_assigned(html_text: str) -> bool:
+    """PR #31 nav integrity: Breakout/Breakdown nav needs ``window.__FD_BB_SHOW__ =``.
+
+    A call such as ``if(window.__FD_BB_SHOW__)window.__FD_BB_SHOW__(v)`` does not count.
+    Pages without those nav buttons are not gated.
+    """
+    text = html_text or ""
+    has_bo = _has_nav_button(
+        text, view="breakout", data_attr="data-fd-breakout", btn_id=NAV_BREAKOUT_ID
+    )
+    has_bd = _has_nav_button(
+        text, view="breakdown", data_attr="data-fd-breakdown", btn_id=NAV_BREAKDOWN_ID
+    )
+    if not has_bo and not has_bd:
+        return True
+    return _SHOW_ASSIGN_RE.search(text) is not None
 
 
 def _has_nav_button(html_text: str, *, view: str, data_attr: str, btn_id: str) -> bool:
@@ -2188,4 +2542,6 @@ def ensure_embedded(html_text: str, ranked: Mapping[str, Any] | None = None) -> 
     text = _ensure_side_note(text, VIEW_BREAKOUT_ID, GRID_BREAKOUT_ID)
     text = _ensure_side_note(text, VIEW_BREAKDOWN_ID, GRID_BREAKDOWN_ID)
     text = _ensure_js(text)
+    if not show_binder_assigned(text):
+        text = _ensure_js(text)
     return text

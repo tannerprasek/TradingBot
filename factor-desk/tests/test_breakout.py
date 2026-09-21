@@ -1330,6 +1330,293 @@ console.log(JSON.stringify(report));
             self.assertIn("names", snap)
 
 
+def _jsdom_module() -> Path | None:
+    node = shutil.which("node")
+    if not node:
+        return None
+    jsdom_root = Path("/tmp/fd-jsdom")
+    jsdom_mod = jsdom_root / "node_modules" / "jsdom"
+    if not jsdom_mod.is_dir():
+        jsdom_root.mkdir(parents=True, exist_ok=True)
+        npm = shutil.which("npm")
+        if not npm:
+            return None
+        subprocess.run(
+            [npm, "install", "--prefix", str(jsdom_root), "jsdom@24"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    return jsdom_mod
+
+
+def _run_jsdom(html: str, body: str) -> dict:
+    jsdom_mod = _jsdom_module()
+    if jsdom_mod is None:
+        raise unittest.SkipTest("node/jsdom not installed")
+    with tempfile.TemporaryDirectory() as tmp:
+        page = Path(tmp) / "page.html"
+        runner = Path(tmp) / "run.js"
+        page.write_text(html, encoding="utf-8")
+        runner.write_text(
+            f"""
+const {{ JSDOM }} = require({json.dumps(str(jsdom_mod))});
+const fs = require("fs");
+const html = fs.readFileSync({json.dumps(str(page))}, "utf8");
+const dom = new JSDOM(html, {{ runScripts: "dangerously", url: "http://127.0.0.1/factorbook.html" }});
+const window = dom.window;
+const document = window.document;
+{body}
+""",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            ["node", str(runner)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr or proc.stdout)
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+class PortableMomFilterTests(unittest.TestCase):
+    """Breakout/Breakdown is a filter over the live Momentum cards, not a second list."""
+
+    def _page(self, *, mom: str, cards_js: str, db: str) -> str:
+        live = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<nav id="topnav">
+  <button class="btn" data-view="home">Home</button>
+  <button class="btn">Momentum Down</button>
+  <button type="button" class="btn nav-btn" id="fd-nav-breakout" data-view="breakout" data-fd-breakout="1">Breakout</button>
+  <button type="button" class="btn nav-btn" id="fd-nav-breakdown" data-view="breakdown" data-fd-breakdown="1">Breakdown</button>
+</nav>
+{mom}
+<div id="view-breakout" class="view-pane hide"><div class="ph">Breakout</div><div class="grid dense" id="breakout-grid"></div></div>
+<div id="view-breakdown" class="view-pane hide"><div class="ph">Breakdown</div><div class="grid dense" id="breakdown-grid"></div></div>
+<script type="application/json" id="fd-breakout-db">{db}</script>
+<script>
+window.__cardHTMLCalls = [];
+{cards_js}
+function cardHTML(c) {{
+  c = c || {{}};
+  window.__cardHTMLCalls.push(c.t || c.d || "");
+  var t = c.t || c.d || "";
+  return '<article class="card" data-t="'+t+'">CARDHTML '+t+'</article>';
+}}
+</script>
+</body></html>"""
+        # ranked=None keeps the embedded db. A stale or empty binder must not
+        # decide the pane once Momentum cards are on the page.
+        return bo.ensure_embedded(cr.ensure_embedded(live), None)
+
+    def test_show_binder_assigned_after_ensure(self) -> None:
+        bare = (
+            '<button id="fd-nav-breakout" data-view="breakout">Breakout</button>'
+            '<button id="fd-nav-breakdown" data-view="breakdown">Breakdown</button>'
+            'if(window.__FD_BB_SHOW__)window.__FD_BB_SHOW__("breakout");'
+        )
+        self.assertFalse(bo.show_binder_assigned(bare))
+        self.assertTrue(bo.show_binder_assigned(bare + "\nwindow.__FD_BB_SHOW__ = show;"))
+        html = """<!DOCTYPE html><html><body>
+<nav><button>Momentum Down</button></nav>
+</body></html>"""
+        out = bo.ensure_embedded(html, {"breakout": [], "breakdown": []})
+        self.assertTrue(bo.show_binder_assigned(out))
+        self.assertRegex(out, r"window\.__FD_BB_SHOW__\s*=")
+        self.assertIn("window.__FD_BB_SHOW__ = show;", out)
+        js = bo.strip_js()
+        self.assertIn("function momUniverse", js)
+        self.assertIn("cloneNode", js)
+        self.assertIn("__FD_BB_MOM_FILTER__", js)
+        self.assertNotIn("__FD_BB_PORTABLE_FIX__", js)
+        self.assertNotIn("denseHTML", js)
+        show = js.split("function show", 1)[1].split("window.__FD_BB_SHOW__ = show", 1)[0]
+        self.assertLess(show.find("momUniverse"), show.find("fillGrid"))
+        self.assertGreater(
+            js.rfind("window.__FD_BB_BOUND__ = BB_VER"),
+            js.find("window.__FD_BB_SHOW__ = show"),
+        )
+
+    def test_jsdom_mom_universe_renders_matching_portable_cards(self) -> None:
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        mom = """
+<div id="view-mom-up">
+  <div class="filt-bar"><button type="button" class="fchip on">All</button></div>
+  <div class="grid dense" id="mom-up-grid">
+    <article class="card" data-t="ALPHA" data-status="Strong momentum">
+      <header><h2>ALPHA</h2><span class="sc">8</span></header>
+      <span class="status">Strong momentum</span>
+      <span data-mom-score-d10="4">+4</span>
+      <span class="badge" data-key="mom-streak">↑3d&gt;5</span>
+      <div class="stats"><span>RS63 4.0%</span></div>
+      <span class="mom-chrome">MOM-CHROME</span>
+    </article>
+    <article class="card" data-t="BETA" data-status="Constructive">
+      <header><h2>BETA</h2><span class="sc">9</span></header>
+      <span class="status">Constructive</span>
+      <span data-mom-score-d10="5">+5</span>
+      <span class="badge" data-key="mom-streak">↑1d&gt;5</span>
+      <div class="stats"><span>RS63 2.0%</span></div>
+      <span class="mom-chrome">MOM-CHROME</span>
+    </article>
+    <article class="card" data-t="GAMMA" data-status="Strong momentum">
+      <header><h2>GAMMA</h2><span class="sc">8</span></header>
+      <span class="badge" data-key="mom-streak">↑3d&gt;5</span>
+      <div class="stats"><span>RS63 4.0%</span></div>
+    </article>
+    <article class="card" data-t="DELTA">
+      <header><h2>DELTA</h2><span class="sc">12</span></header>
+      <span data-mom-score-d10="6">+6</span>
+      <span class="badge" data-key="mom-streak">↑2d&gt;5</span>
+      <div class="stats"><span>RS63 4.0%</span></div>
+    </article>
+  </div>
+</div>
+<div id="view-mom-down">
+  <div class="grid dense" id="mom-down-grid">
+    <article class="card" data-t="EPS">
+      <header><h2>EPS</h2><span class="sc">4</span></header>
+      <span data-mom-score-d10="-5">−5</span>
+      <span class="badge" data-key="mom-streak">↓4d&lt;5</span>
+      <div class="stats"><span>RS63 -4.0%</span></div>
+      <span class="mom-chrome">MOM-CHROME</span>
+    </article>
+    <article class="card" data-t="ZETA">
+      <header><h2>ZETA</h2><span class="sc">4</span></header>
+      <span data-mom-score-d10="-1">−1</span>
+      <span class="badge" data-key="mom-streak">↓2d&lt;5</span>
+      <div class="stats"><span>RS63 -4.0%</span></div>
+    </article>
+  </div>
+</div>
+"""
+        cards_js = """
+window.MOM = { up: [{t:"OBJ", d:"OBJ", ticker:"OBJ US Equity", score:8, mom_score:8, mom_score_d10:6, mom_streak:4, mom_streak_side:"above", rs63:0.04}], down: [] };
+"""
+        db = '{"breakout":[{"t":"GHOST","ticker":"GHOST US Equity","score":9}],"breakdown":[]}'
+        html = self._page(mom=mom, cards_js=cards_js, db=db)
+        report = _run_jsdom(
+            html,
+            r"""
+window.MOM.up.push({
+  t: "BOOM",
+  get mom_score() { throw new Error("boom"); },
+  mom_score_d10: 4,
+  mom_streak: 3,
+  mom_streak_side: "above",
+  rs63: 0.2
+});
+function names(id) {
+  return Array.from(document.querySelectorAll("#" + id + " article.card")).map(function (el) {
+    return el.getAttribute("data-t");
+  });
+}
+window.__FD_BB_SHOW__("breakout");
+const boNames = names("breakout-grid");
+const boClone = Array.from(document.querySelectorAll("#breakout-grid article.card")).filter(function (el) {
+  return el.getAttribute("data-fd-bb-clone") === "1";
+}).map(function (el) { return el.getAttribute("data-t"); });
+const boText = (document.getElementById("breakout-grid").textContent || "");
+const boEmpty = !!document.querySelector("#breakout-grid .fd-bb-empty");
+window.__FD_BB_SHOW__("breakdown");
+const bdNames = names("breakdown-grid");
+const bdText = (document.getElementById("breakdown-grid").textContent || "");
+const bdEmpty = !!document.querySelector("#breakdown-grid .fd-bb-empty");
+const momStill = names("mom-up-grid");
+console.log(JSON.stringify({
+  show: typeof window.__FD_BB_SHOW__,
+  boNames: boNames,
+  boClone: boClone,
+  boEmpty: boEmpty,
+  boChrome: boText.indexOf("MOM-CHROME") >= 0,
+  boStatus: boText.indexOf("Strong momentum") >= 0,
+  bdNames: bdNames,
+  bdEmpty: bdEmpty,
+  bdChrome: bdText.indexOf("MOM-CHROME") >= 0,
+  cardHTMLCalls: window.__cardHTMLCalls || [],
+  momStill: momStill,
+  ghost: boText.indexOf("GHOST") >= 0 || bdText.indexOf("GHOST") >= 0
+}));
+""",
+        )
+        self.assertEqual(report["show"], "function", report)
+        self.assertEqual(sorted(report["boNames"]), ["ALPHA", "BETA", "OBJ"], report)
+        self.assertEqual(sorted(report["boClone"]), ["ALPHA", "BETA"], report)
+        self.assertFalse(report["boEmpty"], report)
+        self.assertTrue(report["boChrome"], report)
+        self.assertTrue(report["boStatus"], report)
+        self.assertNotIn("GAMMA", report["boNames"])
+        self.assertNotIn("DELTA", report["boNames"])
+        self.assertNotIn("BOOM", report["boNames"])
+        self.assertEqual(report["bdNames"], ["EPS"], report)
+        self.assertFalse(report["bdEmpty"], report)
+        self.assertTrue(report["bdChrome"], report)
+        self.assertNotIn("ZETA", report["bdNames"])
+        self.assertFalse(report["ghost"], report)
+        self.assertIn("OBJ", report["cardHTMLCalls"], report)
+        self.assertIn("ALPHA", report["momStill"])
+
+    def test_jsdom_zero_mom_matches_shows_empty_only(self) -> None:
+        if _jsdom_module() is None:
+            self.skipTest("node/jsdom not installed")
+        mom = """
+<div id="view-mom-up">
+  <div class="grid dense" id="mom-up-grid">
+    <article class="card" data-t="DELTA">
+      <header><h2>DELTA</h2><span class="sc">12</span></header>
+      <span data-mom-score-d10="6">+6</span>
+      <span class="badge" data-key="mom-streak">↑2d&gt;5</span>
+      <div class="stats"><span>RS63 4.0%</span></div>
+    </article>
+  </div>
+</div>
+<div id="view-mom-down">
+  <div class="grid dense" id="mom-down-grid">
+    <article class="card" data-t="ZETA">
+      <header><h2>ZETA</h2><span class="sc">4</span></header>
+      <span data-mom-score-d10="-1">−1</span>
+      <span class="badge" data-key="mom-streak">↓2d&lt;5</span>
+      <div class="stats"><span>RS63 -4.0%</span></div>
+    </article>
+  </div>
+</div>
+"""
+        db = '{"breakout":[{"t":"GHOST","ticker":"GHOST US Equity","score":9}],"breakdown":[{"t":"GHOST","score":3}]}'
+        html = self._page(mom=mom, cards_js="window.MOM = { up: [], down: [] };", db=db)
+        report = _run_jsdom(
+            html,
+            r"""
+function pack(id) {
+  const grid = document.getElementById(id);
+  return {
+    empty: (grid.querySelector(".fd-bb-empty") || {}).textContent || "",
+    cards: Array.from(grid.querySelectorAll("article.card")).map(function (el) { return el.getAttribute("data-t"); }),
+    ghost: (grid.textContent || "").indexOf("GHOST") >= 0
+  };
+}
+window.__FD_BB_SHOW__("breakout");
+const bo = pack("breakout-grid");
+window.__FD_BB_SHOW__("breakdown");
+const bd = pack("breakdown-grid");
+console.log(JSON.stringify({ bo: bo, bd: bd, show: typeof window.__FD_BB_SHOW__ }));
+""",
+        )
+        self.assertEqual(report["show"], "function")
+        self.assertEqual(report["bo"]["cards"], [])
+        self.assertEqual(report["bo"]["empty"], "No early inflections this Refresh.")
+        self.assertFalse(report["bo"]["ghost"])
+        self.assertEqual(report["bd"]["cards"], [])
+        self.assertEqual(report["bd"]["empty"], "No early inflections this Refresh.")
+        self.assertFalse(report["bd"]["ghost"])
+
+
 class PaperNavIgnoreTests(unittest.TestCase):
     def test_native_views_omit_paper_and_kindof_returns_empty(self) -> None:
         self.assertNotIn("view-paper", bo.NATIVE_VIEW_IDS)
